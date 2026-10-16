@@ -80,16 +80,39 @@ fn pipes() -> std::sync::MutexGuard<'static, Pipes> {
     PIPES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Identical messages are logged a few times, then suppressed: per-frame calls
+/// (RunFrame and friends) would otherwise bury everything else in the log.
+const TRACE_REPEATS: u32 = 3;
 fn trace(message: impl std::fmt::Display) {
     // Ignore a closed stderr rather than unwinding across the FFI boundary.
     static START: OnceLock<std::time::Instant> = OnceLock::new();
+    static SEEN: Mutex<BTreeMap<String, u32>> = Mutex::new(BTreeMap::new());
     let secs = START
         .get_or_init(std::time::Instant::now)
         .elapsed()
         .as_secs_f32();
+    let message = message.to_string();
+    let count = {
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        // Bounded: a message with ever-changing text must not grow this forever.
+        if seen.len() > 4096 && !seen.contains_key(&message) {
+            seen.clear();
+        }
+        let count = seen.entry(message.clone()).or_insert(0);
+        *count += 1;
+        *count
+    };
+    if count > TRACE_REPEATS {
+        return;
+    }
+    let note = if count == TRACE_REPEATS {
+        " (repeats suppressed)"
+    } else {
+        ""
+    };
     let _ = writeln!(
         std::io::stderr().lock(),
-        "[steam-tui-client +{secs:.1}s] {message}"
+        "[steam-tui-client +{secs:.1}s] {message}{note}"
     );
 }
 fn unsupported(method: &str) -> ! {
