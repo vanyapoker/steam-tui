@@ -432,3 +432,18 @@ fn native_tf2_selects_valves_sdl2_classic_without_affecting_other_games_or_overr
         "compat"
     );
 }
+
+#[test]
+fn missing_execute_bit_is_fixed_for_elf_binaries_only() {
+    let fixture = Fixture::new();
+    let elf = fixture.0.join("game.x86_64");
+    fs::write(&elf, b"\x7fELF....").unwrap();
+    fs::set_permissions(&elf, fs::Permissions::from_mode(0o644)).unwrap();
+    make_game_executable(&elf).unwrap();
+    assert_eq!(fs::metadata(&elf).unwrap().permissions().mode() & 0o777, 0o755);
+    let text = fixture.0.join("notes.txt");
+    fs::write(&text, b"hello").unwrap();
+    fs::set_permissions(&text, fs::Permissions::from_mode(0o644)).unwrap();
+    make_game_executable(&text).unwrap();
+    assert!(require_executable(&text).is_err());
+}

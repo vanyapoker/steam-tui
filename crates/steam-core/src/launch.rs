@@ -333,6 +333,7 @@ fn resolve_app(game: &InstalledGame, app: &Node) -> Result<LaunchPlan> {
     if is_windows {
         plan = proton_plan(game, plan)?;
     } else {
+        make_game_executable(&plan.executable)?;
         require_executable(&plan.executable)?;
         // Source 1 TF2 uses SDL2's relative mouse API. Select Valve's shipped
         // SDL2 Classic through the runtime's supported compatibility option,
@@ -392,6 +393,26 @@ fn reject_steam(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+/// Some depots ship the launch binary without its executable bit; Steam's own
+/// client fixes that at launch. Only the game's own ELF binary, owned by this
+/// user, gets the execute bits that match its existing read bits.
+fn make_game_executable(path: &Path) -> Result<()> {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+    reject_steam(path)?;
+    let metadata = fs::metadata(path)?;
+    let mode = metadata.permissions().mode();
+    if !metadata.is_file() || mode & 0o111 != 0 || metadata.uid() != unsafe { libc::geteuid() } {
+        return Ok(());
+    }
+    let mut magic = [0u8; 4];
+    if fs::File::open(path)?.read_exact(&mut magic).is_err() || &magic != b"\x7fELF" {
+        return Ok(());
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(mode | ((mode & 0o444) >> 2)))?;
+    Ok(())
+}
+
 fn require_executable(path: &Path) -> Result<()> {
     reject_steam(path)?;
     let metadata = fs::metadata(path)?;
