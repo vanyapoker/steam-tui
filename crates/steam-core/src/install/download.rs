@@ -4,7 +4,7 @@ use super::{PauseGate, Result, check_cancel, failure, wait_while_paused};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use tokio_util::sync::CancellationToken;
 
-pub(super) const CONCURRENCY: usize = 8;
+pub(super) const CONCURRENCY: usize = 32;
 // Encrypted response, decrypted compressed bytes and output. Decoder working
 // memory is separately bounded by content's per-decoder 64 MiB window limit.
 pub(super) const BUFFER_BUDGET: usize = 64 * 1024 * 1024;
@@ -138,7 +138,7 @@ mod tests {
         let admitted = Cell::new(0);
         let finished = Cell::new(0);
         let download = run(
-            (0..16).map(|i| (i, 1)),
+            (0..CONCURRENCY * 2).map(|i| (i, 1)),
             &token,
             &gate,
             |i| {
@@ -169,7 +169,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(finished.get(), 16);
+        assert_eq!(finished.get(), CONCURRENCY * 2);
     }
 
     #[tokio::test]

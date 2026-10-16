@@ -190,8 +190,116 @@ struct ReusableChunk {
 /// Chunks checked per blocking resume-scan call; bounds the silence before the
 /// first progress report on a large file.
 const SCAN_WINDOW: usize = 32;
+/// Chunks (across files) gathered before they are scanned and downloaded together.
+const GROUP_CHUNKS: usize = 256;
+/// Minimum spacing of per-chunk progress reports.
+const CHUNK_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 const REUSE_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 const VERIFY_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+#[derive(Default)]
+struct Group {
+    /// Files not yet created in the stage.
+    prepare: Vec<usize>,
+    /// (file index, chunk range) windows to scan and download.
+    items: Vec<(usize, std::ops::Range<usize>)>,
+    chunks: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_group(
+    group: &mut Group,
+    client: &ContentClient,
+    session: &Arc<transaction::Session>,
+    layout: &Arc<Layout>,
+    cancel: &CancellationToken,
+    pause: &PauseGate,
+    progress: &mpsc::Sender<InstallProgress>,
+    status: &mut InstallProgress,
+    last_report: &mut std::time::Instant,
+) -> Result<()> {
+    let group = std::mem::take(group);
+    if group.items.is_empty() && group.prepare.is_empty() {
+        return Ok(());
+    }
+    wait_while_paused(pause, cancel).await?;
+    check_cancel(cancel)?;
+    let (s, l, token, items, prepare) = (
+        Arc::clone(session),
+        Arc::clone(layout),
+        cancel.clone(),
+        group.items.clone(),
+        group.prepare,
+    );
+    // One blocking call creates the files and decides, in parallel, which chunks
+    // are already valid; only the missing ones are downloaded.
+    let reused = blocking(move || {
+        for &file_index in &prepare {
+            s.prepare_file(&l.files[file_index].file)?;
+        }
+        let windows: Vec<_> = items
+            .iter()
+            .map(|(file_index, range)| (&l.files[*file_index].file, range.clone()))
+            .collect();
+        s.reuse_scan(&windows, &l.reuse, &token)
+    })
+    .await?;
+    let mut missing = Vec::new();
+    for ((file_index, range), flags) in group.items.iter().zip(&reused) {
+        let file = &layout.files[*file_index].file;
+        for (offset, chunk) in file.chunks[range.clone()].iter().enumerate() {
+            if flags[offset] {
+                status.total_download_bytes -= u64::from(chunk.compressed_size);
+                status.completed_bytes += u64::from(chunk.uncompressed_size);
+            } else {
+                let charge = 2 * chunk.compressed_size as usize + chunk.uncompressed_size as usize;
+                missing.push(((*file_index, range.start + offset), charge));
+            }
+        }
+    }
+    if last_report.elapsed() >= REUSE_REPORT_INTERVAL || missing.is_empty() {
+        status.message = "Verified/reused staged data".into();
+        report(progress, status);
+        *last_report = std::time::Instant::now();
+    }
+    download::run(
+        missing,
+        cancel,
+        pause,
+        |(file_index, chunk_index)| {
+            let token = cancel.clone();
+            let (s, l) = (Arc::clone(session), Arc::clone(layout));
+            async move {
+                let planned = &l.files[file_index];
+                let chunk = &planned.file.chunks[chunk_index];
+                let bytes = client.chunk(&planned.depot, chunk, &token).await?;
+                blocking(move || {
+                    check_cancel(&token)?;
+                    let file = &l.files[file_index].file;
+                    s.write_downloaded_chunk(&file.path, &file.chunks[chunk_index], &bytes)
+                })
+                .await?;
+                Ok((file_index, chunk_index))
+            }
+        },
+        |(file_index, chunk_index)| {
+            let file = &layout.files[file_index].file;
+            let chunk = &file.chunks[chunk_index];
+            status.downloaded_bytes += u64::from(chunk.compressed_size);
+            status.completed_bytes += u64::from(chunk.uncompressed_size);
+            if last_report.elapsed() >= CHUNK_REPORT_INTERVAL {
+                status.message = format!("Downloaded {}", file.path.display());
+                report(progress, status);
+                *last_report = std::time::Instant::now();
+            }
+        },
+    )
+    .await?;
+    status.message = "Downloaded".into();
+    report(progress, status);
+    *last_report = std::time::Instant::now();
+    Ok(())
+}
 
 /// Live counters shared between the verification worker threads and the async
 /// side, which polls them for progress reports.
@@ -540,82 +648,52 @@ async fn run_inner(
     blocking(move || s.preflight(&l, &token)).await?;
     check_cancel(cancel)?;
     status.phase = InstallPhase::Downloading;
+    // Files are grouped so many small files share one scan and one download
+    // pipeline instead of paying a blocking round trip and an idle pipeline each.
+    let mut group = Group::default();
+    let mut last_report = std::time::Instant::now();
     for (file_index, planned) in layout.files.iter().enumerate() {
         check_cancel(cancel)?;
         let file = &planned.file;
         if file.flags & (64 | 512) != 0 {
             continue;
         }
-        let s = Arc::clone(&session);
-        let l = Arc::clone(&layout);
-        blocking(move || s.prepare_file(&l.files[file_index].file)).await?;
+        group.prepare.push(file_index);
         let chunks = file.chunks.len();
-        let mut last_report = std::time::Instant::now();
-        let mut window_start = 0;
-        while window_start < chunks {
-            wait_while_paused(pause, cancel).await?;
-            check_cancel(cancel)?;
-            let window_end = (window_start + SCAN_WINDOW).min(chunks);
-            // One blocking call decides, in parallel, which chunks of the window
-            // are already valid; only the missing ones are downloaded.
-            let (s, l, token) = (Arc::clone(&session), Arc::clone(&layout), cancel.clone());
-            let reused = blocking(move || {
-                s.reuse_scan(
-                    &l.files[file_index].file,
-                    window_start..window_end,
-                    &l.reuse,
-                    &token,
+        let mut start = 0;
+        while start < chunks {
+            let end = (start + SCAN_WINDOW).min(chunks);
+            group.items.push((file_index, start..end));
+            group.chunks += end - start;
+            start = end;
+            if group.chunks >= GROUP_CHUNKS {
+                download_group(
+                    &mut group,
+                    &client,
+                    &session,
+                    &layout,
+                    cancel,
+                    pause,
+                    progress,
+                    status,
+                    &mut last_report,
                 )
-            })
-            .await?;
-            let mut missing = Vec::new();
-            for (offset, chunk) in file.chunks[window_start..window_end].iter().enumerate() {
-                if reused[offset] {
-                    status.total_download_bytes -= u64::from(chunk.compressed_size);
-                    status.completed_bytes += u64::from(chunk.uncompressed_size);
-                } else {
-                    let charge =
-                        2 * chunk.compressed_size as usize + chunk.uncompressed_size as usize;
-                    missing.push((window_start + offset, charge));
-                }
+                .await?;
             }
-            if last_report.elapsed() >= REUSE_REPORT_INTERVAL || missing.is_empty() {
-                status.message = format!("Verified/reused {}", file.path.display());
-                report(progress, status);
-            }
-            download::run(
-                missing,
-                cancel,
-                pause,
-                |chunk_index| {
-                    let client = &client;
-                    let token = cancel.clone();
-                    let (s, l) = (Arc::clone(&session), Arc::clone(&layout));
-                    async move {
-                        let chunk = &file.chunks[chunk_index];
-                        let bytes = client.chunk(&planned.depot, chunk, cancel).await?;
-                        blocking(move || {
-                            check_cancel(&token)?;
-                            let file = &l.files[file_index].file;
-                            s.write_downloaded_chunk(&file.path, &file.chunks[chunk_index], &bytes)
-                        })
-                        .await?;
-                        Ok(chunk_index)
-                    }
-                },
-                |chunk_index| {
-                    let chunk = &file.chunks[chunk_index];
-                    status.downloaded_bytes += u64::from(chunk.compressed_size);
-                    status.completed_bytes += u64::from(chunk.uncompressed_size);
-                    status.message = format!("Downloaded {}", file.path.display());
-                    report(progress, status);
-                },
-            )
-            .await?;
-            last_report = std::time::Instant::now();
-            window_start = window_end;
         }
     }
+    download_group(
+        &mut group,
+        &client,
+        &session,
+        &layout,
+        cancel,
+        pause,
+        progress,
+        status,
+        &mut last_report,
+    )
+    .await?;
     status.phase = InstallPhase::Verifying;
     status.verify_bytes_done = 0;
     status.verify_bytes_total = layout.verify_bytes();

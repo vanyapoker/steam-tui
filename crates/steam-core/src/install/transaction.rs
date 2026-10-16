@@ -504,25 +504,38 @@ impl Session {
         Ok(())
     }
 
-    /// Which chunks of `range` are already valid in the stage (or can be copied
-    /// from the old install), checked in parallel in one call instead of one
-    /// blocking round trip per chunk. Index `i` of the result is `range.start + i`.
+    /// Which chunks of each `(file, chunk range)` window are already valid
+    /// in the stage (or can be copied from the old install), checked in parallel
+    /// across all windows in one call. Result `[w][i]` is chunk `range.start + i`
+    /// of window `w`.
     pub(super) fn reuse_scan(
         &self,
-        file: &DepotFile,
-        range: std::ops::Range<usize>,
+        windows: &[(&DepotFile, std::ops::Range<usize>)],
         reuse: &std::collections::HashMap<[u8; 20], ReusableChunk>,
         cancel: &CancellationToken,
-    ) -> Result<Vec<bool>> {
-        let flags: Vec<AtomicBool> = range.clone().map(|_| AtomicBool::new(false)).collect();
-        parallel(range.len(), |index| {
+    ) -> Result<Vec<Vec<bool>>> {
+        let flags: Vec<Vec<AtomicBool>> = windows
+            .iter()
+            .map(|(_, range)| range.clone().map(|_| AtomicBool::new(false)).collect())
+            .collect();
+        let tasks: Vec<(usize, usize)> = windows
+            .iter()
+            .enumerate()
+            .flat_map(|(w, (_, range))| (0..range.len()).map(move |i| (w, i)))
+            .collect();
+        parallel(tasks.len(), |index| {
             super::check_cancel(cancel)?;
-            let chunk = &file.chunks[range.start + index];
+            let (w, i) = tasks[index];
+            let (file, range) = &windows[w];
+            let chunk = &file.chunks[range.start + i];
             let reused = self.reuse_chunk(&file.path, chunk, reuse.get(&chunk.id))?;
-            flags[index].store(reused, Ordering::Relaxed);
+            flags[w][i].store(reused, Ordering::Relaxed);
             Ok(())
         })?;
-        Ok(flags.into_iter().map(AtomicBool::into_inner).collect())
+        Ok(flags
+            .into_iter()
+            .map(|w| w.into_iter().map(AtomicBool::into_inner).collect())
+            .collect())
     }
 
     /// Hashes the complete staged file against the manifest SHA1, then applies the

@@ -522,6 +522,16 @@ fn cancellation_is_checked_between_buffers_of_one_large_file() {
     );
 }
 
+fn scan(
+    s: &Session,
+    file: &DepotFile,
+    range: std::ops::Range<usize>,
+    reuse: &HashMap<[u8; 20], ReusableChunk>,
+    token: &CancellationToken,
+) -> Result<Vec<bool>> {
+    Ok(s.reuse_scan(&[(file, range)], reuse, token)?.remove(0))
+}
+
 #[test]
 fn resume_scan_keeps_valid_chunks_and_rejects_corrupt_partial_or_missing_ones() {
     let temp = Temp::new();
@@ -543,18 +553,18 @@ fn resume_scan_keeps_valid_chunks_and_rejects_corrupt_partial_or_missing_ones() 
             .unwrap();
     }
     assert_eq!(
-        s.reuse_scan(&descriptor, 0..5, &none, &token).unwrap(),
+        scan(&s, &descriptor, 0..5, &none, &token).unwrap(),
         [true, false, true, false, false]
     );
     // Sub-ranges are indexed from their start.
     assert_eq!(
-        s.reuse_scan(&descriptor, 1..4, &none, &token).unwrap(),
+        scan(&s, &descriptor, 1..4, &none, &token).unwrap(),
         [false, true, false]
     );
     // A torn/corrupted write is not trusted: it is detected and refetched.
     flip_byte(&s.stage.join("content/resumed"), 21);
     assert_eq!(
-        s.reuse_scan(&descriptor, 0..3, &none, &token).unwrap(),
+        scan(&s, &descriptor, 0..3, &none, &token).unwrap(),
         [true, false, false]
     );
     assert!(
@@ -570,7 +580,7 @@ fn resume_scan_keeps_valid_chunks_and_rejects_corrupt_partial_or_missing_ones() 
         .set_len(12)
         .unwrap();
     assert_eq!(
-        s.reuse_scan(&descriptor, 0..2, &none, &token).unwrap(),
+        scan(&s, &descriptor, 0..2, &none, &token).unwrap(),
         [true, false]
     );
     // The previous install supplies unchanged chunks, found through the reuse map.
@@ -586,7 +596,7 @@ fn resume_scan_keeps_valid_chunks_and_rejects_corrupt_partial_or_missing_ones() 
         },
     );
     assert_eq!(
-        s.reuse_scan(&descriptor, 3..5, &reuse, &token).unwrap(),
+        scan(&s, &descriptor, 3..5, &reuse, &token).unwrap(),
         [true, false]
     );
     assert!(
@@ -595,7 +605,7 @@ fn resume_scan_keeps_valid_chunks_and_rejects_corrupt_partial_or_missing_ones() 
     );
     let cancelled = CancellationToken::new();
     cancelled.cancel();
-    assert!(s.reuse_scan(&descriptor, 0..5, &none, &cancelled).is_err());
+    assert!(scan(&s, &descriptor, 0..5, &none, &cancelled).is_err());
 }
 
 #[test]
