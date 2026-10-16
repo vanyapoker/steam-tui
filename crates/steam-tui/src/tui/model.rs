@@ -257,6 +257,8 @@ pub(super) enum Action {
     CloudSync,
     ResolveCloud,
     News,
+    /// Open or reload the achievements viewer of the selected game.
+    Achievements,
     StartInstall,
     CheckDestination,
     CancelInstall,
@@ -297,9 +299,11 @@ pub(super) struct Model {
     /// Hit targets from the last frame, including its filter, scroll and divider.
     pub library_hits: Vec<(Rect, usize)>,
     pub news: Option<NewsView>,
+    pub achievements: Option<super::achievements::AchievementsView>,
     pub cloud_conflicts: Option<CloudConflicts>,
     pub cloud_conflict_queue: VecDeque<CloudConflicts>,
     news_request: u64,
+    achievements_request: u64,
     last_library_click: Option<(u32, Instant)>,
     pub friends: Vec<Friend>,
     pub friend_order: Vec<usize>,
@@ -390,9 +394,11 @@ impl Model {
             library_rows: 1,
             library_hits: Vec::new(),
             news: None,
+            achievements: None,
             cloud_conflicts: None,
             cloud_conflict_queue: VecDeque::new(),
             news_request: 0,
+            achievements_request: 0,
             last_library_click: None,
             friends: Vec::new(),
             friend_order: Vec::new(),
@@ -925,6 +931,27 @@ impl Model {
         Action::News
     }
 
+    fn open_achievements(&mut self) -> Action {
+        let Some(game) = self.selected_game() else {
+            return Action::None;
+        };
+        let (app_id, name) = (game.app_id, game.name.clone());
+        let language = game
+            .installed
+            .as_ref()
+            .map(|g| g.language.clone())
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| "english".into());
+        self.achievements_request = self.achievements_request.wrapping_add(1);
+        self.achievements = Some(super::achievements::AchievementsView::new(
+            self.achievements_request,
+            app_id,
+            name,
+            language,
+        ));
+        Action::Achievements
+    }
+
     pub fn mouse(&mut self, event: MouseEvent) -> Action {
         self.mouse_at(event, Instant::now())
     }
@@ -940,6 +967,15 @@ impl Model {
         };
         if self.modal.is_some() || self.help || self.backend_view || self.cloud_conflicts.is_some()
         {
+            return Action::None;
+        }
+        if let Some(view) = &mut self.achievements {
+            match event.kind {
+                MouseEventKind::ScrollDown => view.step(3),
+                MouseEventKind::ScrollUp => view.step(-3),
+                MouseEventKind::Down(MouseButton::Right) => self.achievements = None,
+                _ => {}
+            }
             return Action::None;
         }
         if let Some(news) = &mut self.news {
@@ -1021,6 +1057,32 @@ impl Model {
                 }
                 _ => {}
             }
+            return Action::None;
+        }
+        if let Some(view) = &mut self.achievements {
+            match key.code {
+                KeyCode::Char('q') => return Action::Quit,
+                KeyCode::Esc | KeyCode::Char('a') => {
+                    self.achievements = None;
+                    return Action::None;
+                }
+                KeyCode::Down | KeyCode::Char('j') => view.step(1),
+                KeyCode::Up | KeyCode::Char('k') => view.step(-1),
+                KeyCode::PageDown => view.step(10),
+                KeyCode::PageUp => view.step(-10),
+                KeyCode::Home => view.selected = 0,
+                KeyCode::End => view.selected = usize::MAX,
+                KeyCode::Char('s') => view.cycle_sort(),
+                KeyCode::Char('S') => view.flip(),
+                KeyCode::Char('f') => view.cycle_filter(),
+                KeyCode::Char('r') => {
+                    view.result = None;
+                    return Action::Achievements;
+                }
+                _ => {}
+            }
+            let last = view.visible().len().saturating_sub(1);
+            view.selected = view.selected.min(last);
             return Action::None;
         }
         if let Some(news) = &mut self.news {
@@ -1139,6 +1201,7 @@ impl Model {
             KeyCode::Char('q') => return Action::Quit,
             KeyCode::Char('r') => return Action::Refresh,
             KeyCode::Char('n') => return self.open_news(),
+            KeyCode::Char('a') => return self.open_achievements(),
             KeyCode::Enter => {
                 let backend = if key.modifiers.contains(KeyModifiers::CONTROL)
                     || self

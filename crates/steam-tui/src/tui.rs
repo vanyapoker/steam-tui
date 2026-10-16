@@ -1,3 +1,4 @@
+mod achievements;
 mod model;
 mod reconnect;
 mod render;
@@ -111,6 +112,10 @@ enum JobEvent {
     News {
         request: u64,
         result: Result<Vec<steam_core::news::NewsItem>, String>,
+    },
+    Achievements {
+        request: u64,
+        result: Result<steam_core::achievements::Achievements, String>,
     },
     /// Provisional rows (installed inventory, then cached catalog) sent before
     /// the live catalog while the model is still loading.
@@ -1095,6 +1100,23 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                         }));
                                     }
                                 }
+                                Action::Achievements => {
+                                    if let Some(view) = &model.achievements {
+                                        let (request, app_id, language) = (view.request, view.app_id, view.language.clone());
+                                        let updates = job_tx.clone();
+                                        if let Some(connection) = connection.clone() {
+                                            workers.push(tokio::task::spawn_local(async move {
+                                                let result = steam_core::achievements::fetch(&connection, app_id, &language).await;
+                                                let _ = updates.send(JobEvent::Achievements { request, result }).await;
+                                            }));
+                                        } else {
+                                            let _ = updates.try_send(JobEvent::Achievements {
+                                                request,
+                                                result: Err("Sign in (steam-tui login) and go online to see achievements".into()),
+                                            });
+                                        }
+                                    }
+                                }
                                 Action::Refresh => {
                                     let broken = online
                                         && (connection.is_none() || !live.friends_open || !live.notifications_open);
@@ -1267,6 +1289,12 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                             model.cloud_last.insert(app_id, if ok && !model.cloud_conflicts.as_ref().is_some_and(|m| m.game.app_id == app_id) && !model.cloud_conflict_queue.iter().any(|m| m.game.app_id == app_id) { CloudResult::Ok } else if ok { CloudResult::Conflicts } else { CloudResult::Failed });
                             let games = model.games.iter().filter(|g| g.app_id == app_id).filter_map(|g| g.installed.clone()).collect();
                             spawn_badges(games, account.as_deref(), connection.as_ref().map(|c| c.steam_id().account_id()), job_tx.clone(), &mut workers);
+                        }
+                        JobEvent::Achievements { request, result } => {
+                            if let Some(view) = &mut model.achievements && view.request == request {
+                                view.result = Some(result);
+                                view.reselect(None);
+                            }
                         }
                         JobEvent::News { request, result } => {
                             if let Some(news) = &mut model.news && news.request == request {

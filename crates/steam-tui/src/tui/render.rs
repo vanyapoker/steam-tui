@@ -23,7 +23,7 @@ use super::theme::{
 /// One styled run of text; lines are built from these and truncated by display width.
 type Seg = (String, Style);
 
-const HELP: &str = "LIBRARY\nUp / Down     Select game (any focus)\nLMB           Select the clicked game; double-click launches; wheel moves selection\nn / RMB       Game changelog / developer updates (Esc closes)\nHome / End    First / last game\nEnter         Installed: launch (VAC: Valve host; others: built-in); not installed: choose destination\nCtrl+Enter    Launch installed game using Valve host (enhanced keyboard terminal)\ni / u         Install selected game / update installed game\nv             Cycle All / Installed / Not installed\n1 / 2 / 3 / 4 Sort by the column headings Name¹ Size² Last³ Played⁴\ns / S         Cycle sort / reverse direction (unknowns last; shown as sort: in the title)\n/             Filter library names in the table; type to filter\nf             Pin / unpin the selected game at the top (★)\n              Sort, filter, pins and offline-friends toggle are remembered\nEsc           Clear filter; Enter finishes filter editing\nC             Steam Cloud sync of the selected installed game: download newer saves, then upload local changes (blocked while it runs)\n              Launching always downloads cloud saves first (never uploads); conflicts keep the local file, backups go to ~/.local/state/steam-tui/cloud/backup\n              Conflict picker: l local / r cloud; Enter confirms this file; Esc keeps both\nb             Backend traffic: exactly what the built-in Steam backend sends to / receives from Steam (message ids, names, sizes, hex head, protobuf fields); x clears\nINSTALL DESTINATION\nUp / Down     Select library (available space shown)\nn             Enter custom library path (new installs only)\nEnter         Confirm destination / check custom path\nEsc           Cancel modal / stop editing custom path\nINSTALL PROGRESS\np             Pause / resume the download; the job stays alive, no new destination step\nc             Cancel safely (also while paused); retained staging resumes next install\n              Install panel: phase, bar, verified and downloaded bytes,\n              download speed, ETA and elapsed time (paused time excluded)\n              The game's State column shows ⬇ percent, or ⏸ percent while paused\n              One install/update job at a time; no Steam required\nFRIENDS\nPgUp / PgDn   Page friends (the notification feed when it has focus)\no             Show / hide offline friends\nNOTIFICATIONS\nTab           Focus the feed (Library → Friends → Notifications)\nj / k         Scroll the focused feed; PgUp / PgDn page it\nx             Clear the feed (the count badges are Steam's and stay)\n              Live: new items appear on top, ● marks those not yet seen\n              Badges show pending trade offers, messages, items, gifts, invites\n              Only pushes received while running are listed; history cannot be fetched\nNAVIGATION\nTab           Switch focused pane (Shift-Tab goes back)\nj / k         Move within focused pane\nr             Refresh library/update metadata and friend presence\n? / F1        Toggle this help\nq / Ctrl-C    Quit; safely wait for installer (q is filter/path text while typing)\nHELP\nUp / Down     Scroll this help on small terminals\nEsc / ? / F1  Close help\nMARKERS\nOrange names  Automatic Valve host: TF2, Dota 2, CS2, Deadlock\n⚛             Proton: Windows build run through Proton (needs Proton + prefix for direct launch)\nλ             Native Linux build\n(blank)       Platform not known yet\n↻             Library title: live owned library is still refreshing (rows are local or cached)\n☁             Steam Cloud column (installed games with cloud saves): dim ☁ never synced · green ☁ synced · cyan ↑ local saves not uploaded (press C) · yellow ◐◓◑◒ syncing · red ✗ last sync failed or had conflicts\nTags          ✓ current · ↑ update · blocked · not installed · ? unknown\nNOTES\nDates are UTC (feed times are local); ? means metadata is unavailable.\nBlocked games show their reason in the status bar when selected.\nUpdate status: update / current / unknown / unavailable.\nDirect launch cannot bypass DRM or guarantee Steam-free compatibility.\nUpdates stay in their existing library; close Steam before installing.\nUntrusted install scripts are not executed automatically.\nFriends login uses saved credentials; run `steam-tui login` to sign in.";
+const HELP: &str = "LIBRARY\nUp / Down     Select game (any focus)\nLMB           Select the clicked game; double-click launches; wheel moves selection\nn / RMB       Game changelog / developer updates (Esc closes)\na             Achievements of the selected game: unlocked state and date, rarity; s / S sort (status, name, rarity, date) and reverse, f filter all / unlocked / locked, r reload\nHome / End    First / last game\nEnter         Installed: launch (VAC: Valve host; others: built-in); not installed: choose destination\nCtrl+Enter    Launch installed game using Valve host (enhanced keyboard terminal)\ni / u         Install selected game / update installed game\nv             Cycle All / Installed / Not installed\n1 / 2 / 3 / 4 Sort by the column headings Name¹ Size² Last³ Played⁴\ns / S         Cycle sort / reverse direction (unknowns last; shown as sort: in the title)\n/             Filter library names in the table; type to filter\nf             Pin / unpin the selected game at the top (★)\n              Sort, filter, pins and offline-friends toggle are remembered\nEsc           Clear filter; Enter finishes filter editing\nC             Steam Cloud sync of the selected installed game: download newer saves, then upload local changes (blocked while it runs)\n              Launching always downloads cloud saves first (never uploads); conflicts keep the local file, backups go to ~/.local/state/steam-tui/cloud/backup\n              Conflict picker: l local / r cloud; Enter confirms this file; Esc keeps both\nb             Backend traffic: exactly what the built-in Steam backend sends to / receives from Steam (message ids, names, sizes, hex head, protobuf fields); x clears\nINSTALL DESTINATION\nUp / Down     Select library (available space shown)\nn             Enter custom library path (new installs only)\nEnter         Confirm destination / check custom path\nEsc           Cancel modal / stop editing custom path\nINSTALL PROGRESS\np             Pause / resume the download; the job stays alive, no new destination step\nc             Cancel safely (also while paused); retained staging resumes next install\n              Install panel: phase, bar, verified and downloaded bytes,\n              download speed, ETA and elapsed time (paused time excluded)\n              The game's State column shows ⬇ percent, or ⏸ percent while paused\n              One install/update job at a time; no Steam required\nFRIENDS\nPgUp / PgDn   Page friends (the notification feed when it has focus)\no             Show / hide offline friends\nNOTIFICATIONS\nTab           Focus the feed (Library → Friends → Notifications)\nj / k         Scroll the focused feed; PgUp / PgDn page it\nx             Clear the feed (the count badges are Steam's and stay)\n              Live: new items appear on top, ● marks those not yet seen\n              Badges show pending trade offers, messages, items, gifts, invites\n              Only pushes received while running are listed; history cannot be fetched\nNAVIGATION\nTab           Switch focused pane (Shift-Tab goes back)\nj / k         Move within focused pane\nr             Refresh library/update metadata and friend presence\n? / F1        Toggle this help\nq / Ctrl-C    Quit; safely wait for installer (q is filter/path text while typing)\nHELP\nUp / Down     Scroll this help on small terminals\nEsc / ? / F1  Close help\nMARKERS\nOrange names  Automatic Valve host: TF2, Dota 2, CS2, Deadlock\n⚛             Proton: Windows build run through Proton (needs Proton + prefix for direct launch)\nλ             Native Linux build\n(blank)       Platform not known yet\n↻             Library title: live owned library is still refreshing (rows are local or cached)\n☁             Steam Cloud column (installed games with cloud saves): dim ☁ never synced · green ☁ synced · cyan ↑ local saves not uploaded (press C) · yellow ◐◓◑◒ syncing · red ✗ last sync failed or had conflicts\nTags          ✓ current · ↑ update · blocked · not installed · ? unknown\nNOTES\nDates are UTC (feed times are local); ? means metadata is unavailable.\nBlocked games show their reason in the status bar when selected.\nUpdate status: update / current / unknown / unavailable.\nDirect launch cannot bypass DRM or guarantee Steam-free compatibility.\nUpdates stay in their existing library; close Steam before installing.\nUntrusted install scripts are not executed automatically.\nFriends login uses saved credentials; run `steam-tui login` to sign in.";
 
 fn safe(value: &str) -> String {
     super::super::terminal_text(value).into_owned()
@@ -553,6 +553,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
     if model.news.is_some() {
         news_overlay(frame, model);
     }
+    if model.achievements.is_some() {
+        achievements_overlay(frame, model);
+    }
     if model.cloud_conflicts.is_some() {
         cloud_conflicts(frame, model);
     }
@@ -831,6 +834,7 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
     let mut bottom = vec![
         hint("↑↓", "select"),
         hint("n", "news"),
+        hint("a", "achievements"),
         hint(
             "↵",
             if installed_selected {
@@ -2000,6 +2004,183 @@ fn news_overlay(frame: &mut Frame<'_>, model: &mut Model) {
     );
 }
 
+/// Rarity tiers colour the percentage of players who unlocked an achievement.
+fn rarity_style(percent: f32) -> Style {
+    if percent < 5.0 {
+        Style::default().fg(Color::Yellow)
+    } else if percent < 20.0 {
+        Style::default().fg(Color::Cyan)
+    } else {
+        dim()
+    }
+}
+
+fn achievements_overlay(frame: &mut Frame<'_>, model: &mut Model) {
+    let view = model.achievements.as_mut().expect("achievements view open");
+    let area = modal_area(frame.area(), 110, 40);
+    open_modal(frame, area);
+    let (unlocked, total) = view
+        .loaded()
+        .map_or((0, 0), |all| (all.unlocked(), all.items.len()));
+    let mut right = Vec::new();
+    if total > 0 {
+        right.push(vec![
+            seg(format!("{unlocked}/{total}"), bold()),
+            seg(
+                format!(" ({:.0}%)", unlocked as f64 * 100.0 / total as f64),
+                dim(),
+            ),
+        ]);
+    }
+    let block = panel_block(
+        theme::panel_border(Panel::Overlay, true),
+        area.width,
+        vec![vec![seg(
+            format!("{} · Achievements", safe(&view.name)),
+            bold(),
+        )]],
+        right,
+        vec![
+            hint("↑↓", "move"),
+            hint("s", "sort"),
+            hint("S", "reverse"),
+            hint("f", "filter"),
+            hint("r", "reload"),
+            hint("Esc/a", "close"),
+        ],
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let message = match &view.result {
+        None => Some(seg("Loading achievements…", dim())),
+        Some(Err(error)) => Some(seg(
+            format!("Could not load achievements: {}", safe(error)),
+            error_style(),
+        )),
+        Some(Ok(all)) if all.items.is_empty() => Some(seg("This game has no achievements.", dim())),
+        Some(Ok(_)) => None,
+    };
+    if let Some(message) = message {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(message.0, message.1)])),
+            inner,
+        );
+        return;
+    }
+    let regions = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(inner);
+    let width = inner.width as usize;
+    // Progress bar, then the active sort and filter.
+    let filled = if total == 0 {
+        0
+    } else {
+        width * unlocked / total
+    };
+    let bar = vec![
+        Span::styled("█".repeat(filled), Style::default().fg(Color::Green)),
+        Span::styled("░".repeat(width.saturating_sub(filled)), dim()),
+    ];
+    let order = Line::from(vec![
+        Span::styled("sort ", dim()),
+        Span::styled(view.sort.label(), accent()),
+        Span::styled(if view.reverse { " ↑" } else { " ↓" }, accent()),
+        Span::styled("   show ", dim()),
+        Span::styled(view.filter.label(), accent()),
+        Span::styled(
+            if view.loaded().is_some_and(|a| a.has_percentages) {
+                ""
+            } else {
+                "   (rarity unavailable)"
+            },
+            dim(),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(vec![Line::from(bar), order]), regions[0]);
+    let list_area = regions[1];
+    let visible = view.visible();
+    if visible.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Nothing matches this filter.",
+                dim(),
+            ))),
+            list_area,
+        );
+        return;
+    }
+    // Right column: rarity and unlock date.
+    let right_width = 20usize;
+    let left_width = width.saturating_sub(right_width + 4).max(10);
+    let rows_visible = (list_area.height as usize / 2).max(1);
+    let selected = view.selected.min(visible.len() - 1);
+    let mut offset = view.offset.min(visible.len() - 1);
+    if selected < offset {
+        offset = selected;
+    }
+    if selected >= offset + rows_visible {
+        offset = selected + 1 - rows_visible;
+    }
+    let items: Vec<ListItem> = visible
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(rows_visible)
+        .map(|(index, item)| {
+            let (mark, mark_style) = if item.unlocked {
+                (
+                    "✓",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ("·", dim())
+            };
+            let name_style = if item.unlocked {
+                bold()
+            } else {
+                Style::default()
+            };
+            let name = fit(&item.display_name, left_width);
+            let pad = left_width.saturating_sub(UnicodeWidthStr::width(name.as_str()));
+            let percent = item
+                .percent
+                .map_or_else(|| "     ?".to_owned(), |p| format!("{p:>5.1}%"));
+            let date = if item.unlocked {
+                item.unlock_time.map_or_else(
+                    || "unlocked".to_owned(),
+                    |t| last_played(Some(u64::from(t))),
+                )
+            } else {
+                String::new()
+            };
+            let description = if item.hidden && !item.unlocked {
+                "Hidden achievement".to_owned()
+            } else {
+                item.description.clone()
+            };
+            let first = Line::from(vec![
+                Span::styled(format!(" {mark} "), mark_style),
+                Span::styled(name, name_style),
+                Span::raw(" ".repeat(pad + 1)),
+                Span::styled(percent, item.percent.map_or_else(dim, rarity_style)),
+                Span::styled(format!("  {date:>10}"), dim()),
+            ]);
+            let second = Line::from(vec![
+                Span::raw("     "),
+                Span::styled(fit(&description, width.saturating_sub(6)), dim()),
+            ]);
+            let item = ListItem::new(vec![first, second]);
+            if index == selected {
+                item.style(theme::highlight())
+            } else {
+                item
+            }
+        })
+        .collect();
+    view.offset = offset;
+    frame.render_widget(List::new(items), list_area);
+}
+
 fn cloud_conflicts(frame: &mut Frame<'_>, model: &Model) {
     use steam_core::cloud::Choice;
     let modal = model.cloud_conflicts.as_ref().unwrap();
@@ -2346,6 +2527,75 @@ mod tests {
         assert!(model.news.is_none());
         assert_eq!(model.search, "n");
         assert_eq!(news_text("[beta] [b]ok[/b]\nnext\u{1b}"), "[beta] ok\nnext");
+    }
+
+    #[test]
+    fn achievements_viewer_opens_sorts_filters_and_blocks_the_library() {
+        use steam_core::achievements::{Achievement, Achievements};
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut model = model();
+        render(&mut model, 100, 40);
+        assert_eq!(model.key(key(KeyCode::Char('a'))), Action::Achievements);
+        let request = model.achievements.as_ref().unwrap().request;
+        assert!(render(&mut model, 100, 40).contains("Loading achievements"));
+        let item =
+            |name: &str, unlocked: bool, time: Option<u32>, percent: Option<f32>, hidden: bool| {
+                Achievement {
+                    name: name.into(),
+                    display_name: format!("{name} title"),
+                    description: format!("{name} description\u{1b}"),
+                    hidden,
+                    unlocked,
+                    unlock_time: time,
+                    percent,
+                }
+            };
+        let view = model.achievements.as_mut().unwrap();
+        view.result = Some(Ok(Achievements {
+            items: vec![
+                item("Rare", true, Some(1_700_000_000), Some(0.8), false),
+                item("Common", false, None, Some(60.0), false),
+                item("Secret", false, None, Some(2.0), true),
+            ],
+            has_percentages: true,
+        }));
+        view.reselect(None);
+        let output = render(&mut model, 100, 40);
+        assert!(output.contains("Achievements") && output.contains("1/3"));
+        assert!(output.contains("Rare title") && output.contains("2023-11-14"));
+        assert!(output.contains("Hidden achievement") && !output.contains("Secret description"));
+        assert!(!output.contains('\u{1b}'));
+        // Status order lists the unlocked one first; sorting by name flips the first row's owner.
+        assert_eq!(
+            model.achievements.as_ref().unwrap().visible()[0].name,
+            "Rare"
+        );
+        model.key(key(KeyCode::Char('s')));
+        assert_eq!(
+            model.achievements.as_ref().unwrap().visible()[0].name,
+            "Common"
+        );
+        assert!(render(&mut model, 100, 40).contains("sort name"));
+        model.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        assert_eq!(
+            model.achievements.as_ref().unwrap().visible()[0].name,
+            "Secret"
+        );
+        model.key(key(KeyCode::Char('f')));
+        assert_eq!(model.achievements.as_ref().unwrap().visible().len(), 1);
+        // Library keys are blocked while it is open.
+        let selected = model.selected;
+        model.key(key(KeyCode::Down));
+        model.key(key(KeyCode::Char('n')));
+        assert_eq!(model.selected, selected);
+        assert!(model.news.is_none());
+        // Reload restarts the request; Esc closes.
+        assert_eq!(model.key(key(KeyCode::Char('r'))), Action::Achievements);
+        assert!(model.achievements.as_ref().unwrap().result.is_none());
+        model.key(key(KeyCode::Esc));
+        assert!(model.achievements.is_none());
+        model.key(key(KeyCode::Char('a')));
+        assert_ne!(model.achievements.as_ref().unwrap().request, request);
     }
 
     #[test]

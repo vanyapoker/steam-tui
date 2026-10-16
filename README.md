@@ -49,6 +49,7 @@ Press `?` in the app for the full list.
 | p / c | Pause / cancel the download |
 | C | Steam Cloud sync |
 | n / right-click | Changelog |
+| a | Achievements of the selected game (s / S sort, f filter, r reload) |
 | / | Filter |
 | f | Pin a game |
 | v | All / installed / not installed |

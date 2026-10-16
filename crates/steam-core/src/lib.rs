@@ -2,6 +2,7 @@
 compile_error!("steam-core supports Linux only");
 
 pub mod account;
+pub mod achievements;
 pub mod backend;
 pub mod catalog;
 pub mod cloud;

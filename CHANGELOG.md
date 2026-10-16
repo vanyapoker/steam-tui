@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **Achievements viewer:** press `a` on a game for a modal listing its achievements with unlocked state and date, global rarity and descriptions. `s` cycles the sort (status, name, rarity, date), `S` reverses it, `f` filters all / unlocked / locked.
 - **Achievement icons:** `GetAchievementIcon` and `ISteamUtils::GetImageSize/GetImageRGBA` return real images from Valve's image CDN (allow-listed hosts, size-bounded, JPEG and PNG), announced with `UserAchievementIconFetched_t`.
 - **Workshop:** all-UGC and per-user queries with their filters and getters (tags, previews, key-value tags, children, statistics, cursors), subscribe and unsubscribe, item state, install and download info, `DownloadItem`, votes, favorites, playtime tracking, dependencies, deletion and `RequestUGCDetails`.
 - **Workshop downloads:** subscribed items are downloaded in the background (SteamPipe items and legacy single-file items), verified, swapped in atomically and recorded in `appworkshop_<app>.acf`; the game gets `ItemInstalled_t` and `DownloadItemResult_t`.
