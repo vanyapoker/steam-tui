@@ -2,9 +2,7 @@
 
 Lightweight, fast TUI Steam client for Linux (built for Omarchy). Browse, install, update and launch your library without the Steam client or its browser processes.
 
-Early state: some games won't work.
-
-> **Unofficial.** Not affiliated with or endorsed by Valve; Steam and VAC are Valve trademarks. steam-tui signs in to your real Steam account through its own client, which Valve's terms may not allow. Use it at your own risk, and consider a secondary account while it's young.
+Early state: some games won't work without original steam client.
 
 ![steam-tui](assets/screenshot.png)
 
@@ -83,3 +81,6 @@ Chat, game invites, achievements, Workshop, store and community pages, trading.
 ## License
 
 [MIT](LICENSE). Vendored and third-party code keeps its own license, see [THIRD_PARTY.md](THIRD_PARTY.md).
+
+
+> Not affiliated with or endorsed by Valve; Steam and VAC are Valve trademarks. steam-tui signs in to your real Steam account through its own client, which Valve's terms may not allow. Use it at your own risk.
