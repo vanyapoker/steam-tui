@@ -102,9 +102,7 @@ impl Store {
             if !self.item_dir(id).is_dir() {
                 continue;
             }
-            let details = app
-                .child("workshopitemdetails")
-                .and_then(|d| d.child(key));
+            let details = app.child("workshopitemdetails").and_then(|d| d.child(key));
             items.insert(
                 id,
                 InstalledItem {
@@ -478,7 +476,10 @@ pub async fn install_legacy(
     };
     let content = store.content_dir();
     fs::create_dir_all(&content)?;
-    fsafe::require_space(limit.min(size_hint.max(1 << 20)), fsafe::free_space(&content)?)?;
+    fsafe::require_space(
+        limit.min(size_hint.max(1 << 20)),
+        fsafe::free_space(&content)?,
+    )?;
     let staging = store.staging(id);
     clear(&staging)?;
     fs::DirBuilder::new().mode(0o755).create(&staging)?;
@@ -753,7 +754,10 @@ mod tests {
         ] {
             assert!(legacy_url(bad).is_err(), "{bad}");
         }
-        assert!(legacy_hash(&legacy_url("https://cdn.steamusercontent.com/ugc/1/zz/").unwrap()).is_none());
+        assert!(
+            legacy_hash(&legacy_url("https://cdn.steamusercontent.com/ugc/1/zz/").unwrap())
+                .is_none()
+        );
         assert_eq!(legacy_file_name(12), "12_legacy.bin");
     }
 
@@ -780,7 +784,9 @@ mod tests {
         store.record(&item, 42).unwrap();
         assert!(!store.installed().unwrap()[&77].remove_pending);
         let text = fs::read_to_string(root.0.join("workshop/appworkshop_4000.acf")).unwrap();
-        assert!(text.contains("\"WorkshopItemsInstalled\"") || text.contains("workshopitemsinstalled"));
+        assert!(
+            text.contains("\"WorkshopItemsInstalled\"") || text.contains("workshopitemsinstalled")
+        );
         assert!(text.contains("\"subscribedby\"") && text.contains("42"));
         // An item whose directory vanished is not reported as installed.
         fs::remove_dir_all(store.item_dir(77)).unwrap();

@@ -146,11 +146,7 @@ impl Service {
                 self.ensure_loaded().await;
                 self.snapshot()
             }
-            UgcOp::Subscribe {
-                app,
-                id,
-                subscribe,
-            } => self.subscribe(app, id, subscribe).await,
+            UgcOp::Subscribe { app, id, subscribe } => self.subscribe(app, id, subscribe).await,
             UgcOp::Download { id, high_priority } => self.download(id, high_priority).await,
             UgcOp::Suspend { on } => {
                 self.gate.set(on);
@@ -627,7 +623,11 @@ mod tests {
                 id: 1,
                 file_handle: handle,
                 updated,
-                file_url: if legacy { "https://x".into() } else { String::new() },
+                file_url: if legacy {
+                    "https://x".into()
+                } else {
+                    String::new()
+                },
                 ..Default::default()
             },
             subscribed: true,

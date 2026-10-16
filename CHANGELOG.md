@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Achievement icons:** `GetAchievementIcon` and `ISteamUtils::GetImageSize/GetImageRGBA` return real images from Valve's image CDN (allow-listed hosts, size-bounded, JPEG and PNG), announced with `UserAchievementIconFetched_t`.
+- **Workshop:** all-UGC and per-user queries with their filters and getters (tags, previews, key-value tags, children, statistics, cursors), subscribe and unsubscribe, item state, install and download info, `DownloadItem`, votes, favorites, playtime tracking, dependencies, deletion and `RequestUGCDetails`.
+- **Workshop downloads:** subscribed items are downloaded in the background (SteamPipe items and legacy single-file items), verified, swapped in atomically and recorded in `appworkshop_<app>.acf`; the game gets `ItemInstalled_t` and `DownloadItemResult_t`.
+- `ugc-probe`, `ugc-write-probe` and `workshop-probe` examples for live checks.
+
+### Fixed
+- `AddRequiredTag` on a Workshop query released the query instead of adding the tag.
+- Backpack Battles: the opponent query asks for details of 1000 Workshop items at once; queries above 256 were rejected, so the game fell back to offline opponents.
+
+### Known limits
+- Publishing Workshop items is not supported (CreateItem, SubmitItemUpdate and the SetItem calls report failure).
+- Voted-on user lists are not supported; friend avatars are not provided.
+
 ## 2.0.0 - 2026-10-16
 
 The built-in Steam API library (`libsteamclient.so`) is now far more complete, so many more games start without Valve's client.

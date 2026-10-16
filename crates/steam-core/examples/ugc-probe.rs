@@ -4,7 +4,10 @@ use std::error::Error;
 use std::time::Duration;
 use steam_core::account;
 use steam_vent::ConnectionTrait;
-use steam_vent_proto_steam::steammessages_clientserver_ucm::{CMsgClientUCMEnumerateUserSubscribedFilesWithUpdates, CMsgClientUCMEnumerateUserSubscribedFilesWithUpdatesResponse};
+use steam_vent_proto_steam::steammessages_clientserver_ucm::{
+    CMsgClientUCMEnumerateUserSubscribedFilesWithUpdates,
+    CMsgClientUCMEnumerateUserSubscribedFilesWithUpdatesResponse,
+};
 use steam_vent_proto_steam::steammessages_publishedfile_steamclient::{
     CPublishedFile_GetUserFiles_Request, CPublishedFile_QueryFiles_Request,
 };

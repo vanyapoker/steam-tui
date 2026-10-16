@@ -62,12 +62,13 @@ Press `?` in the app for the full list.
 
 | Works | Partial | Not yet |
 | --- | --- | --- |
-| User, Utils, Apps, Friends (basics) | Matchmaking and lobbies | Achievement icons |
-| Game Coordinator relay | Networking sockets, P2P and relay | Workshop, Inventory |
+| User, Utils, Apps, Friends (basics) | Matchmaking and lobbies | Publishing Workshop items |
+| Game Coordinator relay | Networking sockets, P2P and relay | Inventory |
 | Steam Cloud | Auth tickets | Input, Screenshots |
-| Stats, achievements, leaderboards | Global stats | |
+| Stats, achievements (with icons), leaderboards | Global stats | Friend avatars |
+| Workshop: queries, subscriptions, downloads, votes, favorites | | |
 
-Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK headers: SteamClient 006-021 and 023 (not 022), and every version Valve's public headers ever shipped for User, Utils, Apps, Friends, Matchmaking, Servers, UserStats, Networking, RemoteStorage, Screenshots, HTTP, HTMLSurface, Controller, Inventory, UGC and Input. Where an old version's call has no matching implementation, the slot logs and returns zero. Stats, achievements and leaderboard scores are read from and written to your real Steam account, like the normal client. Unsupported calls log and abort rather than pretend to work.
+Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK headers: SteamClient 006-021 and 023 (not 022), and every version Valve's public headers ever shipped for User, Utils, Apps, Friends, Matchmaking, Servers, UserStats, Networking, RemoteStorage, Screenshots, HTTP, HTMLSurface, Controller, Inventory, UGC and Input. Where an old version's call has no matching implementation, the slot logs and returns zero. Stats, achievements and leaderboard scores are read from and written to your real Steam account, like the normal client. Workshop items you subscribe to are downloaded in the background into the game's library (`steamapps/workshop/content/<app>/<item>`, recorded in Valve's `appworkshop_<app>.acf`) while the game runs; subscribing, voting, favoriting and the other Workshop calls act on your real account. Publishing items (CreateItem, SubmitItemUpdate) is not supported and reports failure, and so are the voted-on user lists. Unsupported calls log and abort rather than pretend to work.
 
 ## Limitations
 
@@ -77,7 +78,7 @@ Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK h
 
 ## Not implemented yet
 
-Chat, game invites, achievements, Workshop, store and community pages, trading.
+Chat, game invites, publishing Workshop items, store and community pages, trading.
 
 ## License
 

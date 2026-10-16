@@ -135,7 +135,10 @@ mod tests {
 
     #[test]
     fn only_https_on_valve_image_hosts_is_allowed() {
-        assert!(allowed("https://cdn.fastly.steamstatic.com/steamcommunity/public/images/apps/1/a.jpg").is_some());
+        assert!(
+            allowed("https://cdn.fastly.steamstatic.com/steamcommunity/public/images/apps/1/a.jpg")
+                .is_some()
+        );
         for bad in [
             "http://cdn.fastly.steamstatic.com/a.jpg",
             "https://cdn.fastly.steamstatic.com:8443/a.jpg",

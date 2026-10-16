@@ -847,7 +847,9 @@ unsafe extern "C" fn f11(_: *mut c_void, name: *const c_char) -> i32 {
     if let Some(handle) = images::cached(&url) {
         return handle;
     }
-    trace(format_args!("userstats.GetAchievementIcon {name} (fetching)"));
+    trace(format_args!(
+        "userstats.GetAchievementIcon {name} (fetching)"
+    ));
     let game = u64::from(app_id());
     let owned = name.to_owned();
     images::fetch_async(url, move |handle| {

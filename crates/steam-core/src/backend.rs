@@ -2,12 +2,12 @@
 //! Credentials remain in the parent process. Normal launches do not use this.
 mod events;
 mod gc;
+pub mod images;
 mod lobby;
 mod networking;
 pub mod sdr;
 pub mod stats;
 mod tickets;
-pub mod images;
 pub mod ugc;
 pub mod workshop;
 pub use events::{Direction, Event, EventSender, gc_message_name};

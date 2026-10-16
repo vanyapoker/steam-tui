@@ -224,35 +224,46 @@ pub(super) unsafe extern "C" fn item_update_progress(
 pub(super) unsafe extern "C" fn set_vote(_: *mut c_void, id: u64, up: bool) -> u64 {
     trace(format_args!("ugc.SetUserItemVote {id} up={up}"));
     let failure = Wire::default().u64(id).i32(E_FAIL).bool(up).size(16);
-    call(SET_VOTE, failure.clone(), UgcOp::Vote { id, up }, move |r| {
-        match result_of(&r) {
+    call(
+        SET_VOTE,
+        failure.clone(),
+        UgcOp::Vote { id, up },
+        move |r| match result_of(&r) {
             Some(result) => Wire::default().u64(id).i32(result).bool(up).size(16),
             None => failure,
-        }
-    })
+        },
+    )
 }
 
 pub(super) unsafe extern "C" fn get_vote(_: *mut c_void, id: u64) -> u64 {
     let failure = Wire::default().u64(id).i32(E_FAIL).size(16);
-    call(GET_VOTE, failure.clone(), UgcOp::GetVote { id }, move |r| match r {
-        Response::UgcVote {
-            result,
-            voted_up,
-            voted_down,
-            skipped,
-        } => Wire::default()
-            .u64(id)
-            .i32(result)
-            .bool(voted_up)
-            .bool(voted_down)
-            .bool(skipped)
-            .size(16),
-        _ => failure,
-    })
+    call(
+        GET_VOTE,
+        failure.clone(),
+        UgcOp::GetVote { id },
+        move |r| match r {
+            Response::UgcVote {
+                result,
+                voted_up,
+                voted_down,
+                skipped,
+            } => Wire::default()
+                .u64(id)
+                .i32(result)
+                .bool(voted_up)
+                .bool(voted_down)
+                .bool(skipped)
+                .size(16),
+            _ => failure,
+        },
+    )
 }
 
 fn favorite(app: u32, id: u64, add: bool) -> u64 {
-    trace(format_args!("ugc.{}Favorites {id}", if add { "AddItemTo" } else { "RemoveItemFrom" }));
+    trace(format_args!(
+        "ugc.{}Favorites {id}",
+        if add { "AddItemTo" } else { "RemoveItemFrom" }
+    ));
     let failure = Wire::default().u64(id).i32(E_FAIL).bool(add).size(16);
     call(
         FAVORITES_CHANGED,
@@ -276,7 +287,11 @@ pub(super) unsafe extern "C" fn remove_favorite(_: *mut c_void, app: u32, id: u6
 fn subscription(id: u64, subscribe: bool) -> u64 {
     trace(format_args!(
         "ugc.{}Item {id}",
-        if subscribe { "Subscribe" } else { "Unsubscribe" }
+        if subscribe {
+            "Subscribe"
+        } else {
+            "Unsubscribe"
+        }
     ));
     let callback = if subscribe {
         SUBSCRIBE_RESULT
@@ -323,7 +338,11 @@ pub(super) unsafe extern "C" fn subscribed_items(_: *mut c_void, out: *mut u64, 
         return 0;
     }
     let mut count = 0;
-    for entry in snapshot().iter().filter(|i| i.subscribed).take(max as usize) {
+    for entry in snapshot()
+        .iter()
+        .filter(|i| i.subscribed)
+        .take(max as usize)
+    {
         // SAFETY: the caller's array holds `max` ids.
         unsafe { out.add(count).write(entry.id) };
         count += 1;
@@ -418,11 +437,7 @@ fn playtime(ids: Vec<u64>, start: bool) -> u64 {
     call(
         callback,
         failure.clone(),
-        UgcOp::Playtime {
-            app: 0,
-            ids,
-            start,
-        },
+        UgcOp::Playtime { app: 0, ids, start },
         move |r| match result_of(&r) {
             Some(result) => Wire::default().i32(result).size(4),
             None => failure,
@@ -446,7 +461,11 @@ pub(super) unsafe extern "C" fn stop_playtime_all(_: *mut c_void) -> u64 {
 }
 
 fn dependency(parent: u64, child: u64, add: bool) -> u64 {
-    let callback = if add { ADD_DEPENDENCY } else { REMOVE_DEPENDENCY };
+    let callback = if add {
+        ADD_DEPENDENCY
+    } else {
+        REMOVE_DEPENDENCY
+    };
     let failure = Wire::default().i32(E_FAIL).u64(parent).u64(child).size(20);
     call(
         callback,
@@ -531,10 +550,7 @@ pub(super) unsafe extern "C" fn eula_status(_: *mut c_void) -> u64 {
     // WorkshopEULAStatus_t: result, app, version, action time, accepted, needs action.
     callresults::complete(
         EULA_STATUS,
-        Wire::default()
-            .i32(E_FAIL)
-            .u32(current_app_id())
-            .size(20),
+        Wire::default().i32(E_FAIL).u32(current_app_id()).size(20),
     )
 }
 
@@ -556,7 +572,11 @@ mod tests {
         item.legacy = true;
         assert_eq!(
             state_of(&item),
-            STATE_SUBSCRIBED | STATE_INSTALLED | STATE_NEEDS_UPDATE | STATE_DOWNLOADING | STATE_LEGACY
+            STATE_SUBSCRIBED
+                | STATE_INSTALLED
+                | STATE_NEEDS_UPDATE
+                | STATE_DOWNLOADING
+                | STATE_LEGACY
         );
         assert_eq!(state_of(&WorkshopItem::default()), 0);
     }

@@ -88,7 +88,11 @@ pub enum UgcOp {
     /// Add to or remove from favorites.
     Favorite { app: u32, id: u64, add: bool },
     /// Start or stop playtime tracking; empty `ids` stops tracking for all items.
-    Playtime { app: u32, ids: Vec<u64>, start: bool },
+    Playtime {
+        app: u32,
+        ids: Vec<u64>,
+        start: bool,
+    },
     /// Add or remove a parent -> child item dependency.
     Dependency { parent: u64, child: u64, add: bool },
     /// Add or remove an app dependency of an item.

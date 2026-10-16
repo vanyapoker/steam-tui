@@ -222,7 +222,9 @@ unsafe extern "C" fn q_user(
     consumer: u32,
     page: u32,
 ) -> u64 {
-    trace(format_args!("ugc.CreateQueryUserUGCRequest list {list} page {page}"));
+    trace(format_args!(
+        "ugc.CreateQueryUserUGCRequest list {list} page {page}"
+    ));
     register(Query {
         search: UgcQuery {
             user_list: Some(list),
@@ -247,7 +249,9 @@ unsafe extern "C" fn q_all_page(
     consumer: u32,
     page: u32,
 ) -> u64 {
-    trace(format_args!("ugc.CreateQueryAllUGCRequest type {query_type} page {page}"));
+    trace(format_args!(
+        "ugc.CreateQueryAllUGCRequest type {query_type} page {page}"
+    ));
     register(Query {
         search: UgcQuery {
             query_type,
@@ -271,7 +275,9 @@ unsafe extern "C" fn q_all_cursor(
     cursor: *const c_char,
 ) -> u64 {
     let cursor = unsafe { cstr(cursor) }.unwrap_or_default();
-    trace(format_args!("ugc.CreateQueryAllUGCRequest type {query_type} (cursor)"));
+    trace(format_args!(
+        "ugc.CreateQueryAllUGCRequest type {query_type} (cursor)"
+    ));
     register(Query {
         search: UgcQuery {
             query_type,
@@ -288,11 +294,16 @@ unsafe extern "C" fn q_all_cursor(
 
 unsafe extern "C" fn q_create(_: *mut c_void, ids: *const u64, count: u32) -> u64 {
     if ids.is_null() || count == 0 || count > 1000 {
-        trace(format_args!("ugc.CreateQueryUGCDetailsRequest rejected ({count} ids)"));
+        trace(format_args!(
+            "ugc.CreateQueryUGCDetailsRequest rejected ({count} ids)"
+        ));
         return 0;
     }
     let ids = unsafe { std::slice::from_raw_parts(ids, count as usize) }.to_vec();
-    trace(format_args!("ugc.CreateQueryUGCDetailsRequest {} ids", ids.len()));
+    trace(format_args!(
+        "ugc.CreateQueryUGCDetailsRequest {} ids",
+        ids.len()
+    ));
     register(Query {
         ids,
         ..Default::default()
@@ -445,7 +456,9 @@ unsafe extern "C" fn q_send(_: *mut c_void, handle: u64) -> u64 {
         .map(|q| (q.ids.clone(), q.search.clone()));
     let failure = completed(handle, 2, 0, 0, "");
     let Some((ids, search)) = request else {
-        trace(format_args!("ugc.SendQueryUGCRequest unknown handle {handle}"));
+        trace(format_args!(
+            "ugc.SendQueryUGCRequest unknown handle {handle}"
+        ));
         return callresults::complete(UGC_QUERY_COMPLETED, failure);
     };
     if std::env::var_os("STEAM_TUI_BACKEND_SOCKET").is_none() {
@@ -585,9 +598,11 @@ unsafe extern "C" fn q_tag(
     out: *mut c_char,
     capacity: u32,
 ) -> bool {
-    with_item(handle, index, |i| i.tag_list.get(tag as usize).map(|t| t.0.clone()))
-        .flatten()
-        .is_some_and(|text| unsafe { copy_out(out, capacity, &text) })
+    with_item(handle, index, |i| {
+        i.tag_list.get(tag as usize).map(|t| t.0.clone())
+    })
+    .flatten()
+    .is_some_and(|text| unsafe { copy_out(out, capacity, &text) })
 }
 unsafe extern "C" fn q_tag_display(
     _: *mut c_void,
@@ -599,7 +614,11 @@ unsafe extern "C" fn q_tag_display(
 ) -> bool {
     with_item(handle, index, |i| {
         i.tag_list.get(tag as usize).map(|t| {
-            if t.1.is_empty() { t.0.clone() } else { t.1.clone() }
+            if t.1.is_empty() {
+                t.0.clone()
+            } else {
+                t.1.clone()
+            }
         })
     })
     .flatten()
@@ -747,7 +766,10 @@ unsafe extern "C" fn q_kv_by_key(
         return false;
     };
     let found = with_item(handle, index, |i| {
-        i.kv_tags.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone())
+        i.kv_tags
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.clone())
     })
     .flatten();
     found.is_some_and(|v| unsafe { copy_out(value, value_size, &v) })

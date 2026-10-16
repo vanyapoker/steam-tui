@@ -11,9 +11,8 @@ use steam_vent_proto_steam::steammessages_publishedfile_steamclient::{
     CPublishedFile_GetDetails_Request, CPublishedFile_GetUserFiles_Request,
     CPublishedFile_GetUserVoteSummary_Request, CPublishedFile_QueryFiles_Request,
     CPublishedFile_RemoveAppRelationship_Request, CPublishedFile_RemoveChild_Request,
-    CPublishedFile_StartPlaytimeTracking_Request,
-    CPublishedFile_StopPlaytimeTrackingForAllAppItems_Request,
-    CPublishedFile_StopPlaytimeTracking_Request, CPublishedFile_Subscribe_Request,
+    CPublishedFile_StartPlaytimeTracking_Request, CPublishedFile_StopPlaytimeTracking_Request,
+    CPublishedFile_StopPlaytimeTrackingForAllAppItems_Request, CPublishedFile_Subscribe_Request,
     CPublishedFile_Unsubscribe_Request, CPublishedFile_Vote_Request, PublishedFileDetails,
     cpublished_file_get_user_files_request, cpublished_file_query_files_request,
 };
@@ -246,36 +245,19 @@ pub async fn handle(connection: &Connection, app_id: u32, op: UgcOp) -> Response
             long_description,
         } => details(connection, app_id, ids, long_description).await,
         UgcOp::Query(query) => query_files(connection, app_id, *query).await,
-        UgcOp::Subscribed { app } => subscribed(connection, if app == 0 { app_id } else { app }).await,
-        UgcOp::Subscribe {
-            app,
-            id,
-            subscribe,
-        } => {
-            let result = if subscribe {
-                call(connection.service_method(CPublishedFile_Subscribe_Request {
-                    publishedfileid: Some(id),
-                    list_type: Some(1),
-                    appid: Some(app as i32),
-                    notify_client: Some(false),
-                    include_dependencies: Some(false),
-                    ..Default::default()
-                }))
-                .await
-                .map(|_| ())
-            } else {
-                call(connection.service_method(CPublishedFile_Unsubscribe_Request {
-                    publishedfileid: Some(id),
-                    list_type: Some(1),
-                    appid: Some(app as i32),
-                    notify_client: Some(false),
-                    ..Default::default()
-                }))
-                .await
-                .map(|_| ())
-            };
-            result_of(result)
+        UgcOp::Subscribed { app } => {
+            subscribed(connection, if app == 0 { app_id } else { app }).await
         }
+        UgcOp::Subscribe { app, id, subscribe } => result_of(
+            list_write(
+                connection,
+                if app == 0 { app_id } else { app },
+                id,
+                LIST_SUBSCRIBED,
+                subscribe,
+            )
+            .await,
+        ),
         UgcOp::Vote { id, up } => result_of(
             call(connection.service_method(CPublishedFile_Vote_Request {
                 publishedfileid: Some(id),
@@ -314,10 +296,16 @@ pub async fn handle(connection: &Connection, app_id: u32, op: UgcOp) -> Response
                 },
             }
         }
-        UgcOp::Favorite { .. } => Response::UgcResult {
-            // No evidence yet for the favorite request; fail rather than guess.
-            result: E_FAIL,
-        },
+        UgcOp::Favorite { app, id, add } => result_of(
+            list_write(
+                connection,
+                if app == 0 { app_id } else { app },
+                id,
+                LIST_FAVORITES,
+                add,
+            )
+            .await,
+        ),
         UgcOp::Playtime { app, ids, start } => {
             let app = if app == 0 { app_id } else { app };
             if ids.len() > MAX_IDS {
@@ -326,14 +314,12 @@ pub async fn handle(connection: &Connection, app_id: u32, op: UgcOp) -> Response
                 };
             }
             let result = if ids.is_empty() {
-                call(
-                    connection.service_method(
-                        CPublishedFile_StopPlaytimeTrackingForAllAppItems_Request {
-                            appid: Some(app),
-                            ..Default::default()
-                        },
-                    ),
-                )
+                call(connection.service_method(
+                    CPublishedFile_StopPlaytimeTrackingForAllAppItems_Request {
+                        appid: Some(app),
+                        ..Default::default()
+                    },
+                ))
                 .await
                 .map(|_| ())
             } else if start {
@@ -369,11 +355,13 @@ pub async fn handle(connection: &Connection, app_id: u32, op: UgcOp) -> Response
                 .await
                 .map(|_| ())
             } else {
-                call(connection.service_method(CPublishedFile_RemoveChild_Request {
-                    publishedfileid: Some(parent),
-                    child_publishedfileid: Some(child),
-                    ..Default::default()
-                }))
+                call(
+                    connection.service_method(CPublishedFile_RemoveChild_Request {
+                        publishedfileid: Some(parent),
+                        child_publishedfileid: Some(child),
+                        ..Default::default()
+                    }),
+                )
                 .await
                 .map(|_| ())
             };
@@ -442,6 +430,45 @@ pub async fn handle(connection: &Connection, app_id: u32, op: UgcOp) -> Response
             .await
             .map(|_| ()),
         ),
+    }
+}
+
+/// `list_type` of PublishedFile.Subscribe/Unsubscribe (verified live: 1 adds to the
+/// account's subscriptions, 2 to its favorites, 0 changes nothing).
+const LIST_SUBSCRIBED: u32 = 1;
+const LIST_FAVORITES: u32 = 2;
+
+/// Adds or removes `id` on one of the account's lists.
+async fn list_write(
+    connection: &Connection,
+    app: u32,
+    id: u64,
+    list_type: u32,
+    add: bool,
+) -> Result<(), i32> {
+    if add {
+        call(connection.service_method(CPublishedFile_Subscribe_Request {
+            publishedfileid: Some(id),
+            list_type: Some(list_type),
+            appid: Some(app as i32),
+            notify_client: Some(false),
+            include_dependencies: Some(false),
+            ..Default::default()
+        }))
+        .await
+        .map(|_| ())
+    } else {
+        call(
+            connection.service_method(CPublishedFile_Unsubscribe_Request {
+                publishedfileid: Some(id),
+                list_type: Some(list_type),
+                appid: Some(app as i32),
+                notify_client: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await
+        .map(|_| ())
     }
 }
 
@@ -515,8 +542,16 @@ fn steam_id_of(account: u32) -> u64 {
 }
 
 async fn query_files(connection: &Connection, app_id: u32, q: UgcQuery) -> Response {
-    let consumer = if q.consumer_app == 0 { app_id } else { q.consumer_app };
-    let creator = if q.creator_app == 0 { consumer } else { q.creator_app };
+    let consumer = if q.consumer_app == 0 {
+        app_id
+    } else {
+        q.consumer_app
+    };
+    let creator = if q.creator_app == 0 {
+        consumer
+    } else {
+        q.creator_app
+    };
     let language = language(&q.language);
     let per_page = PER_PAGE;
     let page = q.page.max(1);
@@ -552,8 +587,18 @@ async fn query_files(connection: &Connection, app_id: u32, q: UgcQuery) -> Respo
                 }
                 .to_owned(),
             ),
-            requiredtags: q.required_tags.iter().take(pairs(&q.required_tags)).cloned().collect(),
-            excludedtags: q.excluded_tags.iter().take(pairs(&q.excluded_tags)).cloned().collect(),
+            requiredtags: q
+                .required_tags
+                .iter()
+                .take(pairs(&q.required_tags))
+                .cloned()
+                .collect(),
+            excludedtags: q
+                .excluded_tags
+                .iter()
+                .take(pairs(&q.excluded_tags))
+                .cloned()
+                .collect(),
             required_kv_tags: q
                 .kv_tags
                 .iter()
@@ -592,8 +637,18 @@ async fn query_files(connection: &Connection, app_id: u32, q: UgcQuery) -> Respo
             numperpage: Some(per_page),
             creator_appid: Some(creator),
             appid: Some(consumer),
-            requiredtags: q.required_tags.iter().take(pairs(&q.required_tags)).cloned().collect(),
-            excludedtags: q.excluded_tags.iter().take(pairs(&q.excluded_tags)).cloned().collect(),
+            requiredtags: q
+                .required_tags
+                .iter()
+                .take(pairs(&q.required_tags))
+                .cloned()
+                .collect(),
+            excludedtags: q
+                .excluded_tags
+                .iter()
+                .take(pairs(&q.excluded_tags))
+                .cloned()
+                .collect(),
             match_all_tags: Some(!q.match_any_tag),
             search_text: (!q.search.is_empty()).then(|| q.search.clone()),
             filetype: matching_file_type(q.matching),
@@ -621,12 +676,8 @@ async fn query_files(connection: &Connection, app_id: u32, q: UgcQuery) -> Respo
                     tags
                 })
                 .collect(),
-            date_range_created: (q.created != (0, 0))
-                .then(|| date_range(q.created))
-                .into(),
-            date_range_updated: (q.updated != (0, 0))
-                .then(|| date_range(q.updated))
-                .into(),
+            date_range_created: (q.created != (0, 0)).then(|| date_range(q.created)).into(),
+            date_range_updated: (q.updated != (0, 0)).then(|| date_range(q.updated)).into(),
             totalonly: Some(q.total_only),
             ids_only: Some(q.ids_only),
             return_vote_data: Some(true),
@@ -640,9 +691,13 @@ async fn query_files(connection: &Connection, app_id: u32, q: UgcQuery) -> Respo
             return_details: Some(!q.ids_only && !q.total_only),
             ..Default::default()
         };
-        call(connection.service_method(request))
-            .await
-            .map(|r| (r.total(), r.next_cursor().to_owned(), r.publishedfiledetails))
+        call(connection.service_method(request)).await.map(|r| {
+            (
+                r.total(),
+                r.next_cursor().to_owned(),
+                r.publishedfiledetails,
+            )
+        })
     };
     match result {
         Ok((total, cursor, found)) => Response::UgcQuery {

@@ -74,7 +74,9 @@ pub(super) fn fetch(url: &str) -> Option<i32> {
     }
     let response = bridge::request(
         current_app_id(),
-        Operation::Image(ImageOp::Fetch { url: url.to_owned() }),
+        Operation::Image(ImageOp::Fetch {
+            url: url.to_owned(),
+        }),
     );
     match response {
         Ok(Response::Image {
