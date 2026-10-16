@@ -229,7 +229,12 @@ unsafe extern "C" fn slot_37() -> ! {
     unsupported("utils.DismissFloatingGamepadTextInput")
 }
 
-pub(super) static TABLE: VTable<38> = VTable([
+unsafe extern "C" fn slot_38() -> bool {
+    trace("utils.DismissGamepadTextInput = false");
+    false
+}
+
+pub(super) static TABLE: VTable<39> = VTable([
     slot_0 as *const (),  // 0: GetSecondsSinceAppActive
     slot_1 as *const (),  // 1: GetSecondsSinceComputerActive
     slot_2 as *const (),  // 2: GetConnectedUniverse
@@ -268,7 +273,62 @@ pub(super) static TABLE: VTable<38> = VTable([
     slot_35 as *const (), // 35: ShowFloatingGamepadTextInput
     slot_36 as *const (), // 36: SetGameLauncherMode
     slot_37 as *const (), // 37: DismissFloatingGamepadTextInput
+    slot_38 as *const (), // 38: DismissGamepadTextInput
 ]);
 pub(super) static OBJECT: Object = Object {
     table: TABLE.0.as_ptr(),
+};
+
+// ---- generated: additional interface versions ----
+
+// SteamUtils011 (SDK 165 header layout): slots matched to the base table by method name; the rest are unavailable.
+new_slots! {
+    n_011_37 => "utils.IsRunningOnSteamHardware";
+    n_011_38 => "utils.GetSteamHardwareDefaultConfig";
+    n_011_39 => "utils.IsRunningUnderProton";
+}
+static TABLE_011: VTable<40> = VTable([
+    TABLE.0[0],
+    TABLE.0[1],
+    TABLE.0[2],
+    TABLE.0[3],
+    TABLE.0[4],
+    TABLE.0[5],
+    TABLE.0[6],
+    TABLE.0[8],
+    TABLE.0[9],
+    TABLE.0[10],
+    TABLE.0[11],
+    TABLE.0[12],
+    TABLE.0[13],
+    TABLE.0[14],
+    TABLE.0[15],
+    TABLE.0[16],
+    TABLE.0[17],
+    TABLE.0[18],
+    TABLE.0[19],
+    TABLE.0[20],
+    TABLE.0[21],
+    TABLE.0[22],
+    TABLE.0[23],
+    TABLE.0[24],
+    TABLE.0[25],
+    TABLE.0[26],
+    TABLE.0[27],
+    TABLE.0[28],
+    TABLE.0[29],
+    TABLE.0[30],
+    TABLE.0[31],
+    TABLE.0[32],
+    TABLE.0[33],
+    TABLE.0[35],
+    TABLE.0[36],
+    TABLE.0[37],
+    TABLE.0[38],
+    n_011_37 as *const (),
+    n_011_38 as *const (),
+    n_011_39 as *const (),
+]);
+pub(super) static OBJECT_011: Object = Object {
+    table: TABLE_011.0.as_ptr(),
 };

@@ -166,7 +166,25 @@ unsafe extern "C" fn slot_29(_this: *mut c_void, _app_id: u32) -> bool {
     true
 }
 
-pub(super) static TABLE: VTable<30> = VTable([
+unsafe extern "C" fn slot_30(_this: *mut c_void, available: *mut i32, private: *mut i32) -> i32 {
+    trace("apps.GetNumBetas = 0");
+    for out in [available, private] {
+        if !out.is_null() {
+            unsafe { out.write(0) };
+        }
+    }
+    0
+}
+unsafe extern "C" fn slot_31() -> bool {
+    trace("apps.GetBetaInfo = false");
+    false
+}
+unsafe extern "C" fn slot_32() -> bool {
+    trace("apps.SetActiveBeta = false");
+    false
+}
+
+pub(super) static TABLE: VTable<33> = VTable([
     subscribed as *const (),          // 0: BIsSubscribed
     low_violence as *const (),        // 1: BIsLowViolence
     cybercafe as *const (),           // 2: BIsCybercafe
@@ -197,7 +215,58 @@ pub(super) static TABLE: VTable<30> = VTable([
     slot_27 as *const (),             // 27: BIsSubscribedFromFamilySharing
     slot_28 as *const (),             // 28: BIsTimedTrial
     slot_29 as *const (),             // 29: SetDlcContext
+    slot_30 as *const (),             // 30: GetNumBetas
+    slot_31 as *const (),             // 31: GetBetaInfo
+    slot_32 as *const (),             // 32: SetActiveBeta
 ]);
 pub(super) static OBJECT: Object = Object {
     table: TABLE.0.as_ptr(),
+};
+
+// ---- generated: additional interface versions ----
+
+// STEAMAPPS_INTERFACE_VERSION009 (SDK 165 header layout): slots matched to the base table by method name; the rest are unavailable.
+new_slots! {
+    n_009_33 => "apps.SetGamePerformanceSetting";
+    n_009_34 => "apps.SetGameRenderResolution";
+}
+static TABLE_009: VTable<35> = VTable([
+    TABLE.0[0],
+    TABLE.0[1],
+    TABLE.0[2],
+    TABLE.0[3],
+    TABLE.0[4],
+    TABLE.0[5],
+    TABLE.0[6],
+    TABLE.0[7],
+    TABLE.0[8],
+    TABLE.0[9],
+    TABLE.0[10],
+    TABLE.0[11],
+    TABLE.0[12],
+    TABLE.0[13],
+    TABLE.0[14],
+    TABLE.0[15],
+    TABLE.0[16],
+    TABLE.0[17],
+    TABLE.0[18],
+    TABLE.0[19],
+    TABLE.0[20],
+    TABLE.0[21],
+    TABLE.0[22],
+    TABLE.0[23],
+    TABLE.0[24],
+    TABLE.0[25],
+    TABLE.0[26],
+    TABLE.0[27],
+    TABLE.0[28],
+    TABLE.0[29],
+    TABLE.0[30],
+    TABLE.0[31],
+    TABLE.0[32],
+    n_009_33 as *const (),
+    n_009_34 as *const (),
+]);
+pub(super) static OBJECT_009: Object = Object {
+    table: TABLE_009.0.as_ptr(),
 };

@@ -6,6 +6,17 @@
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 compile_error!("the prototype implements only the Linux x86-64 C++ ABI");
 
+/// Slots that exist in a newer interface version but have no backing service:
+/// they log and return zero/false/null, like the other unavailable-service stubs.
+macro_rules! new_slots {
+    ($($name:ident => $label:literal;)*) => {
+        $(unsafe extern "C" fn $name() -> usize {
+            trace(concat!($label, " (unavailable)"));
+            0
+        })*
+    };
+}
+
 mod applist;
 mod apps;
 mod auth;
@@ -99,7 +110,7 @@ fn object(object: &'static Object) -> *mut c_void {
     ptr::from_ref(object).cast_mut().cast()
 }
 
-/// Steamworks interface factory. SteamClient021, SteamClient020 and SteamClient017 (Proton) are supported.
+/// Steamworks interface factory. SteamClient023, SteamClient021, SteamClient020 and SteamClient017 (Proton) are supported.
 ///
 /// # Safety
 /// `name` must be null or a valid C string; `result` must be null or writable.
@@ -108,13 +119,15 @@ pub unsafe extern "C" fn CreateInterface(name: *const c_char, result: *mut i32) 
     let name = unsafe { version(name) };
     crash::install();
     trace(format_args!("CreateInterface {name:?}"));
-    let found = matches!(name, Some(n) if n == c"SteamClient021" || n == c"SteamClient020" || n == c"SteamClient017");
+    let found = matches!(name, Some(n) if n == c"SteamClient023" || n == c"SteamClient021" || n == c"SteamClient020" || n == c"SteamClient017");
     if !result.is_null() {
         unsafe { result.write(if found { 0 } else { 1 }) };
     }
     if found {
         if name == Some(c"SteamClient017") {
             object(&client::OBJECT017)
+        } else if name == Some(c"SteamClient023") {
+            object(&client::OBJECT023)
         } else if name == Some(c"SteamClient021") {
             object(&client::OBJECT021)
         } else {

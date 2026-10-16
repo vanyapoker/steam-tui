@@ -24,7 +24,9 @@ int main(int argc, char **argv) {
     int result = -1;
     assert(!factory(nullptr, &result) && result == 1);
     assert(factory("SteamClient017", &result) && result == 0); // Proton bootstrap
-    assert(!factory("SteamClient023", &result) && result == 1);
+    assert(factory("SteamClient021", &result) && result == 0);
+    assert(factory("SteamClient023", &result) && result == 0);
+    assert(!factory("SteamClient022", &result) && result == 1);
     auto client = static_cast<ISteamClient *>(factory("SteamClient020", &result));
     assert(client && result == 0);
     assert(client->BShutdownIfAllPipesClosed());
@@ -43,6 +45,20 @@ int main(int argc, char **argv) {
     auto user23 = client->GetISteamUser(user, pipe, "SteamUser023");
     assert(user23 && user23 != identity && user23->GetHSteamUser() == user);
     assert(!client->GetISteamUser(user, pipe, "SteamUser024"));
+    assert(client->GetISteamUser(user, pipe, "SteamUser022") == identity);
+    // Newer interface versions (SDK 1.50+) resolve through the generic getter;
+    // unknown or unevidenced versions stay unsupported.
+    for (auto name : {"SteamUtils011", "SteamFriends018", "STEAMAPPS_INTERFACE_VERSION009",
+                      "STEAMUSERSTATS_INTERFACE_VERSION013", "STEAMREMOTESTORAGE_INTERFACE_VERSION014",
+                      "STEAMUGC_INTERFACE_VERSION018", "STEAMUGC_INTERFACE_VERSION020",
+                      "STEAMUGC_INTERFACE_VERSION021", "SteamInput005", "SteamInput007",
+                      "STEAMREMOTEPLAY_INTERFACE_VERSION002", "STEAMREMOTEPLAY_INTERFACE_VERSION003",
+                      "STEAMREMOTEPLAY_INTERFACE_VERSION004", "SteamMatchMakingServers003",
+                      "STEAMTIMELINE_INTERFACE_V004", "SteamNetworkingSockets013"})
+        assert(client->GetISteamGenericInterface(user, pipe, name));
+    for (auto name : {"SteamUtils012", "SteamFriends016", "STEAMUGC_INTERFACE_VERSION019",
+                      "STEAMREMOTEPLAY_INTERFACE_VERSION005", "STEAMVIDEO_INTERFACE_V003"})
+        assert(!client->GetISteamGenericInterface(user, pipe, name));
     assert(!client->GetISteamUser(user, other, "SteamUser021"));
     assert(!client->GetISteamUtils(pipe, "SteamUser021"));
     auto utils = client->GetISteamUtils(pipe, "SteamUtils010");

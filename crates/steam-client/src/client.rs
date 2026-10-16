@@ -83,6 +83,115 @@ unsafe extern "C" fn release_user(_this: *mut c_void, pipe: i32, user: i32) {
         *connected = false;
     }
 }
+/// Interface families: each typed SteamClient getter only serves its own family.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Family {
+    User,
+    Utils,
+    Apps,
+    Friends,
+    Matchmaking,
+    Servers,
+    UserStats,
+    Networking,
+    RemoteStorage,
+    Screenshots,
+    Search,
+    Http,
+    Controller,
+    Ugc,
+    AppList,
+    Music,
+    MusicRemote,
+    Html,
+    Inventory,
+    Video,
+    Parties,
+    Parental,
+    Input,
+    RemotePlay,
+    /// Reachable through the generic getter only.
+    Generic,
+}
+struct Entry {
+    name: &'static CStr,
+    family: Family,
+    /// Needs a connected global user (everything except Utils and NetworkingUtils).
+    session: bool,
+    object: fn() -> *mut c_void,
+}
+macro_rules! registry {
+    ($($family:ident, $session:literal, $name:literal => $object:expr;)*) => {
+        &[$(Entry {
+            name: $name,
+            family: Family::$family,
+            session: $session,
+            object: || $object,
+        }),*]
+    };
+}
+// Every served interface version. 009/010/011-style versions only differ by
+// appended or removed slots, so each has its own table (see the generated tables
+// at the end of each interface module).
+static REGISTRY: &[Entry] = registry! {
+    Utils, false, c"SteamUtils009" => object(&utils::OBJECT);
+    Utils, false, c"SteamUtils010" => object(&utils::OBJECT);
+    Utils, false, c"SteamUtils011" => object(&utils::OBJECT_011);
+    User, true, c"SteamUser021" => object(&user::OBJECT);
+    // 022 has the 021 slot order; only GetAuthSessionTicket gained a trailing argument.
+    User, true, c"SteamUser022" => object(&user::OBJECT);
+    User, true, c"SteamUser023" => object(&user::OBJECT023);
+    Friends, true, c"SteamFriends017" => object(&friends::OBJECT);
+    Friends, true, c"SteamFriends018" => object(&friends::OBJECT_018);
+    Generic, true, c"STEAMTIMELINE_INTERFACE_V001" => object(&timeline::OBJECT);
+    Generic, true, c"STEAMTIMELINE_INTERFACE_V004" => object(&timeline::OBJECT_004);
+    Apps, true, c"STEAMAPPS_INTERFACE_VERSION008" => object(&apps::OBJECT);
+    Apps, true, c"STEAMAPPS_INTERFACE_VERSION009" => object(&apps::OBJECT_009);
+    Matchmaking, true, c"SteamMatchMaking009" => object(&matchmaking::OBJECT);
+    Search, true, c"SteamMatchGameSearch001" => object(&matchmaking::SEARCH);
+    Servers, true, c"SteamMatchMakingServers002" => object(&matchmaking::SERVERS);
+    Servers, true, c"SteamMatchMakingServers003" => object(&matchmaking::OBJECT_SERVERS003);
+    UserStats, true, c"STEAMUSERSTATS_INTERFACE_VERSION012" => object(&userstats::OBJECT);
+    UserStats, true, c"STEAMUSERSTATS_INTERFACE_VERSION013" => object(&userstats::OBJECT_013);
+    Networking, true, c"SteamNetworking006" => object(&networking::NETWORKING);
+    // 013 keeps 012's slot order (SendMessages gained a trailing bool).
+    Generic, true, c"SteamNetworkingSockets012" => sockets::object();
+    Generic, true, c"SteamNetworkingSockets013" => sockets::object();
+    Generic, true, c"SteamNetworkingMessages002" => sockets::messages_object();
+    RemoteStorage, true, c"STEAMREMOTESTORAGE_INTERFACE_VERSION016" => object(&remotestorage::OBJECT);
+    RemoteStorage, true, c"STEAMREMOTESTORAGE_INTERFACE_VERSION014" => object(&remotestorage::OBJECT_014);
+    Screenshots, true, c"STEAMSCREENSHOTS_INTERFACE_VERSION003" => object(&screenshots::OBJECT);
+    Http, true, c"STEAMHTTP_INTERFACE_VERSION003" => object(&http::OBJECT);
+    Generic, true, c"SteamGameCoordinator001" => object(&gc::OBJECT);
+    Controller, true, c"SteamController008" => object(&controller::OBJECT);
+    Ugc, true, c"STEAMUGC_INTERFACE_VERSION016" => object(&ugc::OBJECT016);
+    Ugc, true, c"STEAMUGC_INTERFACE_VERSION017" => object(&ugc::OBJECT);
+    Ugc, true, c"STEAMUGC_INTERFACE_VERSION018" => object(&ugc::OBJECT_018);
+    Ugc, true, c"STEAMUGC_INTERFACE_VERSION020" => object(&ugc::OBJECT_020);
+    Ugc, true, c"STEAMUGC_INTERFACE_VERSION021" => object(&ugc::OBJECT_021);
+    AppList, true, c"STEAMAPPLIST_INTERFACE_VERSION001" => object(&applist::OBJECT);
+    Music, true, c"STEAMMUSIC_INTERFACE_VERSION001" => object(&music::OBJECT);
+    MusicRemote, true, c"STEAMMUSICREMOTE_INTERFACE_VERSION001" => object(&musicremote::OBJECT);
+    Html, true, c"STEAMHTMLSURFACE_INTERFACE_VERSION_005" => object(&htmlsurface::OBJECT);
+    Inventory, true, c"STEAMINVENTORY_INTERFACE_V003" => object(&inventory::OBJECT);
+    Video, true, c"STEAMVIDEO_INTERFACE_V002" => object(&video::OBJECT);
+    Video, true, c"STEAMVIDEO_INTERFACE_V007" => object(&video::OBJECT);
+    Parental, true, c"STEAMPARENTALSETTINGS_INTERFACE_VERSION001" => object(&parental::OBJECT);
+    Input, true, c"SteamInput005" => object(&input::OBJECT_005);
+    Input, true, c"SteamInput006" => object(&input::OBJECT);
+    // 007 is 006's layout (only the final DualSense slot differs in name).
+    Input, true, c"SteamInput007" => object(&input::OBJECT);
+    RemotePlay, true, c"STEAMREMOTEPLAY_INTERFACE_VERSION001" => object(&remoteplay::OBJECT);
+    RemotePlay, true, c"STEAMREMOTEPLAY_INTERFACE_VERSION002" => object(&remoteplay::OBJECT_002);
+    RemotePlay, true, c"STEAMREMOTEPLAY_INTERFACE_VERSION003" => object(&remoteplay::OBJECT_003);
+    RemotePlay, true, c"STEAMREMOTEPLAY_INTERFACE_VERSION004" => object(&remoteplay::OBJECT_004);
+    Parties, true, c"SteamParties002" => object(&parties::OBJECT);
+    Generic, false, c"SteamNetworkingUtils004" => object(&networking::UTILS);
+};
+fn entry(name: Option<&CStr>) -> Option<&'static Entry> {
+    let name = name?;
+    REGISTRY.iter().find(|e| e.name == name)
+}
 unsafe fn lookup(user: i32, pipe: i32, name: *const c_char) -> *mut c_void {
     let name = unsafe { version(name) };
     trace(format_args!(
@@ -92,165 +201,24 @@ unsafe fn lookup(user: i32, pipe: i32, name: *const c_char) -> *mut c_void {
     if !state.users.contains_key(&pipe) {
         return ptr::null_mut();
     }
-    // 009 is a strict prefix of 010 (010 only appends methods).
-    if matches!(name, Some(n) if n == c"SteamUtils010" || n == c"SteamUtils009") {
-        return object(&utils::OBJECT);
-    }
-    if user == 1 && state.users.get(&pipe) == Some(&true) && name == Some(c"SteamUser021") {
-        return object(&user::OBJECT);
-    }
-    if user == 1 && state.users.get(&pipe) == Some(&true) && name == Some(c"SteamUser023") {
-        return object(&user::OBJECT023);
-    }
-    if user == 1 && state.users.get(&pipe) == Some(&true) && name == Some(c"SteamFriends017") {
-        return object(&friends::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMTIMELINE_INTERFACE_V001")
+    if let Some(entry) = entry(name)
+        && (!entry.session || (user == 1 && state.users.get(&pipe) == Some(&true)))
     {
-        return object(&timeline::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMAPPS_INTERFACE_VERSION008")
-    {
-        return object(&apps::OBJECT);
-    }
-    if user == 1 && state.users.get(&pipe) == Some(&true) && name == Some(c"SteamMatchMaking009") {
-        return object(&matchmaking::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"SteamMatchGameSearch001")
-    {
-        return object(&matchmaking::SEARCH);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"SteamMatchMakingServers002")
-    {
-        return object(&matchmaking::SERVERS);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMUSERSTATS_INTERFACE_VERSION012")
-    {
-        return object(&userstats::OBJECT);
-    }
-    if user == 1 && state.users.get(&pipe) == Some(&true) && name == Some(c"SteamNetworking006") {
-        return object(&networking::NETWORKING);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"SteamNetworkingSockets012")
-    {
-        return sockets::object();
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"SteamNetworkingMessages002")
-    {
-        return sockets::messages_object();
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMREMOTESTORAGE_INTERFACE_VERSION016")
-    {
-        return object(&remotestorage::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMSCREENSHOTS_INTERFACE_VERSION003")
-    {
-        return object(&screenshots::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMHTTP_INTERFACE_VERSION003")
-    {
-        return object(&http::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"SteamGameCoordinator001")
-    {
-        return object(&gc::OBJECT);
-    }
-    if user == 1 && state.users.get(&pipe) == Some(&true) && name == Some(c"SteamController008") {
-        return object(&controller::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMUGC_INTERFACE_VERSION017")
-    {
-        return object(&ugc::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMUGC_INTERFACE_VERSION016")
-    {
-        return object(&ugc::OBJECT016);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMAPPLIST_INTERFACE_VERSION001")
-    {
-        return object(&applist::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMMUSIC_INTERFACE_VERSION001")
-    {
-        return object(&music::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMMUSICREMOTE_INTERFACE_VERSION001")
-    {
-        return object(&musicremote::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMHTMLSURFACE_INTERFACE_VERSION_005")
-    {
-        return object(&htmlsurface::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMINVENTORY_INTERFACE_V003")
-    {
-        return object(&inventory::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && matches!(name, Some(n) if n == c"STEAMVIDEO_INTERFACE_V007" || n == c"STEAMVIDEO_INTERFACE_V002")
-    {
-        return object(&video::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMPARENTALSETTINGS_INTERFACE_VERSION001")
-    {
-        return object(&parental::OBJECT);
-    }
-    if user == 1 && state.users.get(&pipe) == Some(&true) && name == Some(c"SteamInput006") {
-        return object(&input::OBJECT);
-    }
-    if user == 1
-        && state.users.get(&pipe) == Some(&true)
-        && name == Some(c"STEAMREMOTEPLAY_INTERFACE_VERSION001")
-    {
-        return object(&remoteplay::OBJECT);
-    }
-    if user == 1 && state.users.get(&pipe) == Some(&true) && name == Some(c"SteamParties002") {
-        return object(&parties::OBJECT);
-    }
-    if name == Some(c"SteamNetworkingUtils004") {
-        return object(&networking::UTILS);
+        return (entry.object)();
     }
     trace(format_args!("UNSUPPORTED interface {name:?}"));
     ptr::null_mut()
+}
+/// Typed factory slots use the same version and session validation as the
+/// generic factory, and each only serves its own interface family.
+unsafe fn typed(family: Family, user: i32, pipe: i32, name: *const c_char) -> *mut c_void {
+    if !entry(unsafe { version(name) }).is_some_and(|e| e.family == family) {
+        trace(format_args!("UNSUPPORTED interface {:?}", unsafe {
+            version(name)
+        }));
+        return ptr::null_mut();
+    }
+    unsafe { lookup(user, pipe, name) }
 }
 unsafe extern "C" fn get_user_interface(
     _this: *mut c_void,
@@ -258,24 +226,10 @@ unsafe extern "C" fn get_user_interface(
     pipe: i32,
     name: *const c_char,
 ) -> *mut c_void {
-    if !matches!(unsafe { version(name) }, Some(n) if n == c"SteamUser021" || n == c"SteamUser023")
-    {
-        trace(format_args!("UNSUPPORTED user interface {:?}", unsafe {
-            version(name)
-        }));
-        return ptr::null_mut();
-    }
-    unsafe { lookup(user, pipe, name) }
+    unsafe { typed(Family::User, user, pipe, name) }
 }
 unsafe extern "C" fn get_utils(_this: *mut c_void, pipe: i32, name: *const c_char) -> *mut c_void {
-    if !matches!(unsafe { version(name) }, Some(n) if n == c"SteamUtils010" || n == c"SteamUtils009")
-    {
-        trace(format_args!("UNSUPPORTED utils interface {:?}", unsafe {
-            version(name)
-        }));
-        return ptr::null_mut();
-    }
-    unsafe { lookup(0, pipe, name) }
+    unsafe { typed(Family::Utils, 0, pipe, name) }
 }
 unsafe extern "C" fn generic(
     _this: *mut c_void,
@@ -285,77 +239,38 @@ unsafe extern "C" fn generic(
 ) -> *mut c_void {
     unsafe { lookup(user, pipe, name) }
 }
-unsafe extern "C" fn get_apps(
-    _this: *mut c_void,
-    user: i32,
-    pipe: i32,
-    name: *const c_char,
-) -> *mut c_void {
-    if unsafe { version(name) } != Some(c"STEAMAPPS_INTERFACE_VERSION008") {
-        trace("UNSUPPORTED apps interface");
-        return ptr::null_mut();
-    }
-    unsafe { lookup(user, pipe, name) }
-}
-unsafe extern "C" fn get_friends(
-    _this: *mut c_void,
-    user: i32,
-    pipe: i32,
-    name: *const c_char,
-) -> *mut c_void {
-    if unsafe { version(name) } != Some(c"SteamFriends017") {
-        trace("UNSUPPORTED friends interface");
-        return ptr::null_mut();
-    }
-    unsafe { lookup(user, pipe, name) }
-}
-unsafe extern "C" fn get_matchmaking(
-    _this: *mut c_void,
-    user: i32,
-    pipe: i32,
-    name: *const c_char,
-) -> *mut c_void {
-    if unsafe { version(name) } != Some(c"SteamMatchMaking009") {
-        trace("UNSUPPORTED matchmaking interface");
-        return ptr::null_mut();
-    }
-    unsafe { lookup(user, pipe, name) }
-}
-// Typed factory slots use the same version and session validation as the
-// generic factory. Keep each slot restricted to its own interface family.
 macro_rules! typed_getters {
-    ($($getter:ident => $($name:literal)|+;)*) => {
+    ($($getter:ident => $family:ident;)*) => {
         $(unsafe extern "C" fn $getter(
             _this: *mut c_void, user: i32, pipe: i32, name: *const c_char,
         ) -> *mut c_void {
-            if !matches!(unsafe { version(name) }, Some(n) if false $(|| n == $name)+) {
-                trace(format_args!("UNSUPPORTED {} interface {:?}", stringify!($getter), unsafe { version(name) }));
-                return ptr::null_mut();
-            }
-            unsafe { lookup(user, pipe, name) }
+            unsafe { typed(Family::$family, user, pipe, name) }
         })*
     };
 }
 typed_getters! {
-    get_servers => c"SteamMatchMakingServers002";
-    get_userstats => c"STEAMUSERSTATS_INTERFACE_VERSION012";
-    get_networking => c"SteamNetworking006";
-    get_remotestorage => c"STEAMREMOTESTORAGE_INTERFACE_VERSION016";
-    get_screenshots => c"STEAMSCREENSHOTS_INTERFACE_VERSION003";
-    get_search => c"SteamMatchGameSearch001";
-    get_http => c"STEAMHTTP_INTERFACE_VERSION003";
-    get_controller => c"SteamController008";
-    get_ugc => c"STEAMUGC_INTERFACE_VERSION017" | c"STEAMUGC_INTERFACE_VERSION016";
-    get_applist => c"STEAMAPPLIST_INTERFACE_VERSION001";
-    get_music => c"STEAMMUSIC_INTERFACE_VERSION001";
-    get_musicremote => c"STEAMMUSICREMOTE_INTERFACE_VERSION001";
-    get_html => c"STEAMHTMLSURFACE_INTERFACE_VERSION_005";
-    get_inventory => c"STEAMINVENTORY_INTERFACE_V003";
-    get_video => c"STEAMVIDEO_INTERFACE_V007" | c"STEAMVIDEO_INTERFACE_V002";
-    get_parties => c"SteamParties002";
-    get_parental => c"STEAMPARENTALSETTINGS_INTERFACE_VERSION001";
-    get_input => c"SteamInput006";
-    get_remoteplay => c"STEAMREMOTEPLAY_INTERFACE_VERSION001";
+    get_apps => Apps;
+    get_friends => Friends;
+    get_matchmaking => Matchmaking;
+    get_servers => Servers;
+    get_userstats => UserStats;
+    get_networking => Networking;
+    get_remotestorage => RemoteStorage;
+    get_screenshots => Screenshots;
+    get_search => Search;
+    get_http => Http;
+    get_controller => Controller;
+    get_ugc => Ugc;
+    get_applist => AppList;
+    get_music => Music;
+    get_musicremote => MusicRemote;
+    get_html => Html;
+    get_inventory => Inventory;
+    get_video => Video;
+    get_parties => Parties;
+    get_parental => Parental;
+    get_input => Input;
+    get_remoteplay => RemotePlay;
 }
 unsafe extern "C" fn missing(
     _this: *mut c_void,
@@ -535,4 +450,51 @@ static TABLE017: VTable<37> = VTable([
 ]);
 pub(super) static OBJECT017: Object = Object {
     table: TABLE017.0.as_ptr(),
+};
+
+// ---- generated: additional interface versions ----
+
+// SteamClient023 (SDK 165 header layout): slots matched to the base table by method name; the rest are unavailable.
+static TABLE023: VTable<38> = VTable([
+    TABLE021.0[0],
+    TABLE021.0[1],
+    TABLE021.0[2],
+    TABLE021.0[3],
+    TABLE021.0[4],
+    TABLE021.0[5],
+    TABLE021.0[6],
+    TABLE021.0[7],
+    TABLE021.0[8],
+    TABLE021.0[9],
+    TABLE021.0[10],
+    TABLE021.0[11],
+    TABLE021.0[12],
+    TABLE021.0[13],
+    TABLE021.0[14],
+    TABLE021.0[15],
+    TABLE021.0[16],
+    TABLE021.0[17],
+    TABLE021.0[18],
+    TABLE021.0[20],
+    TABLE021.0[21],
+    TABLE021.0[22],
+    TABLE021.0[23],
+    TABLE021.0[24],
+    TABLE021.0[25],
+    TABLE021.0[26],
+    TABLE021.0[27],
+    TABLE021.0[29],
+    TABLE021.0[30],
+    TABLE021.0[31],
+    TABLE021.0[32],
+    TABLE021.0[33],
+    TABLE021.0[34],
+    TABLE021.0[35],
+    TABLE021.0[36],
+    TABLE021.0[37],
+    TABLE021.0[38],
+    TABLE021.0[39],
+]);
+pub(super) static OBJECT023: Object = Object {
+    table: TABLE023.0.as_ptr(),
 };

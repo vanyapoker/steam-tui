@@ -590,3 +590,33 @@ static SERVERS_TABLE: VTable<17> = VTable([
 pub(super) static SERVERS: Object = Object {
     table: SERVERS_TABLE.0.as_ptr(),
 };
+
+// ---- generated: additional interface versions ----
+
+// SteamMatchMakingServers003 (SDK 165 header layout): slots matched to the base table by method name; the rest are unavailable.
+new_slots! {
+    n_servers003_16 => "servers.ServerFriends";
+}
+static TABLE_SERVERS003: VTable<18> = VTable([
+    SERVERS_TABLE.0[0],
+    SERVERS_TABLE.0[1],
+    SERVERS_TABLE.0[2],
+    SERVERS_TABLE.0[3],
+    SERVERS_TABLE.0[4],
+    SERVERS_TABLE.0[5],
+    SERVERS_TABLE.0[6],
+    SERVERS_TABLE.0[7],
+    SERVERS_TABLE.0[8],
+    SERVERS_TABLE.0[9],
+    SERVERS_TABLE.0[10],
+    SERVERS_TABLE.0[11],
+    SERVERS_TABLE.0[12],
+    SERVERS_TABLE.0[13],
+    SERVERS_TABLE.0[14],
+    SERVERS_TABLE.0[15],
+    n_servers003_16 as *const (),
+    SERVERS_TABLE.0[16],
+]);
+pub(super) static OBJECT_SERVERS003: Object = Object {
+    table: TABLE_SERVERS003.0.as_ptr(),
+};

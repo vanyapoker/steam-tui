@@ -662,3 +662,81 @@ static TABLE: VTable<59> = VTable([
 pub(super) static OBJECT: Object = Object {
     table: TABLE.0.as_ptr(),
 };
+
+// ---- generated: additional interface versions ----
+
+// STEAMREMOTESTORAGE_INTERFACE_VERSION014 (SDK 151 header layout): slots matched to the base table by method name; the rest are unavailable.
+new_slots! {
+    n_014_30 => "remotestorage.GetFileListFromServer";
+    n_014_31 => "remotestorage.FileFetch";
+    n_014_32 => "remotestorage.FilePersist";
+    n_014_33 => "remotestorage.SynchronizeToClient";
+    n_014_34 => "remotestorage.SynchronizeToServer";
+    n_014_35 => "remotestorage.ResetFileRequestState";
+}
+static TABLE_014: VTable<61> = VTable([
+    TABLE.0[0],
+    TABLE.0[1],
+    TABLE.0[2],
+    TABLE.0[3],
+    TABLE.0[4],
+    TABLE.0[5],
+    TABLE.0[6],
+    TABLE.0[7],
+    TABLE.0[8],
+    TABLE.0[9],
+    TABLE.0[10],
+    TABLE.0[11],
+    TABLE.0[12],
+    TABLE.0[13],
+    TABLE.0[14],
+    TABLE.0[15],
+    TABLE.0[16],
+    TABLE.0[17],
+    TABLE.0[18],
+    TABLE.0[19],
+    TABLE.0[20],
+    TABLE.0[21],
+    TABLE.0[22],
+    TABLE.0[23],
+    TABLE.0[24],
+    TABLE.0[25],
+    TABLE.0[26],
+    TABLE.0[27],
+    TABLE.0[28],
+    TABLE.0[29],
+    n_014_30 as *const (),
+    n_014_31 as *const (),
+    n_014_32 as *const (),
+    n_014_33 as *const (),
+    n_014_34 as *const (),
+    n_014_35 as *const (),
+    TABLE.0[30],
+    TABLE.0[31],
+    TABLE.0[32],
+    TABLE.0[33],
+    TABLE.0[34],
+    TABLE.0[35],
+    TABLE.0[36],
+    TABLE.0[37],
+    TABLE.0[38],
+    TABLE.0[39],
+    TABLE.0[40],
+    TABLE.0[41],
+    TABLE.0[42],
+    TABLE.0[43],
+    TABLE.0[44],
+    TABLE.0[45],
+    TABLE.0[46],
+    TABLE.0[47],
+    TABLE.0[48],
+    TABLE.0[49],
+    TABLE.0[50],
+    TABLE.0[51],
+    TABLE.0[52],
+    TABLE.0[53],
+    TABLE.0[54],
+]);
+pub(super) static OBJECT_014: Object = Object {
+    table: TABLE_014.0.as_ptr(),
+};

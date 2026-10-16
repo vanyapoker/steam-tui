@@ -108,3 +108,56 @@ static TABLE: VTable<45> = VTable([
 pub(super) static OBJECT: Object = Object {
     table: TABLE.0.as_ptr(),
 };
+
+// ---- generated: additional interface versions ----
+
+// STEAMUSERSTATS_INTERFACE_VERSION013 (SDK 165 header layout): slots matched to the base table by method name; the rest are unavailable.
+static TABLE_013: VTable<44> = VTable([
+    TABLE.0[1],
+    TABLE.0[2],
+    TABLE.0[3],
+    TABLE.0[4],
+    TABLE.0[5],
+    TABLE.0[6],
+    TABLE.0[7],
+    TABLE.0[8],
+    TABLE.0[9],
+    TABLE.0[10],
+    TABLE.0[11],
+    TABLE.0[12],
+    TABLE.0[13],
+    TABLE.0[14],
+    TABLE.0[15],
+    TABLE.0[16],
+    TABLE.0[17],
+    TABLE.0[18],
+    TABLE.0[19],
+    TABLE.0[20],
+    TABLE.0[21],
+    TABLE.0[22],
+    TABLE.0[23],
+    TABLE.0[24],
+    TABLE.0[25],
+    TABLE.0[26],
+    TABLE.0[27],
+    TABLE.0[28],
+    TABLE.0[29],
+    TABLE.0[30],
+    TABLE.0[31],
+    TABLE.0[32],
+    TABLE.0[33],
+    TABLE.0[34],
+    TABLE.0[35],
+    TABLE.0[36],
+    TABLE.0[37],
+    TABLE.0[38],
+    TABLE.0[39],
+    TABLE.0[40],
+    TABLE.0[41],
+    TABLE.0[42],
+    TABLE.0[43],
+    TABLE.0[44],
+]);
+pub(super) static OBJECT_013: Object = Object {
+    table: TABLE_013.0.as_ptr(),
+};
