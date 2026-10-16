@@ -49,6 +49,7 @@ mod user;
 mod userstats;
 mod utils;
 mod video;
+mod workshop;
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_char, c_void};

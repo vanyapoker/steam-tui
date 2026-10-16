@@ -1107,7 +1107,7 @@ fn put(node: &mut Node, key: &str, value: String) {
     );
 }
 
-fn encode_vdf(node: &Node) -> Result<Vec<u8>> {
+pub(super) fn encode_vdf(node: &Node) -> Result<Vec<u8>> {
     fn quote(value: &str, out: &mut String) -> Result<()> {
         if value.contains('\0') {
             return Err(failure("NUL in Steam metadata"));

@@ -9,6 +9,7 @@ pub mod stats;
 mod tickets;
 pub mod images;
 pub mod ugc;
+pub mod workshop;
 pub use events::{Direction, Event, EventSender, gc_message_name};
 use std::error::Error;
 use std::fs::{self, DirBuilder};
@@ -19,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use steam_ipc::{MAX_FRAME, Operation, Reply, Request, Response, VERSION};
+use steam_ipc::{MAX_FRAME, Operation, Reply, Request, Response, UgcOp, VERSION};
 use steam_vent::{Connection, ConnectionTrait};
 use steam_vent_proto_steam::steammessages_clientserver::{
     CMsgClientGetAppOwnershipTicket, CMsgClientGetAppOwnershipTicketResponse,
@@ -34,6 +35,8 @@ use tokio::time::{Instant, timeout};
 pub struct Endpoint {
     directory: PathBuf,
     listener: UnixListener,
+    /// The game's library `steamapps` directory, where Workshop items are installed.
+    workshop_dir: Option<PathBuf>,
 }
 
 impl Endpoint {
@@ -56,6 +59,7 @@ impl Endpoint {
                     let endpoint = Self {
                         directory,
                         listener,
+                        workshop_dir: None,
                     };
                     fs::set_permissions(endpoint.path(), fs::Permissions::from_mode(0o600))?;
                     return Ok(endpoint);
@@ -73,6 +77,12 @@ impl Endpoint {
 
     pub fn path(&self) -> PathBuf {
         self.directory.join("client.sock")
+    }
+
+    /// Installs Workshop items below `steamapps/workshop` of this library `steamapps` directory.
+    pub fn with_workshop(mut self, steamapps: PathBuf) -> Self {
+        self.workshop_dir = Some(steamapps);
+        self
     }
 
     /// Runs until cancelled/dropped. Caller owns session lifetime and shutdown.
@@ -152,6 +162,12 @@ impl Endpoint {
                 events.clone(),
             ),
             stats: stats::Stats::new(app_id, events.clone()),
+            workshop: workshop::Service::new(
+                connection,
+                app_id,
+                self.workshop_dir.clone(),
+                events.clone(),
+            ),
             events: events.clone(),
         };
         loop {
@@ -247,6 +263,7 @@ struct Session<'a> {
     pops: std::sync::Arc<std::sync::Mutex<Option<Vec<(String, i32)>>>>,
     lobbies: lobby::Lobbies,
     stats: stats::Stats,
+    workshop: workshop::Service,
     events: Option<EventSender>,
 }
 
@@ -443,6 +460,12 @@ impl Session<'_> {
             }
             Operation::Lobby(op) => self.lobbies.handle(self.connection, op).await,
             Operation::Stats(op) => self.stats.handle(self.connection, op).await,
+            Operation::Ugc(
+                op @ (UgcOp::Snapshot
+                | UgcOp::Download { .. }
+                | UgcOp::Suspend { .. }
+                | UgcOp::Subscribe { .. }),
+            ) => self.workshop.handle(op).await,
             Operation::Ugc(op) => ugc::handle(self.connection, self.app_id, op).await,
             Operation::Image(op) => images::handle(op).await,
             Operation::WebAuthTicket { identity } => match self.tickets.web(identity) {
@@ -454,6 +477,7 @@ impl Session<'_> {
             Operation::PollCallbacks => {
                 let mut callbacks = self.lobbies.poll();
                 callbacks.extend(self.tickets.poll());
+                callbacks.extend(self.workshop.poll());
                 Response::Callbacks(
                     callbacks
                         .into_iter()

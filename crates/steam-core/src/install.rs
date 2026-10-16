@@ -25,6 +25,7 @@ mod filesystem;
 #[cfg(test)]
 mod tests;
 mod transaction;
+pub mod workshop;
 
 use crate::catalog::{DepotSpec, InstallPlan};
 #[cfg(test)]

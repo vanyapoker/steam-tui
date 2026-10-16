@@ -1018,7 +1018,8 @@ pub async fn run_with_backend(
                 }
             }
         }
-        let endpoint = crate::backend::Endpoint::create()?;
+        let endpoint = crate::backend::Endpoint::create()?
+            .with_workshop(owned.library_root.join("steamapps"));
         let home = (!plan.environment.contains_key("STEAM_COMPAT_DATA_PATH"))
             .then(|| native_home(owned.app_id, connection.steam_id().account_id()))
             .transpose()?;

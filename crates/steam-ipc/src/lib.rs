@@ -75,9 +75,113 @@ pub enum UgcOp {
         ids: Vec<u64>,
         long_description: bool,
     },
+    /// A page of published files (CreateQueryAll/UserUGCRequest + Send).
+    Query(Box<UgcQuery>),
+    /// Every file this account is subscribed to for the app (all pages, no descriptions).
+    Subscribed { app: u32 },
+    /// Subscribe to or unsubscribe from a published file.
+    Subscribe { app: u32, id: u64, subscribe: bool },
+    /// Vote up or down.
+    Vote { id: u64, up: bool },
+    /// The account's own vote on a file.
+    GetVote { id: u64 },
+    /// Add to or remove from favorites.
+    Favorite { app: u32, id: u64, add: bool },
+    /// Start or stop playtime tracking; empty `ids` stops tracking for all items.
+    Playtime { app: u32, ids: Vec<u64>, start: bool },
+    /// Add or remove a parent -> child item dependency.
+    Dependency { parent: u64, child: u64, add: bool },
+    /// Add or remove an app dependency of an item.
+    AppDependency { id: u64, app: u32, add: bool },
+    /// The apps an item depends on.
+    GetAppDependencies { id: u64 },
+    /// Delete an item the account published.
+    Delete { app: u32, id: u64 },
+    /// Subscribed and tracked items with their install state.
+    Snapshot,
+    /// Queue a download/update of an item (subscribed or not).
+    Download { id: u64, high_priority: bool },
+    /// Pause or resume item downloads.
+    Suspend { on: bool },
 }
 
-/// The fields of `SteamUGCDetails_t` the backend can fill.
+/// One Workshop item as the install service sees it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkshopItem {
+    pub id: u64,
+    pub subscribed: bool,
+    pub installed: bool,
+    /// Pre-SteamPipe item stored as a single file.
+    pub legacy: bool,
+    pub needs_update: bool,
+    pub downloading: bool,
+    pub pending: bool,
+    /// Size on disk of the installed version.
+    pub size: u64,
+    /// Publication time of the installed version (unix seconds).
+    pub time_updated: u32,
+    /// Absolute folder of the installed item.
+    pub path: String,
+    /// Bytes downloaded and expected, while downloading.
+    pub done: u64,
+    pub total: u64,
+    /// EResult of the last failed download (0 = none).
+    pub failed: i32,
+}
+
+/// One ISteamUGC query: what the game set between Create...Request and Send.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UgcQuery {
+    /// `Some(EUserUGCList)` for CreateQueryUserUGCRequest, `None` for all-UGC queries.
+    pub user_list: Option<u32>,
+    /// Account id for user queries (0 = this account).
+    pub account: u32,
+    pub sort_order: u32,
+    /// EUGCQuery for all-UGC queries.
+    pub query_type: u32,
+    /// EUGCMatchingUGCType (-1 = all).
+    pub matching: i32,
+    pub creator_app: u32,
+    pub consumer_app: u32,
+    pub page: u32,
+    pub cursor: String,
+    pub required_tags: Vec<String>,
+    pub excluded_tags: Vec<String>,
+    /// Each group matches when any of its tags does.
+    pub tag_groups: Vec<Vec<String>>,
+    pub match_any_tag: bool,
+    pub kv_tags: Vec<(String, String)>,
+    pub search: String,
+    pub trend_days: u32,
+    pub language: String,
+    pub cache_age: u32,
+    pub cloud_filename: String,
+    pub total_only: bool,
+    pub ids_only: bool,
+    pub long_description: bool,
+    pub metadata: bool,
+    pub key_value_tags: bool,
+    pub children: bool,
+    pub previews: bool,
+    pub playtime_days: u32,
+    pub created: (u32, u32),
+    pub updated: (u32, u32),
+}
+
+/// An additional preview of an item (image or video).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UgcPreview {
+    /// Image URL, or the video id for video previews.
+    pub url: String,
+    pub original: String,
+    /// EItemPreviewType.
+    pub kind: u32,
+}
+
+/// The fields of `SteamUGCDetails_t` the backend can fill, plus what the query getters read.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UgcItem {
@@ -101,11 +205,23 @@ pub struct UgcItem {
     pub file_size: i32,
     pub preview_size: i32,
     pub url: String,
+    /// Direct download URL of legacy (pre-SteamPipe) items.
+    pub file_url: String,
     pub votes_up: u32,
     pub votes_down: u32,
     pub score: f32,
     pub children: u32,
     pub metadata: Vec<u8>,
+    /// (tag, display name)
+    pub tag_list: Vec<(String, String)>,
+    pub preview_url: String,
+    pub kv_tags: Vec<(String, String)>,
+    pub previews: Vec<UgcPreview>,
+    pub child_ids: Vec<u64>,
+    /// (EItemStatistic, value)
+    pub stats: Vec<(u32, u64)>,
+    /// When the account subscribed (unix seconds), 0 if unknown.
+    pub subscribed_at: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -413,6 +529,35 @@ pub enum Response {
     UgcDetails {
         result: i32,
         items: Vec<UgcItem>,
+    },
+    UgcQuery {
+        result: i32,
+        total: u32,
+        cursor: String,
+        items: Vec<UgcItem>,
+    },
+    /// The EResult of a Workshop write (subscribe, vote, favorite, ...).
+    UgcResult {
+        result: i32,
+    },
+    UgcSubscribed {
+        result: i32,
+        items: Vec<UgcItem>,
+    },
+    UgcVote {
+        result: i32,
+        voted_up: bool,
+        voted_down: bool,
+        skipped: bool,
+    },
+    UgcSnapshot {
+        /// False when the service could not list subscriptions (offline).
+        ready: bool,
+        items: Vec<WorkshopItem>,
+    },
+    UgcAppDependencies {
+        result: i32,
+        apps: Vec<u32>,
     },
     /// Decoded image: `rgba` is hex of `width * height * 4` bytes.
     Image {
