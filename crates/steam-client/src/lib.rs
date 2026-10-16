@@ -183,7 +183,7 @@ pub unsafe extern "C" fn Steam_GetAPICallResult(
 /// `name` must be null or a valid C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Steam_IsKnownInterface(name: *const c_char) -> bool {
-    let known = unsafe { version(name) }.is_some_and(|n| client::KNOWN_INTERFACES.contains(&n));
+    let known = unsafe { version(name) }.is_some_and(client::is_known);
     trace(format_args!(
         "Steam_IsKnownInterface({:?}) = {known}",
         unsafe { version(name) }

@@ -1,43 +1,5 @@
 use super::*;
 
-/// Interface versions this library serves; Proton's lsteamclient asks
-/// `Steam_IsKnownInterface` before requesting one.
-pub(super) const KNOWN_INTERFACES: &[&CStr] = &[
-    c"SteamUser021",
-    c"SteamUser023",
-    c"SteamFriends017",
-    c"SteamUtils010",
-    c"SteamUtils009",
-    c"STEAMAPPS_INTERFACE_VERSION008",
-    c"SteamMatchMaking009",
-    c"SteamMatchGameSearch001",
-    c"SteamMatchMakingServers002",
-    c"STEAMUSERSTATS_INTERFACE_VERSION012",
-    c"SteamNetworking006",
-    c"STEAMREMOTESTORAGE_INTERFACE_VERSION016",
-    c"STEAMSCREENSHOTS_INTERFACE_VERSION003",
-    c"STEAMHTTP_INTERFACE_VERSION003",
-    c"SteamController008",
-    c"STEAMUGC_INTERFACE_VERSION017",
-    c"STEAMUGC_INTERFACE_VERSION016",
-    c"STEAMAPPLIST_INTERFACE_VERSION001",
-    c"STEAMMUSIC_INTERFACE_VERSION001",
-    c"STEAMMUSICREMOTE_INTERFACE_VERSION001",
-    c"STEAMHTMLSURFACE_INTERFACE_VERSION_005",
-    c"STEAMINVENTORY_INTERFACE_V003",
-    c"STEAMVIDEO_INTERFACE_V007",
-    c"STEAMVIDEO_INTERFACE_V002",
-    c"SteamParties002",
-    c"STEAMPARENTALSETTINGS_INTERFACE_VERSION001",
-    c"SteamInput006",
-    c"STEAMREMOTEPLAY_INTERFACE_VERSION001",
-    c"SteamGameCoordinator001",
-    c"SteamNetworkingSockets012",
-    c"SteamNetworkingMessages002",
-    c"SteamNetworkingUtils004",
-    c"STEAMTIMELINE_INTERFACE_V001",
-];
-
 unsafe extern "C" fn create_pipe(_this: *mut c_void) -> i32 {
     let mut state = pipes();
     let Some(id) = state.next.checked_add(1) else {
@@ -192,6 +154,11 @@ struct Found {
     family: Family,
     session: bool,
     object: *mut c_void,
+}
+/// Whether any served table answers this interface version; Proton's
+/// lsteamclient asks `Steam_IsKnownInterface` with it before requesting one.
+pub(super) fn is_known(name: &CStr) -> bool {
+    entry(Some(name)).is_some()
 }
 fn entry(name: Option<&CStr>) -> Option<Found> {
     let name = name?;

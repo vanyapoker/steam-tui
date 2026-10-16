@@ -22,6 +22,11 @@ int main(int argc, char **argv) {
     auto factory = reinterpret_cast<void *(*)(const char *, int *)>(dlsym(library, "CreateInterface"));
     assert(factory);
     int result = -1;
+    auto known = reinterpret_cast<bool (*)(const char *)>(dlsym(library, "Steam_IsKnownInterface"));
+    assert(known);
+    for (auto name : {"STEAMREMOTEPLAY_INTERFACE_VERSION002", "SteamFriends018", "SteamUtils011", "SteamUser012"})
+        assert(known(name));
+    assert(!known("SteamUtils012"));
     assert(!factory(nullptr, &result) && result == 1);
     assert(factory("SteamClient017", &result) && result == 0); // Proton bootstrap
     assert(factory("SteamClient021", &result) && result == 0);
