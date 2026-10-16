@@ -55,6 +55,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .handle(&connection, StatsOp::LeaderboardEntries { board: id, request: 0, start: 1, end: 5, users: Vec::new() })
                         .await;
                     println!("  top entries: {}", describe(&entries));
+                    if let Response::BoardEntries { entries, .. } = &entries {
+                        for e in entries {
+                            println!("    entry rank {} score {} ugc {} details {}", e.rank, e.score, e.ugc, steam_ipc::hex_encode(&e.details));
+                        }
+                    }
+                    if let Response::BoardEntries { entries, .. } = &entries
+                        && let Some(first) = entries.iter().find(|e| e.details.len() >= 8)
+                    {
+                        // The game packs the published file id as two int32s, high word first.
+                        let hi = u32::from_le_bytes(first.details[..4].try_into()?);
+                        let lo = u32::from_le_bytes(first.details[4..8].try_into()?);
+                        let id = (u64::from(hi) << 32) | u64::from(lo);
+                        let details = steam_core::backend::ugc::handle(
+                            &connection,
+                            app,
+                            steam_ipc::UgcOp::Details { ids: vec![id], long_description: false },
+                        )
+                        .await;
+                        match details {
+                            Response::UgcDetails { items, .. } => {
+                                for item in items {
+                                    println!("  ugc {}: eresult {} title {:?} owner {} file {} bytes, metadata {} bytes: {:?}", item.id, item.result, item.title, item.owner, item.file_size, item.metadata.len(), String::from_utf8_lossy(&item.metadata[..item.metadata.len().min(80)]));
+                                }
+                            }
+                            other => println!("  ugc: {}", describe(&other)),
+                        }
+                    }
                 }
             }
             Ok(())

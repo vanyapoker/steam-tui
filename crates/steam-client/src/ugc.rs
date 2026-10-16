@@ -1,5 +1,5 @@
-//! STEAMUGC_INTERFACE_VERSION017 without Workshop support: queries and updates
-//! return invalid handles (0) and every other call reports failure. Overloads
+//! STEAMUGC_INTERFACE_VERSION017. Queries by published file id (details and
+//! metadata) are real; every other Workshop call reports failure. Overloads
 //! keep header order (Itanium ABI).
 use super::*;
 
@@ -15,14 +15,10 @@ stubs! {
     f0 => "CreateQueryUserUGCRequest";
     f1 => "CreateQueryAllUGCRequest";
     f2 => "CreateQueryAllUGCRequest";
-    f3 => "CreateQueryUGCDetailsRequest";
-    f4 => "SendQueryUGCRequest";
-    f5 => "GetQueryUGCResult";
     f6 => "GetQueryUGCNumTags";
     f7 => "GetQueryUGCTag";
     f8 => "GetQueryUGCTagDisplayName";
     f9 => "GetQueryUGCPreviewURL";
-    f10 => "GetQueryUGCMetadata";
     f11 => "GetQueryUGCChildren";
     f12 => "GetQueryUGCStatistic";
     f13 => "GetQueryUGCNumAdditionalPreviews";
@@ -31,27 +27,6 @@ stubs! {
     f16 => "GetQueryUGCKeyValueTag";
     f17 => "GetQueryUGCKeyValueTag";
     f18 => "GetQueryUGCContentDescriptors";
-    f19 => "ReleaseQueryUGCRequest";
-    f20 => "AddRequiredTag";
-    f21 => "AddRequiredTagGroup";
-    f22 => "AddExcludedTag";
-    f23 => "SetReturnOnlyIDs";
-    f24 => "SetReturnKeyValueTags";
-    f25 => "SetReturnLongDescription";
-    f26 => "SetReturnMetadata";
-    f27 => "SetReturnChildren";
-    f28 => "SetReturnAdditionalPreviews";
-    f29 => "SetReturnTotalOnly";
-    f30 => "SetReturnPlaytimeStats";
-    f31 => "SetLanguage";
-    f32 => "SetAllowCachedResponse";
-    f33 => "SetCloudFileNameFilter";
-    f34 => "SetMatchAnyTag";
-    f35 => "SetSearchText";
-    f36 => "SetRankedByTrendDays";
-    f37 => "SetTimeCreatedDateRange";
-    f38 => "SetTimeUpdatedDateRange";
-    f39 => "AddRequiredKeyValueTag";
     f40 => "RequestUGCDetails";
     f41 => "CreateItem";
     f42 => "StartItemUpdate";
@@ -106,14 +81,14 @@ pub(super) static TABLE: VTable<89> = VTable([
     f0 as *const (),
     f1 as *const (),
     f2 as *const (),
-    f3 as *const (),
-    f4 as *const (),
-    f5 as *const (),
+    q_create as *const (),
+    q_send as *const (),
+    q_result as *const (),
     f6 as *const (),
     f7 as *const (),
     f8 as *const (),
     f9 as *const (),
-    f10 as *const (),
+    q_metadata as *const (),
     f11 as *const (),
     f12 as *const (),
     f13 as *const (),
@@ -122,27 +97,27 @@ pub(super) static TABLE: VTable<89> = VTable([
     f16 as *const (),
     f17 as *const (),
     f18 as *const (),
-    f19 as *const (),
-    f20 as *const (),
-    f21 as *const (),
-    f22 as *const (),
-    f23 as *const (),
-    f24 as *const (),
-    f25 as *const (),
-    f26 as *const (),
-    f27 as *const (),
-    f28 as *const (),
-    f29 as *const (),
-    f30 as *const (),
-    f31 as *const (),
-    f32 as *const (),
-    f33 as *const (),
-    f34 as *const (),
-    f35 as *const (),
-    f36 as *const (),
-    f37 as *const (),
-    f38 as *const (),
-    f39 as *const (),
+    q_release as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_flag_long_description as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
+    q_setter as *const (),
     f40 as *const (),
     f41 as *const (),
     f42 as *const (),
@@ -217,6 +192,205 @@ static TABLE016: VTable<86> = table016();
 pub(super) static OBJECT016: Object = Object {
     table: TABLE016.0.as_ptr(),
 };
+
+// ---- queries by published file id -------------------------------------------
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use steam_ipc::{Operation, Response, UgcItem, UgcOp};
+
+/// k_iSteamUGCCallbacks = 3400.
+const UGC_QUERY_COMPLETED: i32 = 3401;
+const MAX_QUERIES: usize = 64;
+/// SDK 1.60 (UGC 020 and later) appended m_ulTotalFilesSize to SteamUGCDetails_t.
+static WIDE_DETAILS: AtomicBool = AtomicBool::new(false);
+static NEXT_QUERY: AtomicU64 = AtomicU64::new(1);
+
+pub(super) fn note_wide_details() {
+    WIDE_DETAILS.store(true, Ordering::Release);
+}
+
+#[derive(Default)]
+struct Query {
+    ids: Vec<u64>,
+    long_description: bool,
+    results: Vec<UgcItem>,
+}
+
+fn queries() -> std::sync::MutexGuard<'static, HashMap<u64, Query>> {
+    static QUERIES: OnceLock<Mutex<HashMap<u64, Query>>> = OnceLock::new();
+    QUERIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+unsafe extern "C" fn q_create(_: *mut c_void, ids: *const u64, count: u32) -> u64 {
+    if ids.is_null() || count == 0 || count > 256 {
+        return 0;
+    }
+    let mut map = queries();
+    if map.len() >= MAX_QUERIES {
+        return 0;
+    }
+    let handle = NEXT_QUERY.fetch_add(1, Ordering::Relaxed);
+    let ids = unsafe { std::slice::from_raw_parts(ids, count as usize) }.to_vec();
+    trace(format_args!(
+        "ugc.CreateQueryUGCDetailsRequest {} ids",
+        ids.len()
+    ));
+    map.insert(
+        handle,
+        Query {
+            ids,
+            ..Default::default()
+        },
+    );
+    handle
+}
+
+unsafe extern "C" fn q_setter() -> bool {
+    true
+}
+
+unsafe extern "C" fn q_flag_long_description(_: *mut c_void, handle: u64, on: bool) -> bool {
+    match queries().get_mut(&handle) {
+        Some(query) => {
+            query.long_description = on;
+            true
+        }
+        None => false,
+    }
+}
+
+fn completed(handle: u64, result: i32, found: u32) -> Vec<u8> {
+    // SteamUGCQueryCompleted_t (pack 4): handle, result, returned, total, cached, cursor[256].
+    let mut payload = handle.to_le_bytes().to_vec();
+    payload.extend(result.to_le_bytes());
+    payload.extend(found.to_le_bytes());
+    payload.extend(found.to_le_bytes());
+    payload.resize(280, 0);
+    payload
+}
+
+unsafe extern "C" fn q_send(_: *mut c_void, handle: u64) -> u64 {
+    let request = queries()
+        .get(&handle)
+        .map(|q| (q.ids.clone(), q.long_description));
+    let failure = completed(handle, 2, 0);
+    let Some((ids, long_description)) = request else {
+        let call = callresults::reserve();
+        callresults::complete_for(call, UGC_QUERY_COMPLETED, failure);
+        return call;
+    };
+    if std::env::var_os("STEAM_TUI_BACKEND_SOCKET").is_none() {
+        let call = callresults::reserve();
+        callresults::complete_for(call, UGC_QUERY_COMPLETED, failure);
+        return call;
+    }
+    trace("ugc.SendQueryUGCRequest");
+    userstats::spawn_call(UGC_QUERY_COMPLETED, failure.clone(), move || {
+        let response = bridge::request(
+            current_app_id(),
+            Operation::Ugc(UgcOp::Details {
+                ids,
+                long_description,
+            }),
+        );
+        match response {
+            Ok(Response::UgcDetails { result: 1, items }) => {
+                let found = items.len() as u32;
+                if let Some(query) = queries().get_mut(&handle) {
+                    query.results = items;
+                }
+                completed(handle, 1, found)
+            }
+            _ => failure,
+        }
+    })
+}
+
+fn put(out: *mut u8, offset: usize, bytes: &[u8]) {
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.add(offset), bytes.len()) };
+}
+fn put_text(out: *mut u8, offset: usize, capacity: usize, text: &str) {
+    let bytes = text.as_bytes();
+    let n = bytes.len().min(capacity - 1);
+    put(out, offset, &bytes[..n]);
+}
+
+unsafe extern "C" fn q_result(_: *mut c_void, handle: u64, index: u32, out: *mut u8) -> bool {
+    if out.is_null() {
+        return false;
+    }
+    let map = queries();
+    let Some(item) = map.get(&handle).and_then(|q| q.results.get(index as usize)) else {
+        return false;
+    };
+    // SteamUGCDetails_t (pack 4): 9764 bytes, 9772 with m_ulTotalFilesSize (SDK 1.60+).
+    let size = if WIDE_DETAILS.load(Ordering::Acquire) {
+        9772
+    } else {
+        9764
+    };
+    unsafe { std::ptr::write_bytes(out, 0, size) };
+    put(out, 0, &item.id.to_le_bytes());
+    put(out, 8, &item.result.to_le_bytes());
+    put(out, 12, &item.file_type.to_le_bytes());
+    put(out, 16, &item.creator_app.to_le_bytes());
+    put(out, 20, &item.consumer_app.to_le_bytes());
+    put_text(out, 24, 129, &item.title);
+    put_text(out, 153, 8000, &item.description);
+    put(out, 8156, &item.owner.to_le_bytes());
+    put(out, 8164, &item.created.to_le_bytes());
+    put(out, 8168, &item.updated.to_le_bytes());
+    put(out, 8176, &item.visibility.to_le_bytes());
+    put(out, 8180, &[u8::from(item.banned), 1, 0]);
+    put_text(out, 8183, 1025, &item.tags);
+    put(out, 9208, &item.file_handle.to_le_bytes());
+    put(out, 9216, &item.preview_handle.to_le_bytes());
+    put_text(out, 9224, 260, &item.file_name);
+    put(out, 9484, &item.file_size.to_le_bytes());
+    put(out, 9488, &item.preview_size.to_le_bytes());
+    put_text(out, 9492, 256, &item.url);
+    put(out, 9748, &item.votes_up.to_le_bytes());
+    put(out, 9752, &item.votes_down.to_le_bytes());
+    put(out, 9756, &item.score.to_le_bytes());
+    put(out, 9760, &item.children.to_le_bytes());
+    if size == 9772 {
+        put(out, 9764, &(item.file_size.max(0) as u64).to_le_bytes());
+    }
+    true
+}
+
+unsafe extern "C" fn q_metadata(
+    _: *mut c_void,
+    handle: u64,
+    index: u32,
+    out: *mut u8,
+    capacity: u32,
+) -> bool {
+    if out.is_null() || capacity == 0 {
+        return false;
+    }
+    let map = queries();
+    let Some(item) = map.get(&handle).and_then(|q| q.results.get(index as usize)) else {
+        return false;
+    };
+    if item.metadata.is_empty() {
+        return false;
+    }
+    let n = item.metadata.len().min(capacity as usize - 1);
+    unsafe {
+        std::ptr::copy_nonoverlapping(item.metadata.as_ptr(), out, n);
+        out.add(n).write(0);
+    }
+    true
+}
+
+unsafe extern "C" fn q_release(_: *mut c_void, handle: u64) -> bool {
+    queries().remove(&handle).is_some()
+}
 
 // ---- generated: additional interface versions ----
 

@@ -146,7 +146,7 @@ fn now() -> u32 {
 
 /// Runs `work` off the game thread and completes a new call with its payload.
 /// `failure` is delivered if the worker cannot start.
-fn spawn_call(
+pub(super) fn spawn_call(
     callback: i32,
     failure: Vec<u8>,
     work: impl FnOnce() -> Vec<u8> + Send + 'static,

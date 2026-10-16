@@ -133,8 +133,14 @@ static REGISTRY: &[Entry] = registry! {
     Ugc, true, c"STEAMUGC_INTERFACE_VERSION016" => object(&ugc::OBJECT016);
     Ugc, true, c"STEAMUGC_INTERFACE_VERSION017" => object(&ugc::OBJECT);
     Ugc, true, c"STEAMUGC_INTERFACE_VERSION018" => object(&ugc::OBJECT_018);
-    Ugc, true, c"STEAMUGC_INTERFACE_VERSION020" => object(&ugc::OBJECT_020);
-    Ugc, true, c"STEAMUGC_INTERFACE_VERSION021" => object(&ugc::OBJECT_021);
+    Ugc, true, c"STEAMUGC_INTERFACE_VERSION020" => {
+        ugc::note_wide_details();
+        object(&ugc::OBJECT_020)
+    };
+    Ugc, true, c"STEAMUGC_INTERFACE_VERSION021" => {
+        ugc::note_wide_details();
+        object(&ugc::OBJECT_021)
+    };
     AppList, true, c"STEAMAPPLIST_INTERFACE_VERSION001" => object(&applist::OBJECT);
     Music, true, c"STEAMMUSIC_INTERFACE_VERSION001" => object(&music::OBJECT);
     MusicRemote, true, c"STEAMMUSICREMOTE_INTERFACE_VERSION001" => object(&musicremote::OBJECT);

@@ -119,6 +119,24 @@ def ffi_child():
     out['num_ach'] = call(stats, 14, ctypes.c_uint32)
     assert call(stats, 10, ctypes.c_bool)
     time.sleep(0.4)
+    # UGC: details by published file id with metadata (UGC 020, SteamUGCDetails_t 9772 bytes).
+    ugc = call(client, 12, ctypes.c_void_p, gtypes, (user, pipe, b'STEAMUGC_INTERFACE_VERSION020'))
+    assert ugc
+    ids = (ctypes.c_uint64 * 1)(555)
+    query = call(ugc, 3, ctypes.c_uint64, (ctypes.c_void_p, ctypes.c_uint32), (ids, 1))
+    assert query
+    assert call(ugc, 26, ctypes.c_bool, (ctypes.c_uint64, ctypes.c_bool), (query, True))
+    c = call(ugc, 4, ctypes.c_uint64, (ctypes.c_uint64,), (query,))
+    handle, status, count, total = struct.unpack_from('<QiII', result(c, 280, 3401))
+    details = ctypes.create_string_buffer(9772)
+    ok = call(ugc, 5, ctypes.c_bool, (ctypes.c_uint64, ctypes.c_uint32, ctypes.c_void_p), (query, 0, details))
+    raw = details.raw
+    meta = ctypes.create_string_buffer(64)
+    got_meta = call(ugc, 10, ctypes.c_bool, (ctypes.c_uint64, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32), (query, 0, meta, 64))
+    out['ugc'] = [status, count, ok, struct.unpack_from('<Qi', raw, 0), raw[24:29].decode(),
+                  struct.unpack_from('<Q', raw, 8156)[0], struct.unpack_from('<Q', raw, 9764)[0],
+                  got_meta, meta.value.decode()]
+    assert call(ugc, 21, ctypes.c_bool, (ctypes.c_uint64,), (query,))
     print(json.dumps(out))
 
 
@@ -180,6 +198,7 @@ class Tests(unittest.TestCase):
         self.assertTrue(out['ach_after'])
         self.assertEqual(out['display'], ['Winner', 'Win once', '1'])
         self.assertEqual(out['num_ach'], 1)
+        self.assertEqual(out['ugc'], [1, 1, True, [555, 1], 'Run 7', 4242, 99, True, '{"run":1}'])
         # The store sent the edited Games stat and the achievement bit.
         self.assertEqual(sorted(map(tuple, stored[0]['stats'])), [(1, 9), (3, 1)])
 
@@ -187,6 +206,8 @@ class Tests(unittest.TestCase):
     def answer(op, stored):
         if op == 'Identity':
             return {'Identity': {'steam_id': ME, 'logged_on': True}}
+        if 'Ugc' in op:
+            return {'UgcDetails': {'result': 1, 'items': [{'id': 555, 'result': 1, 'title': 'Run 7', 'owner': 4242, 'file_size': 99, 'metadata': list(b'{"run":1}')}]}}
         stats = op['Stats']
         if 'FindLeaderboard' in stats:
             assert stats['FindLeaderboard']['name'] == 'Ghosts'
@@ -207,6 +228,8 @@ class Tests(unittest.TestCase):
             return {'StatsData': {'result': 1, 'crc': 5, 'schema': kv_schema().hex(),
                                   'stats': [[1, 4], [2, struct.unpack('<I', struct.pack('<f', 2.5))[0]]],
                                   'unlocks': []}}
+        if 'Ugc' in op:
+            return {'UgcDetails': {'result': 1, 'items': [{'id': 555, 'result': 1, 'title': 'Run 7', 'owner': 4242, 'file_size': 99, 'metadata': list(b'{"run":1}')}]}}
         if 'StoreStats' in stats:
             stored.append(stats['StoreStats'])
             return {'StatsStored': {'result': 1, 'crc': 6, 'failed': [], 'out_of_date': False}}

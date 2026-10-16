@@ -56,6 +56,48 @@ pub enum Operation {
     PollCallbacks,
     /// Leaderboards, stats, achievements and global statistics (ISteamUserStats).
     Stats(StatsOp),
+    /// Workshop/UGC item queries (ISteamUGC).
+    Ugc(UgcOp),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UgcOp {
+    /// Details of published files by id.
+    Details {
+        ids: Vec<u64>,
+        long_description: bool,
+    },
+}
+
+/// The fields of `SteamUGCDetails_t` the backend can fill.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UgcItem {
+    pub id: u64,
+    /// EResult for this item.
+    pub result: i32,
+    pub file_type: i32,
+    pub creator_app: u32,
+    pub consumer_app: u32,
+    pub title: String,
+    pub description: String,
+    pub owner: u64,
+    pub created: u32,
+    pub updated: u32,
+    pub visibility: i32,
+    pub banned: bool,
+    pub tags: String,
+    pub file_handle: u64,
+    pub preview_handle: u64,
+    pub file_name: String,
+    pub file_size: i32,
+    pub preview_size: i32,
+    pub url: String,
+    pub votes_up: u32,
+    pub votes_down: u32,
+    pub score: f32,
+    pub children: u32,
+    pub metadata: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,6 +401,10 @@ pub enum Response {
         totals: Vec<(String, i64)>,
         /// (stat name, per-day deltas, newest first)
         history: Vec<(String, Vec<i64>)>,
+    },
+    UgcDetails {
+        result: i32,
+        items: Vec<UgcItem>,
     },
     GcSent,
     GcNone,
