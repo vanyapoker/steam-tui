@@ -99,7 +99,7 @@ fn object(object: &'static Object) -> *mut c_void {
     ptr::from_ref(object).cast_mut().cast()
 }
 
-/// Steamworks interface factory. SteamClient020 and SteamClient017 (Proton) are supported.
+/// Steamworks interface factory. SteamClient021, SteamClient020 and SteamClient017 (Proton) are supported.
 ///
 /// # Safety
 /// `name` must be null or a valid C string; `result` must be null or writable.
@@ -108,13 +108,15 @@ pub unsafe extern "C" fn CreateInterface(name: *const c_char, result: *mut i32) 
     let name = unsafe { version(name) };
     crash::install();
     trace(format_args!("CreateInterface {name:?}"));
-    let found = matches!(name, Some(n) if n == c"SteamClient020" || n == c"SteamClient017");
+    let found = matches!(name, Some(n) if n == c"SteamClient021" || n == c"SteamClient020" || n == c"SteamClient017");
     if !result.is_null() {
         unsafe { result.write(if found { 0 } else { 1 }) };
     }
     if found {
         if name == Some(c"SteamClient017") {
             object(&client::OBJECT017)
+        } else if name == Some(c"SteamClient021") {
+            object(&client::OBJECT021)
         } else {
             object(&client::OBJECT)
         }

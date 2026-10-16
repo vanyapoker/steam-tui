@@ -443,6 +443,54 @@ pub(super) static OBJECT: Object = Object {
     table: TABLE.0.as_ptr(),
 };
 
+// SteamClient021 (SDK 1.58+, libsteam_api.so slots checked against a shipped
+// build): SteamClient020 without the deprecated UnifiedMessages and AppList slots.
+static TABLE021: VTable<40> = VTable([
+    create_pipe as *const (), // 0
+    release_pipe as *const (),
+    connect as *const (),
+    create_local as *const (),
+    release_user as *const (),
+    get_user_interface as *const (),
+    missing as *const (), // GameServer
+    bind as *const (),
+    get_friends as *const (),
+    get_utils as *const (),
+    get_matchmaking as *const (), // 10
+    get_servers as *const (),
+    generic as *const (),
+    get_userstats as *const (),
+    missing as *const (), // GameServerStats
+    get_apps as *const (), // 15
+    get_networking as *const (),
+    get_remotestorage as *const (),
+    get_screenshots as *const (),
+    get_search as *const (), // GameSearch
+    run_frame as *const (), // 20
+    ipc_count as *const (),
+    hook as *const (), // WarningMessageHook
+    shutdown as *const (),
+    get_http as *const (),       // 24
+    get_controller as *const (), // 25
+    get_ugc as *const (),
+    get_music as *const (),
+    get_musicremote as *const (),
+    get_html as *const (), // 29
+    hook as *const (),     // deprecated Set CPostAPIResult
+    hook as *const (),     // deprecated Remove CPostAPIResult
+    hook as *const (),     // CCheckCallbackRegistered
+    get_inventory as *const (), // 33
+    get_video as *const (),
+    get_parental as *const (),
+    get_input as *const (), // 36
+    get_parties as *const (),
+    get_remoteplay as *const (),
+    destroy as *const (), // 39
+]);
+pub(super) static OBJECT021: Object = Object {
+    table: TABLE021.0.as_ptr(),
+};
+
 // SteamClient017 (what Proton's lsteamclient talks to on the host): 37 slots, no
 // GameSearch/Input/Parties/RemotePlay and RunFrame right after Screenshots. The
 // typed and generic getters both route through the versioned lookup.
