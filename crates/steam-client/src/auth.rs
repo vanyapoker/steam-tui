@@ -62,33 +62,40 @@ pub(super) fn push_callback(id: i32, data: Vec<u8>) {
     }
 }
 
-/// Asynchronous callbacks the account backend queued (lobby updates, chat, ...),
-/// fetched at most every 50 ms.
+/// Asynchronous callbacks the account backend queued (lobby updates, chat, ...).
+/// A background thread polls every 50 ms: the backend serves requests one at a
+/// time, so a slow operation must never stall the game thread that pumps callbacks.
 fn backend_callbacks() -> Vec<Callback> {
     use steam_ipc::{Operation, Response};
-    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    static QUEUE: Mutex<Vec<Callback>> = Mutex::new(Vec::new());
+    static START: std::sync::Once = std::sync::Once::new();
     if std::env::var_os("STEAM_TUI_BACKEND_SOCKET").is_none() {
         return Vec::new();
     }
-    {
-        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if last.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(50)) {
-            return Vec::new();
+    START.call_once(|| {
+        let spawned = std::thread::Builder::new()
+            .name("steam-tui-callbacks".into())
+            .spawn(|| {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    if let Ok(Response::Callbacks(callbacks)) =
+                        bridge::request(current_app_id(), Operation::PollCallbacks)
+                    {
+                        let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                        queue.extend(callbacks.into_iter().filter_map(|(id, hex)| {
+                            Some(Callback {
+                                id,
+                                data: steam_ipc::hex_decode(&hex)?,
+                            })
+                        }));
+                    }
+                }
+            });
+        if spawned.is_err() {
+            trace("callback poller thread could not start");
         }
-        *last = Some(std::time::Instant::now());
-    }
-    match bridge::request(current_app_id(), Operation::PollCallbacks) {
-        Ok(Response::Callbacks(callbacks)) => callbacks
-            .into_iter()
-            .filter_map(|(id, hex)| {
-                Some(Callback {
-                    id,
-                    data: steam_ipc::hex_decode(&hex)?,
-                })
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
+    });
+    std::mem::take(&mut *QUEUE.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 pub(super) unsafe extern "C" fn ticket(
