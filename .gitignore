@@ -1,0 +1,7 @@
+target/
+/docs/
+/todo/
+/AGENTS.md
+/unused/
+__pycache__/
+*.pyc

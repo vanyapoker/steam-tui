@@ -1,0 +1,38 @@
+[workspace]
+members = ["crates/steam-core", "crates/steam-tui", "crates/steam-client", "crates/steam-ipc"]
+exclude = ["vendor/steam-vent", "vendor/steam-vent/core", "vendor/steam-vent/crypto"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.88"
+
+[workspace.dependencies]
+steam-ipc = { path = "crates/steam-ipc" }
+steam-core = { path = "crates/steam-core" }
+steam-vent = { path = "vendor/steam-vent" }
+tokio = { version = "1.53.3", features = ["macros", "rt", "time", "sync", "net", "io-util", "signal"] }
+steam-vent-proto-steam = "0.5.2"
+steam-vent-proto-common = "0.5.1"
+futures-util = "0.3.31"
+secret-service = { version = "5.2", default-features = false, features = ["rt-tokio-crypto-rust"] }
+zeroize = "1.9"
+libc = "0.2"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+unicode-width = "0.2"
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
+bytes = "1"
+steam-vent-crypto = { path = "vendor/steam-vent/crypto" }
+protobuf = "=3.5.1"
+base64 = "0.22"
+crc32fast = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+lzma-rust2 = { version = "0.13", default-features = false, features = ["std"] }
+ruzstd = "0.8"
+parking_lot = "0.12"

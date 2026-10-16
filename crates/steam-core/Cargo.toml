@@ -1,0 +1,32 @@
+[package]
+name = "steam-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license = "MIT"
+
+[dependencies]
+steam-ipc.workspace = true
+steam-vent.workspace = true
+tokio.workspace = true
+steam-vent-proto-steam.workspace = true
+steam-vent-proto-common.workspace = true
+futures-util.workspace = true
+secret-service.workspace = true
+zeroize.workspace = true
+libc.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+reqwest.workspace = true
+bytes.workspace = true
+steam-vent-crypto.workspace = true
+protobuf.workspace = true
+base64.workspace = true
+crc32fast.workspace = true
+zip.workspace = true
+lzma-rust2.workspace = true
+ruzstd.workspace = true
+parking_lot.workspace = true

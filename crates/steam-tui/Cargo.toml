@@ -1,0 +1,19 @@
+[package]
+name = "steam-tui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license = "MIT"
+
+[dependencies]
+steam-core.workspace = true
+tokio.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+chrono.workspace = true
+unicode-width.workspace = true
+tokio-util.workspace = true
+steam-vent.workspace = true
+libc.workspace = true

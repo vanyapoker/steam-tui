@@ -1,0 +1,7 @@
+https://github.com/ValveSoftware/GameNetworkingSockets
+commit a424b7db649438acafb60c99cae6667587c42732
+Local changes: conditional STEAM_TUI_SDR hooks in
+src/steamnetworkingsockets/clientlib/steamnetworkingsockets_p2p.cpp.
+Hooks attach the project relay transport and exchange route advertisements
+through the existing custom-signaling rendezvous. Relay code lives outside
+the vendor tree in crates/steam-client/native/.
