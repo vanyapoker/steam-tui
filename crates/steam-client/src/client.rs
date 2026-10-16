@@ -114,7 +114,11 @@ static REGISTRY: &[Entry] = registry! {
     Servers, true, c"SteamMatchMakingServers002" => object(&matchmaking::SERVERS);
     Servers, true, c"SteamMatchMakingServers003" => object(&matchmaking::OBJECT_SERVERS003);
     UserStats, true, c"STEAMUSERSTATS_INTERFACE_VERSION012" => object(&userstats::OBJECT);
-    UserStats, true, c"STEAMUSERSTATS_INTERFACE_VERSION013" => object(&userstats::OBJECT_013);
+    // 013 dropped RequestCurrentStats: the client loads the stats when the game connects.
+    UserStats, true, c"STEAMUSERSTATS_INTERFACE_VERSION013" => {
+        userstats::auto_request();
+        object(&userstats::OBJECT_013)
+    };
     Networking, true, c"SteamNetworking006" => object(&networking::NETWORKING);
     // 013 keeps 012's slot order (SendMessages gained a trailing bool).
     Generic, true, c"SteamNetworkingSockets012" => sockets::object();

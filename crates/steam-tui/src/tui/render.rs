@@ -358,10 +358,7 @@ fn hint(key: &str, description: &str) -> Vec<Seg> {
         .map(|(text, style)| seg(text, style))
         .collect();
     }
-    vec![
-        seg(key, key_cap()),
-        seg(format!(" {description}"), word()),
-    ]
+    vec![seg(key, key_cap()), seg(format!(" {description}"), word())]
 }
 
 fn percent(progress: &InstallProgress) -> u32 {
@@ -516,7 +513,11 @@ pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
         // or the badge line, an optional status line and the feed.
         let feed = 1 + usize::from(!model.notif_status.is_empty()) + model.notifications.len();
         let wanted = (model.friend_order.len().max(feed) + 2).min(u16::MAX as usize) as u16;
-        let areas = areas(area, model.install_active || model.progress.is_some(), wanted);
+        let areas = areas(
+            area,
+            model.install_active || model.progress.is_some(),
+            wanted,
+        );
         model.library_rows = (areas.library.height.saturating_sub(4) as usize)
             .saturating_sub(divider)
             .max(1);
@@ -810,7 +811,11 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
         Style::default().fg(Color::Yellow),
     ));
     left.push(sort);
-    let position = if model.order.is_empty() { 0 } else { model.selected + 1 };
+    let position = if model.order.is_empty() {
+        0
+    } else {
+        model.selected + 1
+    };
     let mut count = vec![
         seg(position.to_string(), bold()),
         seg("/", dim()),
@@ -913,36 +918,39 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
             let game = &model.games[index];
             let marker = theme::marker(game);
             let (tag, tag_style) = theme::state_tag(game);
-            Row::new(columns.iter().map(|column| match column {
-                Col::Os => Cell::from(Span::styled(marker.badge(), marker.style())),
-                Col::Cloud => cloud_cell(model.cloud_icon(game, spin)),
-                Col::State => match install_state(model, game) {
-                    Some((text, style)) => Cell::from(Span::styled(text, style)),
-                    None => Cell::from(Span::styled(tag, tag_style)),
-                },
-                Col::Name => {
-                    let pinned = model.pins.contains(&game.app_id);
-                    let label = if pinned {
-                        format!("★ {}", game.name)
-                    } else {
-                        game.name.clone()
-                    };
-                    Cell::from(Span::styled(fit(&label, name_width), name_style(game)))
-                }
-                Col::Size => Cell::from(
-                    Line::from(value_span(size(game.size_bytes), theme::size_style())).right_aligned(),
-                ),
-                Col::Last => Cell::from(
-                    Line::from(value_span(last_played(game.last_played), Style::default()))
+            Row::new(columns.iter().map(|column| {
+                match column {
+                    Col::Os => Cell::from(Span::styled(marker.badge(), marker.style())),
+                    Col::Cloud => cloud_cell(model.cloud_icon(game, spin)),
+                    Col::State => match install_state(model, game) {
+                        Some((text, style)) => Cell::from(Span::styled(text, style)),
+                        None => Cell::from(Span::styled(tag, tag_style)),
+                    },
+                    Col::Name => {
+                        let pinned = model.pins.contains(&game.app_id);
+                        let label = if pinned {
+                            format!("★ {}", game.name)
+                        } else {
+                            game.name.clone()
+                        };
+                        Cell::from(Span::styled(fit(&label, name_width), name_style(game)))
+                    }
+                    Col::Size => Cell::from(
+                        Line::from(value_span(size(game.size_bytes), theme::size_style()))
+                            .right_aligned(),
+                    ),
+                    Col::Last => Cell::from(
+                        Line::from(value_span(last_played(game.last_played), Style::default()))
+                            .right_aligned(),
+                    ),
+                    Col::Played => Cell::from(
+                        Line::from(value_span(
+                            play_time(game.playtime_minutes),
+                            theme::playtime_style(),
+                        ))
                         .right_aligned(),
-                ),
-                Col::Played => Cell::from(
-                    Line::from(value_span(
-                        play_time(game.playtime_minutes),
-                        theme::playtime_style(),
-                    ))
-                    .right_aligned(),
-                ),
+                    ),
+                }
             }))
         })
         .collect();
@@ -1035,7 +1043,11 @@ fn draw_friends(frame: &mut Frame<'_>, model: &Model, area: Rect) {
         {
             let mut group = hint("o", "offline");
             group.push(seg(
-                if model.show_offline { " shown" } else { " hidden" },
+                if model.show_offline {
+                    " shown"
+                } else {
+                    " hidden"
+                },
                 dim(),
             ));
             group
@@ -2032,8 +2044,8 @@ fn cloud_conflicts(frame: &mut Frame<'_>, model: &Model) {
         ]),
         rows[0],
     );
-    let cards = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[1]);
+    let cards =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[1]);
     let card = |frame: &mut Frame<'_>,
                 rect: Rect,
                 title: &str,
@@ -2042,7 +2054,9 @@ fn cloud_conflicts(frame: &mut Frame<'_>, model: &Model) {
                 missing: &str,
                 chosen: bool| {
         let border = if chosen {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
         } else {
             dim()
         };
@@ -2052,7 +2066,10 @@ fn cloud_conflicts(frame: &mut Frame<'_>, model: &Model) {
             .title_top(title_groups(
                 vec![vec![
                     seg(key, key_cap()),
-                    seg(format!(" {title}"), if chosen { bold() } else { Style::default() }),
+                    seg(
+                        format!(" {title}"),
+                        if chosen { bold() } else { Style::default() },
+                    ),
                 ]],
                 border,
                 rect.width.saturating_sub(2) as usize,
@@ -2071,9 +2088,24 @@ fn cloud_conflicts(frame: &mut Frame<'_>, model: &Model) {
         let width = content.width as usize;
         let lines = match version {
             Some(v) => vec![
-                fit_line(vec![seg("Saved  ", dim()), seg(last_played(Some(v.time)), Style::default())], width),
-                fit_line(vec![seg("Size   ", dim()), value_span_seg(size(Some(v.size)))], width),
-                fit_line(vec![seg("SHA1   ", dim()), seg(v.sha1.chars().take(12).collect::<String>(), dim())], width),
+                fit_line(
+                    vec![
+                        seg("Saved  ", dim()),
+                        seg(last_played(Some(v.time)), Style::default()),
+                    ],
+                    width,
+                ),
+                fit_line(
+                    vec![seg("Size   ", dim()), value_span_seg(size(Some(v.size)))],
+                    width,
+                ),
+                fit_line(
+                    vec![
+                        seg("SHA1   ", dim()),
+                        seg(v.sha1.chars().take(12).collect::<String>(), dim()),
+                    ],
+                    width,
+                ),
             ],
             None => vec![fit_line(vec![seg(missing, dim())], width)],
         };
@@ -2098,9 +2130,16 @@ fn cloud_conflicts(frame: &mut Frame<'_>, model: &Model) {
         modal.choice == Some(Choice::Cloud),
     );
     let mut lines = vec![Line::from(match modal.choice {
-        Some(Choice::Local) => Span::styled("Enter keeps LOCAL and replaces the cloud copy", bold()),
-        Some(Choice::Cloud) => Span::styled("Enter keeps CLOUD and replaces the local copy", bold()),
-        None => Span::styled("Choose l (local) or r (cloud), then Enter. Other files keep their own choice.", dim()),
+        Some(Choice::Local) => {
+            Span::styled("Enter keeps LOCAL and replaces the cloud copy", bold())
+        }
+        Some(Choice::Cloud) => {
+            Span::styled("Enter keeps CLOUD and replaces the local copy", bold())
+        }
+        None => Span::styled(
+            "Choose l (local) or r (cloud), then Enter. Other files keep their own choice.",
+            dim(),
+        ),
     })];
     if modal.busy {
         lines.push(Line::from(Span::styled(
@@ -3057,57 +3096,195 @@ mod tests {
         use ratatui::style::{Color, Modifier};
         use steam_core::catalog::{InstallPlatform, UpdateStatus};
         use steam_core::friends::{Friend, Presence};
-        use steam_core::notifications::Notification;
         use steam_core::install::InstallPhase;
+        use steam_core::notifications::Notification;
 
-        let Some(path) = std::env::var_os("STEAM_TUI_SCREENSHOT") else { return };
+        let Some(path) = std::env::var_os("STEAM_TUI_SCREENSHOT") else {
+            return;
+        };
         let mut model = Model::new(false, None);
         model.account = Some("alice".into());
         // (id, name, installed, platform, update, GiB, played minutes)
         let library: [(u32, &str, bool, InstallPlatform, bool, u64, u32); 16] = [
-            (730, "Counter-Strike 2", true, InstallPlatform::Linux, false, 33, 41_210),
-            (620, "Portal 2", true, InstallPlatform::Linux, false, 12, 1_130),
-            (440, "Team Fortress 2", true, InstallPlatform::Linux, true, 26, 9_480),
-            (632360, "Risk of Rain 2", true, InstallPlatform::Windows, false, 8, 2_960),
-            (413150, "Stardew Valley", true, InstallPlatform::Linux, false, 1, 3_720),
-            (1145360, "Hades", true, InstallPlatform::Windows, false, 15, 2_410),
-            (427520, "Factorio", true, InstallPlatform::Linux, false, 2, 15_800),
-            (504230, "Celeste", true, InstallPlatform::Linux, false, 1, 640),
-            (105600, "Terraria", true, InstallPlatform::Linux, false, 1, 5_390),
-            (1086940, "Baldur's Gate 3", false, InstallPlatform::Windows, false, 122, 0),
-            (1091500, "Cyberpunk 2077", false, InstallPlatform::Windows, false, 70, 0),
-            (292030, "The Witcher 3: Wild Hunt", false, InstallPlatform::Windows, false, 50, 0),
-            (367520, "Hollow Knight", false, InstallPlatform::Linux, false, 9, 0),
-            (1245620, "ELDEN RING", false, InstallPlatform::Windows, false, 60, 0),
-            (294100, "RimWorld", false, InstallPlatform::Linux, false, 1, 0),
-            (255710, "Cities: Skylines", false, InstallPlatform::Linux, false, 4, 0),
+            (
+                730,
+                "Counter-Strike 2",
+                true,
+                InstallPlatform::Linux,
+                false,
+                33,
+                41_210,
+            ),
+            (
+                620,
+                "Portal 2",
+                true,
+                InstallPlatform::Linux,
+                false,
+                12,
+                1_130,
+            ),
+            (
+                440,
+                "Team Fortress 2",
+                true,
+                InstallPlatform::Linux,
+                true,
+                26,
+                9_480,
+            ),
+            (
+                632360,
+                "Risk of Rain 2",
+                true,
+                InstallPlatform::Windows,
+                false,
+                8,
+                2_960,
+            ),
+            (
+                413150,
+                "Stardew Valley",
+                true,
+                InstallPlatform::Linux,
+                false,
+                1,
+                3_720,
+            ),
+            (
+                1145360,
+                "Hades",
+                true,
+                InstallPlatform::Windows,
+                false,
+                15,
+                2_410,
+            ),
+            (
+                427520,
+                "Factorio",
+                true,
+                InstallPlatform::Linux,
+                false,
+                2,
+                15_800,
+            ),
+            (
+                504230,
+                "Celeste",
+                true,
+                InstallPlatform::Linux,
+                false,
+                1,
+                640,
+            ),
+            (
+                105600,
+                "Terraria",
+                true,
+                InstallPlatform::Linux,
+                false,
+                1,
+                5_390,
+            ),
+            (
+                1086940,
+                "Baldur's Gate 3",
+                false,
+                InstallPlatform::Windows,
+                false,
+                122,
+                0,
+            ),
+            (
+                1091500,
+                "Cyberpunk 2077",
+                false,
+                InstallPlatform::Windows,
+                false,
+                70,
+                0,
+            ),
+            (
+                292030,
+                "The Witcher 3: Wild Hunt",
+                false,
+                InstallPlatform::Windows,
+                false,
+                50,
+                0,
+            ),
+            (
+                367520,
+                "Hollow Knight",
+                false,
+                InstallPlatform::Linux,
+                false,
+                9,
+                0,
+            ),
+            (
+                1245620,
+                "ELDEN RING",
+                false,
+                InstallPlatform::Windows,
+                false,
+                60,
+                0,
+            ),
+            (
+                294100,
+                "RimWorld",
+                false,
+                InstallPlatform::Linux,
+                false,
+                1,
+                0,
+            ),
+            (
+                255710,
+                "Cities: Skylines",
+                false,
+                InstallPlatform::Linux,
+                false,
+                4,
+                0,
+            ),
         ];
         let items = library
             .iter()
             .enumerate()
-            .map(|(index, &(id, name, installed, platform, update, gib, minutes))| {
-                let mut item = game(id, name, installed);
-                let last = 1_760_000_000 - index as u64 * 86_400 * 9;
-                item.size_bytes = Some(gib << 30);
-                item.last_played = (installed).then_some(last);
-                item.playtime_minutes = installed.then_some(minutes);
-                if let Some(installed) = &mut item.installed {
-                    installed.platform = Some(platform);
-                    installed.size_bytes = item.size_bytes;
-                    installed.last_played = item.last_played;
-                    installed.playtime_minutes = item.playtime_minutes;
-                }
-                item.update = if update {
-                    UpdateStatus::Available { installed_build: 1, latest_build: 2 }
-                } else if installed {
-                    UpdateStatus::UpToDate
-                } else {
-                    UpdateStatus::Unknown
-                };
-                item
-            })
+            .map(
+                |(index, &(id, name, installed, platform, update, gib, minutes))| {
+                    let mut item = game(id, name, installed);
+                    let last = 1_760_000_000 - index as u64 * 86_400 * 9;
+                    item.size_bytes = Some(gib << 30);
+                    item.last_played = (installed).then_some(last);
+                    item.playtime_minutes = installed.then_some(minutes);
+                    if let Some(installed) = &mut item.installed {
+                        installed.platform = Some(platform);
+                        installed.size_bytes = item.size_bytes;
+                        installed.last_played = item.last_played;
+                        installed.playtime_minutes = item.playtime_minutes;
+                    }
+                    item.update = if update {
+                        UpdateStatus::Available {
+                            installed_build: 1,
+                            latest_build: 2,
+                        }
+                    } else if installed {
+                        UpdateStatus::UpToDate
+                    } else {
+                        UpdateStatus::Unknown
+                    };
+                    item
+                },
+            )
             .collect();
-        model.set_catalog(CatalogSnapshot { items, warnings: Vec::new() });
+        model.set_catalog(CatalogSnapshot {
+            items,
+            warnings: Vec::new(),
+        });
         model.set_friends(
             [
                 ("Mira", Presence::Online, Some("Hades")),
@@ -3174,8 +3351,16 @@ mod tests {
                     game,
                     items: vec![Conflict {
                         name: "%LinuxXdgDataHome%/tf/cfg/config.cfg".into(),
-                        local: Some(SaveVersion { sha1: "9f2c1ab04d7e5513".into(), size: 18_432, time: 1_759_900_000 }),
-                        cloud: Some(SaveVersion { sha1: "3b7e90d1c4a8f620".into(), size: 17_920, time: 1_759_990_000 }),
+                        local: Some(SaveVersion {
+                            sha1: "9f2c1ab04d7e5513".into(),
+                            size: 18_432,
+                            time: 1_759_900_000,
+                        }),
+                        cloud: Some(SaveVersion {
+                            sha1: "3b7e90d1c4a8f620".into(),
+                            size: 17_920,
+                            time: 1_759_990_000,
+                        }),
                     }],
                     index: 0,
                     choice: Some(steam_core::cloud::Choice::Cloud),
@@ -3236,10 +3421,24 @@ mod tests {
                 if symbol.trim().is_empty() {
                     continue;
                 }
-                let bold = if style.add_modifier.contains(Modifier::BOLD) { " font-weight=\"bold\"" } else { "" };
-                let dim = if style.add_modifier.contains(Modifier::DIM) { " opacity=\"0.6\"" } else { "" };
-                let text = symbol.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-                svg.push_str(&format!("<text x=\"{px:.1}\" y=\"{:.1}\" fill=\"{fg}\"{bold}{dim}>{text}</text>\n", py + 13.5));
+                let bold = if style.add_modifier.contains(Modifier::BOLD) {
+                    " font-weight=\"bold\""
+                } else {
+                    ""
+                };
+                let dim = if style.add_modifier.contains(Modifier::DIM) {
+                    " opacity=\"0.6\""
+                } else {
+                    ""
+                };
+                let text = symbol
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                svg.push_str(&format!(
+                    "<text x=\"{px:.1}\" y=\"{:.1}\" fill=\"{fg}\"{bold}{dim}>{text}</text>\n",
+                    py + 13.5
+                ));
             }
         }
         svg.push_str("</svg>\n");

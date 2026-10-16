@@ -409,7 +409,10 @@ fn make_game_executable(path: &Path) -> Result<()> {
     if fs::File::open(path)?.read_exact(&mut magic).is_err() || &magic != b"\x7fELF" {
         return Ok(());
     }
-    fs::set_permissions(path, fs::Permissions::from_mode(mode | ((mode & 0o444) >> 2)))?;
+    fs::set_permissions(
+        path,
+        fs::Permissions::from_mode(mode | ((mode & 0o444) >> 2)),
+    )?;
     Ok(())
 }
 

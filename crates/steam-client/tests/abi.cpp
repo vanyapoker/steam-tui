@@ -1,6 +1,7 @@
 // Compile against Valve's public SDK headers; no SDK library or Steam needed.
 // c++ -std=c++17 -I/path/to/src/public tests/abi.cpp -ldl -o /tmp/client-abi
 // /tmp/client-abi /absolute/path/to/libsteamclient.so
+#include <cstddef>
 #include <steam/steam_api.h>
 #include <steam/isteamtimeline.h>
 #include <cassert>
@@ -13,6 +14,18 @@
 
 static_assert(sizeof(GetTicketForWebApiResponse_t) == 2572);
 static_assert(GetTicketForWebApiResponse_t::k_iCallback == 168);
+
+// Callback payload layouts the UserStats implementation writes by hand.
+static_assert(sizeof(UserStatsReceived_t) == 20 && offsetof(UserStatsReceived_t, m_steamIDUser) == 12);
+static_assert(sizeof(UserStatsStored_t) == 12 && offsetof(UserStatsStored_t, m_eResult) == 8);
+static_assert(sizeof(UserAchievementStored_t) == 148 && offsetof(UserAchievementStored_t, m_nCurProgress) == 140);
+static_assert(sizeof(LeaderboardFindResult_t) == 12 && offsetof(LeaderboardFindResult_t, m_bLeaderboardFound) == 8);
+static_assert(sizeof(LeaderboardScoresDownloaded_t) == 20 && offsetof(LeaderboardScoresDownloaded_t, m_cEntryCount) == 16);
+static_assert(sizeof(LeaderboardScoreUploaded_t) == 28 && offsetof(LeaderboardScoreUploaded_t, m_nGlobalRankPrevious) == 24);
+static_assert(sizeof(NumberOfCurrentPlayers_t) == 8 && offsetof(NumberOfCurrentPlayers_t, m_cPlayers) == 4);
+static_assert(sizeof(GlobalAchievementPercentagesReady_t) == 12 && sizeof(GlobalStatsReceived_t) == 12);
+static_assert(sizeof(LeaderboardUGCSet_t) == 12 && offsetof(LeaderboardUGCSet_t, m_hSteamLeaderboard) == 4);
+static_assert(sizeof(LeaderboardEntry_t) == 28 && offsetof(LeaderboardEntry_t, m_hUGC) == 20);
 
 int main(int argc, char **argv) {
     assert(argc == 2);

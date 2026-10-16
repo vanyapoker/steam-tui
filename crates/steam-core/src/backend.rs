@@ -5,6 +5,7 @@ mod gc;
 mod lobby;
 mod networking;
 pub mod sdr;
+pub mod stats;
 mod tickets;
 pub use events::{Direction, Event, EventSender, gc_message_name};
 use std::error::Error;
@@ -148,6 +149,7 @@ impl Endpoint {
                 persona_name(connection).await,
                 events.clone(),
             ),
+            stats: stats::Stats::new(app_id, events.clone()),
             events: events.clone(),
         };
         loop {
@@ -242,6 +244,7 @@ struct Session<'a> {
     gc: gc::Gc,
     pops: std::sync::Arc<std::sync::Mutex<Option<Vec<(String, i32)>>>>,
     lobbies: lobby::Lobbies,
+    stats: stats::Stats,
     events: Option<EventSender>,
 }
 
@@ -315,6 +318,7 @@ impl Session<'_> {
             | Operation::CancelAuthTicket { .. }
             | Operation::GcSend { .. }
             | Operation::Lobby(_)
+            | Operation::Stats(_)
                 if !alive =>
             {
                 Response::Error {
@@ -435,6 +439,7 @@ impl Session<'_> {
                 }
             }
             Operation::Lobby(op) => self.lobbies.handle(self.connection, op).await,
+            Operation::Stats(op) => self.stats.handle(self.connection, op).await,
             Operation::WebAuthTicket { identity } => match self.tickets.web(identity) {
                 Ok(handle) => Response::AuthTicketPending { handle },
                 Err(message) => Response::Error {

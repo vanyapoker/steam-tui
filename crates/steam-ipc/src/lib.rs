@@ -1,6 +1,7 @@
 //! Versioned local client/backend messages. Never carry login credentials.
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
+pub mod schema;
 pub mod storage;
 
 pub const VERSION: u32 = 1;
@@ -53,6 +54,62 @@ pub enum Operation {
     Lobby(LobbyOp),
     /// Take every queued asynchronous Steamworks callback (lobby updates, chat, ...).
     PollCallbacks,
+    /// Leaderboards, stats, achievements and global statistics (ISteamUserStats).
+    Stats(StatsOp),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StatsOp {
+    /// Find a leaderboard by name, creating it when `create` is set.
+    FindLeaderboard {
+        name: String,
+        create: bool,
+        sort: i32,
+        display: i32,
+    },
+    /// ELeaderboardDataRequest 0 global, 1 around the user, 2 friends, 3 listed users.
+    LeaderboardEntries {
+        board: i32,
+        request: i32,
+        start: i32,
+        end: i32,
+        users: Vec<u64>,
+    },
+    UploadScore {
+        board: i32,
+        method: i32,
+        score: i32,
+        details: Vec<u8>,
+    },
+    AttachUgc {
+        board: i32,
+        ugc: u64,
+    },
+    /// Stats, achievement unlock times and the schema of `user` (0 = this account).
+    GetStats {
+        user: u64,
+    },
+    /// Changed raw stat values (`stat id`, `value`); `reset` clears every stat first.
+    StoreStats {
+        stats: Vec<(u32, u32)>,
+        reset: bool,
+    },
+    CurrentPlayers,
+    GlobalAchievementPercentages,
+    /// Aggregated global stats by name, with `days` of history (0 = none).
+    GlobalStats {
+        names: Vec<String>,
+        days: u32,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardEntry {
+    pub steam_id: u64,
+    pub rank: i32,
+    pub score: i32,
+    pub details: Vec<u8>,
+    pub ugc: u64,
 }
 
 /// One lobby search criterion (maps to ISteamMatchmaking filters).
@@ -244,6 +301,63 @@ pub enum Response {
         data: String,
     },
     Callbacks(Vec<(i32, String)>),
+    Board {
+        found: bool,
+        id: i32,
+        name: String,
+        entries: i32,
+        sort: i32,
+        display: i32,
+    },
+    BoardEntries {
+        /// EResult of the download.
+        result: i32,
+        total: i32,
+        entries: Vec<BoardEntry>,
+    },
+    ScoreUploaded {
+        success: bool,
+        changed: bool,
+        total: i32,
+        rank_new: i32,
+        rank_previous: i32,
+    },
+    /// EResult of an operation without further data (leaderboard UGC attach).
+    StatsResult {
+        result: i32,
+    },
+    StatsData {
+        result: i32,
+        crc: u32,
+        /// Binary KeyValues stats schema, hex; empty when the server sent none.
+        schema: String,
+        stats: Vec<(u32, u32)>,
+        /// (stat id, unlock time per bit)
+        unlocks: Vec<(u32, Vec<u32>)>,
+    },
+    StatsStored {
+        result: i32,
+        crc: u32,
+        /// (stat id, value the server reverted it to)
+        failed: Vec<(u32, u32)>,
+        out_of_date: bool,
+    },
+    Players {
+        result: i32,
+        count: i32,
+    },
+    Percentages {
+        result: i32,
+        /// (achievement name, percent of players who unlocked it)
+        entries: Vec<(String, f32)>,
+    },
+    GlobalStats {
+        result: i32,
+        /// (stat name, total)
+        totals: Vec<(String, i64)>,
+        /// (stat name, per-day deltas, newest first)
+        history: Vec<(String, Vec<i64>)>,
+    },
     GcSent,
     GcNone,
     GcMessage {

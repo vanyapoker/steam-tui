@@ -440,7 +440,10 @@ fn missing_execute_bit_is_fixed_for_elf_binaries_only() {
     fs::write(&elf, b"\x7fELF....").unwrap();
     fs::set_permissions(&elf, fs::Permissions::from_mode(0o644)).unwrap();
     make_game_executable(&elf).unwrap();
-    assert_eq!(fs::metadata(&elf).unwrap().permissions().mode() & 0o777, 0o755);
+    assert_eq!(
+        fs::metadata(&elf).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
     let text = fixture.0.join("notes.txt");
     fs::write(&text, b"hello").unwrap();
     fs::set_permissions(&text, fs::Permissions::from_mode(0o644)).unwrap();

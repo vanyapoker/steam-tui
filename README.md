@@ -62,11 +62,12 @@ Press `?` in the app for the full list.
 
 | Works | Partial | Not yet |
 | --- | --- | --- |
-| User, Utils, Apps, Friends (basics) | Matchmaking and lobbies | Stats and achievements |
+| User, Utils, Apps, Friends (basics) | Matchmaking and lobbies | Achievement icons |
 | Game Coordinator relay | Networking sockets, P2P and relay | Workshop, Inventory |
 | Steam Cloud | Auth tickets | Input, Screenshots |
+| Stats, achievements, leaderboards | Global stats | |
 
-Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK headers: SteamClient 006-021 and 023 (not 022), and every version Valve's public headers ever shipped for User, Utils, Apps, Friends, Matchmaking, Servers, UserStats, Networking, RemoteStorage, Screenshots, HTTP, HTMLSurface, Controller, Inventory, UGC and Input. Where an old version's call has no matching implementation, the slot logs and returns zero. Unsupported calls log and abort rather than pretend to work.
+Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK headers: SteamClient 006-021 and 023 (not 022), and every version Valve's public headers ever shipped for User, Utils, Apps, Friends, Matchmaking, Servers, UserStats, Networking, RemoteStorage, Screenshots, HTTP, HTMLSurface, Controller, Inventory, UGC and Input. Where an old version's call has no matching implementation, the slot logs and returns zero. Stats, achievements and leaderboard scores are read from and written to your real Steam account, like the normal client. Unsupported calls log and abort rather than pretend to work.
 
 ## Limitations
 
