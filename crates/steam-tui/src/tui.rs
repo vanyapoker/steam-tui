@@ -1037,12 +1037,17 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                 let decision = reconnect.request(trigger, model.install_active);
                 apply_decision(decision, trigger, account.as_deref(), &job_tx, &mut workers, &mut model);
             }
-            if let Some((trigger, decision)) = reconnect.release(model.install_active) {
+            // A new sign-in would replace the session a running game (or the Valve
+            // host serving it) depends on, so automatic recovery waits for it to end.
+            let hold = model.install_active || !model.running_games.is_empty() || !model.launching.is_empty();
+            if let Some((trigger, decision)) = reconnect.release(hold) {
                 apply_decision(decision, trigger, account.as_deref(), &job_tx, &mut workers, &mut model);
             }
-            if connection.is_some() && !live.friends_open && !live.notifications_open && !lost_noted {
+            // Friends ending means a dead or displaced session (their presence would
+            // otherwise sit at Unknown forever), even while notifications look alive.
+            if connection.is_some() && !live.friends_open && !lost_noted {
                 lost_noted = true;
-                let decision = reconnect.request(Trigger::ConnectionLost, model.install_active);
+                let decision = reconnect.request(Trigger::ConnectionLost, hold);
                 apply_decision(decision, Trigger::ConnectionLost, account.as_deref(), &job_tx, &mut workers, &mut model);
             }
             terminal.draw(|frame| render::draw(frame, &mut model))?;
