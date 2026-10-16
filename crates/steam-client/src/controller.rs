@@ -55,7 +55,7 @@ unsupported_slots! {
     f15 => "GetAnalogActionData";
     f20 => "GetMotionData";
 }
-static TABLE: VTable<34> = VTable([
+pub(super) static TABLE: VTable<34> = VTable([
     f0 as *const (),
     f1 as *const (),
     f2 as *const (),

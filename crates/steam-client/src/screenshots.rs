@@ -21,7 +21,7 @@ stubs! {
     f7 => "IsScreenshotsHooked";
     f8 => "AddVRScreenshotToLibrary";
 }
-static TABLE: VTable<9> = VTable([
+pub(super) static TABLE: VTable<9> = VTable([
     f0 as *const (),
     f1 as *const (),
     f2 as *const (),

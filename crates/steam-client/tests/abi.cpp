@@ -27,6 +27,8 @@ int main(int argc, char **argv) {
     assert(factory("SteamClient021", &result) && result == 0);
     assert(factory("SteamClient023", &result) && result == 0);
     assert(!factory("SteamClient022", &result) && result == 1);
+    for (auto name : {"SteamClient006", "SteamClient012", "SteamClient016", "SteamClient019"})
+        assert(factory(name, &result) && result == 0);
     auto client = static_cast<ISteamClient *>(factory("SteamClient020", &result));
     assert(client && result == 0);
     assert(client->BShutdownIfAllPipesClosed());
@@ -55,6 +57,14 @@ int main(int argc, char **argv) {
                       "STEAMREMOTEPLAY_INTERFACE_VERSION002", "STEAMREMOTEPLAY_INTERFACE_VERSION003",
                       "STEAMREMOTEPLAY_INTERFACE_VERSION004", "SteamMatchMakingServers003",
                       "STEAMTIMELINE_INTERFACE_V004", "SteamNetworkingSockets013"})
+        assert(client->GetISteamGenericInterface(user, pipe, name));
+    // Pre-1.50 layouts come from the generated compat tables.
+    for (auto name : {"SteamUser020", "SteamUser012", "SteamUtils008", "SteamFriends015", "SteamFriends008",
+                      "STEAMAPPS_INTERFACE_VERSION006", "STEAMUSERSTATS_INTERFACE_VERSION011",
+                      "SteamMatchMaking008", "STEAMREMOTESTORAGE_INTERFACE_VERSION013",
+                      "STEAMUGC_INTERFACE_VERSION015", "STEAMHTMLSURFACE_INTERFACE_VERSION_004",
+                      "SteamController007", "STEAMINVENTORY_INTERFACE_V002", "STEAMHTTP_INTERFACE_VERSION002",
+                      "SteamNetworking005", "STEAMSCREENSHOTS_INTERFACE_VERSION002", "SteamInput002"})
         assert(client->GetISteamGenericInterface(user, pipe, name));
     for (auto name : {"SteamUtils012", "SteamFriends016", "STEAMUGC_INTERFACE_VERSION019",
                       "STEAMREMOTEPLAY_INTERFACE_VERSION005", "STEAMVIDEO_INTERFACE_V003"})

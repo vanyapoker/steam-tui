@@ -437,7 +437,7 @@ unsafe extern "C" fn set_linked() -> bool {
 }
 unsafe extern "C" fn psn_boot() {}
 
-static TABLE: VTable<39> = VTable([
+pub(super) static TABLE: VTable<39> = VTable([
     favorite_count as *const (),
     favorite_game as *const (),
     add_favorite as *const (),
@@ -568,7 +568,7 @@ server_queries! {
     v_players => "PlayerDetails";
     v_rules => "ServerRules";
 }
-static SERVERS_TABLE: VTable<17> = VTable([
+pub(super) static SERVERS_TABLE: VTable<17> = VTable([
     v_internet as *const (),
     v_lan as *const (),
     v_friends as *const (),

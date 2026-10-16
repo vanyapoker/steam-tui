@@ -49,7 +49,7 @@ stubs! {
     f36 => "SubmitUpdateProperties";
     f37 => "InspectItem";
 }
-static TABLE: VTable<38> = VTable([
+pub(super) static TABLE: VTable<38> = VTable([
     f0 as *const (),
     f1 as *const (),
     f2 as *const (),

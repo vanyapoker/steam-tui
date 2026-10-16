@@ -598,7 +598,7 @@ unsafe extern "C" fn f57(_: *mut c_void) -> bool {
 unsafe extern "C" fn f58(_: *mut c_void) -> bool {
     store().is_ok()
 }
-static TABLE: VTable<59> = VTable([
+pub(super) static TABLE: VTable<59> = VTable([
     f0 as *const (),
     f1 as *const (),
     f2 as *const (),

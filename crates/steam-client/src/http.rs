@@ -37,7 +37,7 @@ stubs! {
     f23 => "SetHTTPRequestAbsoluteTimeoutMS";
     f24 => "GetHTTPRequestWasTimedOut";
 }
-static TABLE: VTable<25> = VTable([
+pub(super) static TABLE: VTable<25> = VTable([
     f0 as *const (),
     f1 as *const (),
     f2 as *const (),

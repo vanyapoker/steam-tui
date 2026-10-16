@@ -53,7 +53,7 @@ macro_rules! stubs {
             trace(concat!("networking.", $label, " (no networking support)"));
             0
         })*
-        static $table: VTable<{ [$($label),*].len() }> = VTable([$($name as *const ()),*]);
+        pub(super) static $table: VTable<{ [$($label),*].len() }> = VTable([$($name as *const ()),*]);
         pub(super) static $object: Object = Object { table: $table.0.as_ptr() };
     };
 }

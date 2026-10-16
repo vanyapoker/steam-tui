@@ -23,6 +23,7 @@ mod auth;
 mod bridge;
 mod callresults;
 mod client;
+mod compat;
 mod controller;
 mod crash;
 mod friends;
@@ -119,12 +120,16 @@ pub unsafe extern "C" fn CreateInterface(name: *const c_char, result: *mut i32) 
     let name = unsafe { version(name) };
     crash::install();
     trace(format_args!("CreateInterface {name:?}"));
-    let found = matches!(name, Some(n) if n == c"SteamClient023" || n == c"SteamClient021" || n == c"SteamClient020" || n == c"SteamClient017");
+    let old = name.and_then(|n| compat::CLIENTS.iter().find(|(c, _)| *c == n));
+    let found = old.is_some()
+        || matches!(name, Some(n) if n == c"SteamClient023" || n == c"SteamClient021" || n == c"SteamClient020" || n == c"SteamClient017");
     if !result.is_null() {
         unsafe { result.write(if found { 0 } else { 1 }) };
     }
     if found {
-        if name == Some(c"SteamClient017") {
+        if let Some(&(_, table)) = old {
+            object(table)
+        } else if name == Some(c"SteamClient017") {
             object(&client::OBJECT017)
         } else if name == Some(c"SteamClient023") {
             object(&client::OBJECT023)

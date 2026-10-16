@@ -85,7 +85,7 @@ unsafe extern "C" fn release_user(_this: *mut c_void, pipe: i32, user: i32) {
 }
 /// Interface families: each typed SteamClient getter only serves its own family.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Family {
+pub(super) enum Family {
     User,
     Utils,
     Apps,
@@ -188,9 +188,29 @@ static REGISTRY: &[Entry] = registry! {
     Parties, true, c"SteamParties002" => object(&parties::OBJECT);
     Generic, false, c"SteamNetworkingUtils004" => object(&networking::UTILS);
 };
-fn entry(name: Option<&CStr>) -> Option<&'static Entry> {
+struct Found {
+    family: Family,
+    session: bool,
+    object: *mut c_void,
+}
+fn entry(name: Option<&CStr>) -> Option<Found> {
     let name = name?;
-    REGISTRY.iter().find(|e| e.name == name)
+    if let Some(e) = REGISTRY.iter().find(|e| e.name == name) {
+        return Some(Found {
+            family: e.family,
+            session: e.session,
+            object: (e.object)(),
+        });
+    }
+    // Older versions, generated from the SDK headers (see compat.rs).
+    compat::COMPAT
+        .iter()
+        .find(|(n, ..)| *n == name)
+        .map(|&(_, family, session, obj)| Found {
+            family,
+            session,
+            object: object(obj),
+        })
 }
 unsafe fn lookup(user: i32, pipe: i32, name: *const c_char) -> *mut c_void {
     let name = unsafe { version(name) };
@@ -204,7 +224,7 @@ unsafe fn lookup(user: i32, pipe: i32, name: *const c_char) -> *mut c_void {
     if let Some(entry) = entry(name)
         && (!entry.session || (user == 1 && state.users.get(&pipe) == Some(&true)))
     {
-        return (entry.object)();
+        return entry.object;
     }
     trace(format_args!("UNSUPPORTED interface {name:?}"));
     ptr::null_mut()
@@ -310,7 +330,7 @@ unsafe extern "C" fn destroy(_this: *mut c_void) {
 
 // Exact SteamClient020 order, including private/deprecated slots. Never alias
 // SteamClient017/023: their layouts differ after the common leading methods.
-static TABLE: VTable<42> = VTable([
+pub(super) static TABLE: VTable<42> = VTable([
     create_pipe as *const (), // 0
     release_pipe as *const (),
     connect as *const (),
@@ -360,7 +380,7 @@ pub(super) static OBJECT: Object = Object {
 
 // SteamClient021 (SDK 1.58+, libsteam_api.so slots checked against a shipped
 // build): SteamClient020 without the deprecated UnifiedMessages and AppList slots.
-static TABLE021: VTable<40> = VTable([
+pub(super) static TABLE021: VTable<40> = VTable([
     create_pipe as *const (), // 0
     release_pipe as *const (),
     connect as *const (),
@@ -375,13 +395,13 @@ static TABLE021: VTable<40> = VTable([
     get_servers as *const (),
     generic as *const (),
     get_userstats as *const (),
-    missing as *const (), // GameServerStats
+    missing as *const (),  // GameServerStats
     get_apps as *const (), // 15
     get_networking as *const (),
     get_remotestorage as *const (),
     get_screenshots as *const (),
     get_search as *const (), // GameSearch
-    run_frame as *const (), // 20
+    run_frame as *const (),  // 20
     ipc_count as *const (),
     hook as *const (), // WarningMessageHook
     shutdown as *const (),
@@ -390,10 +410,10 @@ static TABLE021: VTable<40> = VTable([
     get_ugc as *const (),
     get_music as *const (),
     get_musicremote as *const (),
-    get_html as *const (), // 29
-    hook as *const (),     // deprecated Set CPostAPIResult
-    hook as *const (),     // deprecated Remove CPostAPIResult
-    hook as *const (),     // CCheckCallbackRegistered
+    get_html as *const (),      // 29
+    hook as *const (),          // deprecated Set CPostAPIResult
+    hook as *const (),          // deprecated Remove CPostAPIResult
+    hook as *const (),          // CCheckCallbackRegistered
     get_inventory as *const (), // 33
     get_video as *const (),
     get_parental as *const (),

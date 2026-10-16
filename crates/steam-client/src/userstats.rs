@@ -58,7 +58,7 @@ stubs! {
     f43 => "GetAchievementProgressLimits", 0;
     f44 => "GetAchievementProgressLimits", 0;
 }
-static TABLE: VTable<45> = VTable([
+pub(super) static TABLE: VTable<45> = VTable([
     f0 as *const (),
     f1 as *const (),
     f2 as *const (),

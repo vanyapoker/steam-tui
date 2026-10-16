@@ -50,7 +50,7 @@ stubs! {
     f37 => "FileLoadDialogResponse";
 }
 // Virtual destructor occupies two slots (complete + deleting) on the Itanium ABI.
-static TABLE: VTable<39> = VTable([
+pub(super) static TABLE: VTable<39> = VTable([
     f0 as *const (),
     f0 as *const (),
     f1 as *const (),
