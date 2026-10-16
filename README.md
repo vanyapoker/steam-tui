@@ -18,16 +18,26 @@ Early state: some games won't work.
 
 ## Installation
 
-Needs Rust, CMake, make, Perl and a C++ compiler. Windows games need Proton, and a Secret Service keyring (GNOME Keyring or KWallet) stores your login.
+Built for Omarchy (Arch, x86_64). Windows games need Proton, and a Secret Service keyring (GNOME Keyring or KWallet) stores your login.
+
+**Prebuilt (fastest):**
 
 ```sh
-git clone https://github.com/vanyapoker/steam-tui && cd steam-tui
-./install.sh
+curl -L https://github.com/vanyapoker/steam-tui/releases/latest/download/steam-tui-x86_64-linux.tar.gz | tar -xz -C ~/.local
 steam-tui login --account YOUR_STEAM_NAME   # first run only
 steam-tui
 ```
 
-`install.sh` installs to `~/.local` without sudo. Use `PREFIX=/some/path ./install.sh` to change that. Make sure `~/.local/bin` is in your `PATH`.
+Make sure `~/.local/bin` is in your `PATH`.
+
+**From source** (needs Rust, CMake, make, Perl and a C++ compiler; the first build takes a few minutes):
+
+```sh
+git clone https://github.com/vanyapoker/steam-tui && cd steam-tui
+./install.sh
+```
+
+`install.sh` installs to `~/.local` without sudo. Use `PREFIX=/some/path ./install.sh` to change that.
 
 ## Hotkeys
 
