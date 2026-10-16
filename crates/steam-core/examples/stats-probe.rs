@@ -29,8 +29,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             for stat in schema.stats.iter().take(8) {
                                 println!("  stat {} {:?} {} (default {})", stat.id, stat.kind, stat.name, stat.default);
                             }
+                            if let Some((_, ach)) = schema.achievements().next() {
+                                let url = format!("https://cdn.fastly.steamstatic.com/steamcommunity/public/images/apps/{app}/{}", ach.icon);
+                                match steam_core::backend::images::handle(steam_ipc::ImageOp::Fetch { url }).await {
+                                    Response::Image { width, height, rgba } => println!("icon: {width}x{height}, {} bytes", rgba.len() / 2),
+                                    other => println!("icon: {}", describe(&other)),
+                                }
+                            }
                             for (stat, ach) in schema.achievements().take(5) {
-                                println!("  achievement {} bit {} in stat {stat}: {:?}", ach.name, ach.bit, ach.display_name);
+                                println!("  achievement {} bit {} in stat {stat}: {:?} icon {:?} gray {:?}", ach.name, ach.bit, ach.display_name, ach.icon, ach.icon_gray);
                             }
                         }
                         None => println!("schema did not parse"),

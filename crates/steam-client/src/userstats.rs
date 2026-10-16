@@ -824,11 +824,44 @@ unsafe extern "C" fn f10(_: *mut c_void) -> bool {
         });
     true
 }
+/// UserAchievementIconFetched_t (pack 4): game id, name[128], achieved, icon handle.
+const USER_ACHIEVEMENT_ICON_FETCHED: i32 = 1109;
+const ICON_BASE: &str = "https://cdn.fastly.steamstatic.com/steamcommunity/public/images/apps";
+
 unsafe extern "C" fn f11(_: *mut c_void, name: *const c_char) -> i32 {
-    trace(format_args!(
-        "userstats.GetAchievementIcon {:?} (no image pipeline)",
-        unsafe { text(name) }
-    ));
+    let Some(name) = (unsafe { text(name) }) else {
+        return 0;
+    };
+    let Some((file, achieved)) = with_own(|l| {
+        let (_, ach) = l.schema.achievement(name)?;
+        let achieved = read_achievement(l, name).is_some_and(|(set, _)| set);
+        let file = if achieved { &ach.icon } else { &ach.icon_gray };
+        (!file.is_empty()
+            && file.len() <= 128
+            && file.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.'))
+        .then(|| (file.clone(), achieved))
+    }) else {
+        return 0;
+    };
+    let url = format!("{ICON_BASE}/{}/{file}", app_id());
+    if let Some(handle) = images::cached(&url) {
+        return handle;
+    }
+    trace(format_args!("userstats.GetAchievementIcon {name} (fetching)"));
+    let game = u64::from(app_id());
+    let owned = name.to_owned();
+    images::fetch_async(url, move |handle| {
+        let mut field = [0u8; 128];
+        let bytes = owned.as_bytes();
+        let n = bytes.len().min(127);
+        field[..n].copy_from_slice(&bytes[..n]);
+        let mut payload = Payload::default().u64(game).0;
+        payload.extend(field);
+        payload.push(achieved as u8);
+        payload.resize(140, 0);
+        payload.extend(handle.to_le_bytes());
+        auth::push_callback(USER_ACHIEVEMENT_ICON_FETCHED, payload);
+    });
     0
 }
 unsafe extern "C" fn f12(_: *mut c_void, name: *const c_char, key: *const c_char) -> *const c_char {

@@ -34,7 +34,7 @@ def kv_schema():
     out += sub('2') + text('type', 'FLOAT') + text('name', 'Speed') + text('default', '1.5') + end
     out += sub('3') + num('type', 4) + text('name', 'Ach') + sub('bits') + sub('0')
     out += text('name', 'ACH_WIN') + sub('display') + sub('name') + text('english', 'Winner') + end
-    out += text('desc', 'Win once') + num('hidden', 1) + end + end + end + end
+    out += text('desc', 'Win once') + num('hidden', 1) + text('icon', 'aaa.jpg') + text('icon_gray', 'bbb.jpg') + end + end + end + end
     out += end + end + end
     return out
 
@@ -117,6 +117,23 @@ def ffi_child():
     out['display'] = [call(stats, 12, ctypes.c_char_p, (ctypes.c_char_p, ctypes.c_char_p), (b'ACH_WIN', k)).decode()
                       for k in (b'name', b'desc', b'hidden')]
     out['num_ach'] = call(stats, 14, ctypes.c_uint32)
+    # Icons: 0 until fetched, then a handle readable through Utils.
+    handle = 0
+    for _ in range(100):
+        handle = call(stats, 11, ctypes.c_int, (ctypes.c_char_p,), (b'ACH_WIN',))
+        if handle:
+            break
+        time.sleep(0.02)
+    w, h = ctypes.c_uint32(), ctypes.c_uint32()
+    assert call(utils, 5, ctypes.c_bool, (ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p), (handle, ctypes.byref(w), ctypes.byref(h)))
+    pixels = ctypes.create_string_buffer(8)
+    small = ctypes.create_string_buffer(4)
+    assert not call(utils, 6, ctypes.c_bool, (ctypes.c_int, ctypes.c_void_p, ctypes.c_int), (handle, small, 4))
+    assert call(utils, 6, ctypes.c_bool, (ctypes.c_int, ctypes.c_void_p, ctypes.c_int), (handle, pixels, 8))
+    w0, h0 = ctypes.c_uint32(7), ctypes.c_uint32(7)
+    assert not call(utils, 5, ctypes.c_bool, (ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p), (0, ctypes.byref(w0), ctypes.byref(h0)))
+    assert (w0.value, h0.value) == (0, 0)
+    out['icon'] = [bool(handle), w.value, h.value, list(pixels.raw)]
     assert call(stats, 10, ctypes.c_bool)
     time.sleep(0.4)
     # UGC: details by published file id with metadata (UGC 020, SteamUGCDetails_t 9772 bytes).
@@ -203,6 +220,7 @@ class Tests(unittest.TestCase):
         self.assertTrue(out['ach_after'])
         self.assertEqual(out['display'], ['Winner', 'Win once', '1'])
         self.assertEqual(out['num_ach'], 1)
+        self.assertEqual(out['icon'], [True, 2, 1, [1, 2, 3, 4, 5, 6, 7, 8]])
         self.assertEqual(out['ugc'], [1, 1, True, [555, 1], 'Run 7', 4242, 99, True, '{"run":1}'])
         # The store sent the edited Games stat and the achievement bit.
         self.assertEqual(sorted(map(tuple, stored[0]['stats'])), [(1, 9), (3, 1)])
@@ -213,6 +231,10 @@ class Tests(unittest.TestCase):
             return {'Identity': {'steam_id': ME, 'logged_on': True}}
         if 'Ugc' in op:
             return {'UgcDetails': {'result': 1, 'items': [{'id': 555, 'result': 1, 'title': 'Run 7', 'owner': 4242, 'file_size': 99, 'metadata': list(b'{"run":1}')}]}}
+        if 'Image' in op:
+            url = op['Image']['Fetch']['url']
+            assert url == f'https://cdn.fastly.steamstatic.com/steamcommunity/public/images/apps/{APP}/aaa.jpg', url
+            return {'Image': {'width': 2, 'height': 1, 'rgba': bytes([1, 2, 3, 4, 5, 6, 7, 8]).hex()}}
         stats = op['Stats']
         if 'FindLeaderboard' in stats:
             assert stats['FindLeaderboard']['name'] == 'Ghosts'

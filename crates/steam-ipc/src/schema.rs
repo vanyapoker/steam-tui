@@ -179,6 +179,9 @@ pub struct Achievement {
     pub display_name: String,
     pub description: String,
     pub hidden: bool,
+    /// Image file names on Valve's CDN: unlocked and locked (gray) icon.
+    pub icon: String,
+    pub icon_gray: String,
     /// (min, max) when the achievement tracks progress.
     pub progress: Option<(u32, u32)>,
 }
@@ -278,6 +281,13 @@ impl Schema {
                             .map(|kv| localized(kv, language))
                             .unwrap_or_default()
                     };
+                    let image = |key: &str| {
+                        display
+                            .and_then(|d| d.child(key))
+                            .and_then(Kv::as_str)
+                            .unwrap_or_default()
+                            .to_owned()
+                    };
                     let progress = bit.child("progress").and_then(|p| {
                         let min = p.child("min_val")?.as_i64()?;
                         let max = p.child("max_val")?.as_i64()?;
@@ -292,6 +302,8 @@ impl Schema {
                             .and_then(|d| d.child("hidden"))
                             .and_then(Kv::as_i64)
                             .is_some_and(|h| h != 0),
+                        icon: image("icon"),
+                        icon_gray: image("icon_gray"),
                         progress,
                     });
                 }

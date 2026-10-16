@@ -18,6 +18,7 @@ static_assert(GetTicketForWebApiResponse_t::k_iCallback == 168);
 // Callback payload layouts the UserStats implementation writes by hand.
 static_assert(sizeof(UserStatsReceived_t) == 20 && offsetof(UserStatsReceived_t, m_steamIDUser) == 12);
 static_assert(sizeof(UserStatsStored_t) == 12 && offsetof(UserStatsStored_t, m_eResult) == 8);
+static_assert(sizeof(UserAchievementIconFetched_t) == 144 && offsetof(UserAchievementIconFetched_t, m_bAchieved) == 136 && offsetof(UserAchievementIconFetched_t, m_nIconHandle) == 140);
 static_assert(sizeof(UserAchievementStored_t) == 148 && offsetof(UserAchievementStored_t, m_nCurProgress) == 140);
 static_assert(sizeof(LeaderboardFindResult_t) == 12 && offsetof(LeaderboardFindResult_t, m_bLeaderboardFound) == 8);
 static_assert(sizeof(LeaderboardScoresDownloaded_t) == 20 && offsetof(LeaderboardScoresDownloaded_t, m_cEntryCount) == 16);

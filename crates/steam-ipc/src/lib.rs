@@ -58,6 +58,14 @@ pub enum Operation {
     Stats(StatsOp),
     /// Workshop/UGC item queries (ISteamUGC).
     Ugc(UgcOp),
+    /// Fetch and decode one image from Valve's CDN (achievement icons, avatars).
+    Image(ImageOp),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ImageOp {
+    /// `url` must be an https URL on an allow-listed Valve image host.
+    Fetch { url: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -405,6 +413,12 @@ pub enum Response {
     UgcDetails {
         result: i32,
         items: Vec<UgcItem>,
+    },
+    /// Decoded image: `rgba` is hex of `width * height * 4` bytes.
+    Image {
+        width: u32,
+        height: u32,
+        rgba: String,
     },
     GcSent,
     GcNone,

@@ -7,6 +7,7 @@ mod networking;
 pub mod sdr;
 pub mod stats;
 mod tickets;
+pub mod images;
 pub mod ugc;
 pub use events::{Direction, Event, EventSender, gc_message_name};
 use std::error::Error;
@@ -443,6 +444,7 @@ impl Session<'_> {
             Operation::Lobby(op) => self.lobbies.handle(self.connection, op).await,
             Operation::Stats(op) => self.stats.handle(self.connection, op).await,
             Operation::Ugc(op) => ugc::handle(self.connection, self.app_id, op).await,
+            Operation::Image(op) => images::handle(op).await,
             Operation::WebAuthTicket { identity } => match self.tickets.web(identity) {
                 Ok(handle) => Response::AuthTicketPending { handle },
                 Err(message) => Response::Error {

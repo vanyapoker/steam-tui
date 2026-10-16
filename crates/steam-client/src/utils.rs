@@ -59,29 +59,29 @@ unsafe extern "C" fn slot_5(
     width: *mut u32,
     height: *mut u32,
 ) -> bool {
-    // Avatar/image handles are not issued by this backend yet. An unknown
-    // handle is an ordinary SDK query failure, including the no-avatar handle 0.
+    // Handles come from achievement icon fetches; an unknown handle (including
+    // the no-image handle 0) is an ordinary SDK query failure.
+    let found = images::size(image);
+    let (w, h) = found.unwrap_or((0, 0));
     if !width.is_null() {
-        unsafe { width.write(0) };
+        unsafe { width.write(w) };
     }
     if !height.is_null() {
-        unsafe { height.write(0) };
+        unsafe { height.write(h) };
     }
-    trace(format_args!(
-        "utils.GetImageSize({image}) = false (image unavailable)"
-    ));
-    false
+    found.is_some()
 }
 unsafe extern "C" fn slot_6(
     _this: *mut c_void,
     image: i32,
-    _destination: *mut u8,
-    _size: i32,
+    destination: *mut u8,
+    size: i32,
 ) -> bool {
-    trace(format_args!(
-        "utils.GetImageRGBA({image}) = false (image unavailable)"
-    ));
-    false
+    let ok = unsafe { images::copy(image, destination, size) };
+    if !ok {
+        trace(format_args!("utils.GetImageRGBA({image}) = false"));
+    }
+    ok
 }
 unsafe extern "C" fn slot_7() -> ! {
     unsupported("utils.GetCSERIPPort")

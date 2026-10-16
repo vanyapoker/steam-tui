@@ -29,6 +29,7 @@ mod crash;
 mod friends;
 mod gc;
 mod htmlsurface;
+mod images;
 mod http;
 mod input;
 mod inventory;

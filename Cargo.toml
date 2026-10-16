@@ -35,4 +35,5 @@ crc32fast = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 lzma-rust2 = { version = "0.13", default-features = false, features = ["std"] }
 ruzstd = "0.8"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 parking_lot = "0.12"
