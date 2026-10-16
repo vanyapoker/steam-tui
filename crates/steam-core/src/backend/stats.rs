@@ -104,6 +104,8 @@ impl Stats {
     }
 
     pub async fn handle(&mut self, connection: &Connection, op: StatsOp) -> Response {
+        // App-scoped CM messages are routed by the header's routing_appid.
+        let connection = &connection.with_app_id(self.app_id);
         match op {
             StatsOp::FindLeaderboard {
                 name,
@@ -151,8 +153,9 @@ impl Stats {
         }
         let request = CMsgClientLBSFindOrCreateLB {
             app_id: Some(self.app_id),
-            leaderboard_sort_method: Some(sort),
-            leaderboard_display_type: Some(display),
+            // A plain lookup leaves the creation parameters unset.
+            leaderboard_sort_method: create.then_some(sort),
+            leaderboard_display_type: create.then_some(display),
             create_if_not_found: Some(create),
             leaderboard_name: Some(name.clone()),
             ..Default::default()
@@ -175,6 +178,7 @@ impl Stats {
             ),
         );
         Response::Board {
+            result: reply.eresult(),
             found,
             id: reply.leaderboard_id(),
             name: reply.leaderboard_name().to_owned(),

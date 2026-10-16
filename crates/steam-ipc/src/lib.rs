@@ -302,6 +302,8 @@ pub enum Response {
     },
     Callbacks(Vec<(i32, String)>),
     Board {
+        /// EResult of the lookup.
+        result: i32,
         found: bool,
         id: i32,
         name: String,

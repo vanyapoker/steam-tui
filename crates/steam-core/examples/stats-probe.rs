@@ -41,8 +41,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("CurrentPlayers: {}", describe(&stats.handle(&connection, StatsOp::CurrentPlayers).await));
             println!("Percentages: {}", describe(&stats.handle(&connection, StatsOp::GlobalAchievementPercentages).await));
             for name in boards {
+                // "+Name" uses FindOrCreate with ascending/numeric (safe only for boards that exist).
+                let (name, create) = match name.strip_prefix('+') {
+                    Some(rest) => (rest.to_owned(), true),
+                    None => (name, false),
+                };
                 let found = stats
-                    .handle(&connection, StatsOp::FindLeaderboard { name: name.clone(), create: false, sort: 0, display: 0 })
+                    .handle(&connection, StatsOp::FindLeaderboard { name: name.clone(), create, sort: 1, display: 1 })
                     .await;
                 println!("FindLeaderboard {name}: {}", describe(&found));
                 if let Response::Board { found: true, id, .. } = found {
@@ -60,6 +65,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 fn describe(response: &Response) -> String {
     match response {
         Response::Board {
+            result,
             found,
             id,
             name,
@@ -67,7 +73,7 @@ fn describe(response: &Response) -> String {
             sort,
             display,
         } => format!(
-            "found={found} id={id} name={name:?} entries={entries} sort={sort} display={display}"
+            "eresult {result} found={found} id={id} name={name:?} entries={entries} sort={sort} display={display}"
         ),
         Response::BoardEntries {
             result,
