@@ -66,7 +66,7 @@ Press `?` in the app for the full list.
 | Game Coordinator relay | Networking sockets, P2P and relay | Workshop, Inventory |
 | Steam Cloud | Auth tickets | Input, Screenshots |
 
-Unsupported calls log and abort rather than pretend to work.
+Interface versions from SDK 0.99 to 1.65 are served (SteamClient 006-023), laid out from Valve's SDK headers. Where an old version's call has no matching implementation, the slot logs and returns zero. Unsupported calls log and abort rather than pretend to work.
 
 ## Limitations
 
