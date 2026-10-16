@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.0 - 2026-10-17
 
 ### Added
 - **Achievements viewer:** press `a` on a game for a modal listing its achievements with unlocked state and date, global rarity and descriptions. `s` cycles the sort (status, name, rarity, date), `S` reverses it, `f` filters all / unlocked / locked.
