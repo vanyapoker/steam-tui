@@ -190,7 +190,7 @@ class Tests(unittest.TestCase):
         stats = op['Stats']
         if 'FindLeaderboard' in stats:
             assert stats['FindLeaderboard']['name'] == 'Ghosts'
-            return {'Board': {'found': True, 'id': 7, 'name': 'Ghosts', 'entries': 3, 'sort': 2, 'display': 1}}
+            return {'Board': {'result': 1, 'found': True, 'id': 7, 'name': 'Ghosts', 'entries': 3, 'sort': 2, 'display': 1}}
         if 'LeaderboardEntries' in stats:
             assert stats['LeaderboardEntries']['board'] == 7
             entries = [

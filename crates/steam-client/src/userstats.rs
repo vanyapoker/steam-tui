@@ -297,6 +297,7 @@ fn find(name: String, create: bool, sort: i32, display: i32) -> u64 {
         }) {
             Ok(Response::Board {
                 found: true,
+                result: _,
                 id,
                 name,
                 entries,
