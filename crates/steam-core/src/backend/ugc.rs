@@ -8,8 +8,14 @@ use steam_vent_proto_steam::steammessages_publishedfile_steamclient::CPublishedF
 use tokio::time::timeout;
 
 const DEADLINE: Duration = Duration::from_secs(8);
-const MAX_IDS: usize = 256;
+/// Games ask for up to 1000 items at once (Backpack Battles does).
+const MAX_IDS: usize = 1000;
+/// One service call per chunk; chunks run concurrently.
+const CHUNK: usize = 100;
 const MAX_METADATA: usize = 8192;
+/// JSON frames are bounded (8 MiB) and bytes serialize as numbers, so the
+/// metadata of one reply is budgeted; items past the budget come back without it.
+const METADATA_BUDGET: usize = 1 << 20;
 
 pub async fn handle(connection: &Connection, app_id: u32, op: UgcOp) -> Response {
     let UgcOp::Details {
@@ -22,26 +28,38 @@ pub async fn handle(connection: &Connection, app_id: u32, op: UgcOp) -> Response
         };
     }
     let connection = &connection.with_app_id(app_id);
-    let request = CPublishedFile_GetDetails_Request {
-        publishedfileids: ids,
-        includetags: Some(true),
-        includemetadata: Some(true),
-        includechildren: Some(false),
-        includevotes: Some(true),
-        short_description: Some(!long_description),
-        appid: Some(app_id),
-        ..Default::default()
-    };
-    let reply = timeout(DEADLINE, connection.service_method(request)).await;
-    let Ok(Ok(reply)) = reply else {
+    let calls = ids.chunks(CHUNK).map(|chunk| {
+        let request = CPublishedFile_GetDetails_Request {
+            publishedfileids: chunk.to_vec(),
+            includetags: Some(true),
+            includemetadata: Some(true),
+            includechildren: Some(false),
+            includevotes: Some(true),
+            short_description: Some(!long_description),
+            appid: Some(app_id),
+            ..Default::default()
+        };
+        connection.service_method(request)
+    });
+    let replies = timeout(DEADLINE, futures_util::future::join_all(calls)).await;
+    let Ok(replies) = replies else {
         return Response::Error {
-            message: "UGC details request failed or timed out".into(),
+            message: "UGC details request timed out".into(),
         };
     };
+    let mut details = Vec::new();
+    for reply in replies {
+        let Ok(reply) = reply else {
+            return Response::Error {
+                message: "UGC details request failed".into(),
+            };
+        };
+        details.extend(reply.publishedfiledetails);
+    }
+    let mut budget = METADATA_BUDGET;
     Response::UgcDetails {
         result: 1,
-        items: reply
-            .publishedfiledetails
+        items: details
             .iter()
             .take(MAX_IDS)
             .map(|d| {
@@ -51,7 +69,8 @@ pub async fn handle(connection: &Connection, app_id: u32, op: UgcOp) -> Response
                     d.short_description()
                 };
                 let mut metadata = d.metadata().as_bytes().to_vec();
-                metadata.truncate(MAX_METADATA);
+                metadata.truncate(MAX_METADATA.min(budget));
+                budget -= metadata.len();
                 UgcItem {
                     id: d.publishedfileid(),
                     result: d.result() as i32,

@@ -126,6 +126,11 @@ def ffi_child():
     query = call(ugc, 3, ctypes.c_uint64, (ctypes.c_void_p, ctypes.c_uint32), (ids, 1))
     assert query
     assert call(ugc, 26, ctypes.c_bool, (ctypes.c_uint64, ctypes.c_bool), (query, True))
+    # Backpack Battles asks for 1000 items in one query; over 1000 is rejected.
+    many = (ctypes.c_uint64 * 1001)(*range(1, 1002))
+    big = call(ugc, 3, ctypes.c_uint64, (ctypes.c_void_p, ctypes.c_uint32), (many, 1000))
+    assert big and call(ugc, 21, ctypes.c_bool, (ctypes.c_uint64,), (big,))
+    assert call(ugc, 3, ctypes.c_uint64, (ctypes.c_void_p, ctypes.c_uint32), (many, 1001)) == 0
     c = call(ugc, 4, ctypes.c_uint64, (ctypes.c_uint64,), (query,))
     handle, status, count, total = struct.unpack_from('<QiII', result(c, 280, 3401))
     details = ctypes.create_string_buffer(9772)

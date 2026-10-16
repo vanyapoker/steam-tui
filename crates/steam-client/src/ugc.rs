@@ -226,7 +226,8 @@ fn queries() -> std::sync::MutexGuard<'static, HashMap<u64, Query>> {
 }
 
 unsafe extern "C" fn q_create(_: *mut c_void, ids: *const u64, count: u32) -> u64 {
-    if ids.is_null() || count == 0 || count > 256 {
+    if ids.is_null() || count == 0 || count > 1000 {
+        trace(format_args!("ugc.CreateQueryUGCDetailsRequest rejected ({count} ids)"));
         return 0;
     }
     let mut map = queries();
@@ -279,6 +280,7 @@ unsafe extern "C" fn q_send(_: *mut c_void, handle: u64) -> u64 {
         .map(|q| (q.ids.clone(), q.long_description));
     let failure = completed(handle, 2, 0);
     let Some((ids, long_description)) = request else {
+        trace(format_args!("ugc.SendQueryUGCRequest unknown handle {handle}"));
         let call = callresults::reserve();
         callresults::complete_for(call, UGC_QUERY_COMPLETED, failure);
         return call;

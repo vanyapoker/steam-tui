@@ -345,6 +345,7 @@ unsafe extern "C" fn f27(_: *mut c_void, board: u64) -> i32 {
 fn download(board: u64, request: i32, start: i32, end: i32, users: Vec<u64>) -> u64 {
     let failure = Payload::default().u64(board).u64(0).i32(0).pad_to(20);
     if !online() || board == 0 || board > i32::MAX as u64 {
+        trace("userstats.DownloadLeaderboardEntries rejected (offline or bad board)");
         let call = callresults::reserve();
         callresults::complete_for(call, LEADERBOARD_SCORES_DOWNLOADED, failure);
         return call;
@@ -370,6 +371,9 @@ fn download(board: u64, request: i32, start: i32, end: i32, users: Vec<u64>) -> 
                 state.next_handle += 1;
                 let handle = state.next_handle;
                 let count = entries.len() as i32;
+                trace(format_args!(
+                    "userstats.DownloadLeaderboardEntries -> {count} entries of {total}"
+                ));
                 if state.downloads.len() >= MAX_DOWNLOADS {
                     state.downloads.pop_front();
                 }
@@ -380,14 +384,25 @@ fn download(board: u64, request: i32, start: i32, end: i32, users: Vec<u64>) -> 
                     .i32(count)
                     .pad_to(20)
             }
-            _ => failure,
+            other => {
+                trace(format_args!(
+                    "userstats.DownloadLeaderboardEntries failed ({})",
+                    match &other {
+                        Ok(Response::BoardEntries { result, .. }) => format!("eresult {result}"),
+                        Ok(Response::Error { message }) => message.clone(),
+                        Ok(_) => "unexpected response".to_owned(),
+                        Err(e) => e.to_string(),
+                    }
+                ));
+                failure
+            }
         }
     })
 }
 
 unsafe extern "C" fn f28(_: *mut c_void, board: u64, request: i32, start: i32, end: i32) -> u64 {
     trace(format_args!(
-        "userstats.DownloadLeaderboardEntries {board} kind {request}"
+        "userstats.DownloadLeaderboardEntries {board} kind {request} range {start}..{end}"
     ));
     download(board, request, start, end, Vec::new())
 }
