@@ -9,6 +9,9 @@ pub use host::{HostAccount, internal as internal_host_command};
 mod reaper;
 #[cfg(test)]
 mod tests;
+mod tools;
+pub use tools::Dependency;
+mod setup;
 
 use crate::installed::{
     InstalledGame, Node, Result, app_metadata, contained, failure, library_roots, read_vdf,
@@ -57,9 +60,9 @@ pub(crate) fn native_home(app_id: u32, account_id: u32) -> Result<PathBuf> {
         .join(app_id.to_string()))
 }
 
-/// A required Steam Play tool/runtime that is not installed yet; the TUI offers to
-/// install it and retries the launch.
-#[derive(Debug)]
+/// A required Steam Play tool/runtime that is not installed yet. Callers install
+/// it through steam-tui's content service and retry the launch.
+#[derive(Debug, Clone)]
 pub struct MissingTool {
     pub app_id: u32,
     pub name: String,
@@ -539,6 +542,8 @@ fn apply_options(plan: &mut LaunchPlan, options: Option<&str>) -> Result<()> {
                 | "PATH"
                 | "STEAM_COMPAT_CLIENT_INSTALL_PATH"
                 | "STEAM_COMPAT_DATA_PATH"
+                | "STEAM_COMPAT_TOOL_PATHS"
+                | "STEAM_COMPAT_INSTALL_PATH"
         ) {
             return Err(failure(format!(
                 "Launch-option override of {key} is unsupported for safe direct launch"
@@ -590,7 +595,9 @@ fn installed_apps(game: &InstalledGame) -> BTreeMap<u32, PathBuf> {
             let Some(dir) = app.text("installdir") else {
                 continue;
             };
-            if let Ok(dir) = contained(&root.join("steamapps/common"), dir) {
+            if let Ok(dir) = contained(&root.join("steamapps/common"), dir)
+                && dir.is_dir()
+            {
                 installs.entry(id).or_insert(dir);
             }
         }
@@ -604,20 +611,31 @@ fn proton_plan(game: &InstalledGame, game_plan: LaunchPlan) -> Result<LaunchPlan
     // metadata IDs, not executable guesses (same schema used by protontricks).
     let mut wanted: BTreeSet<_> = installs.keys().copied().collect();
     wanted.insert(891390);
-    let metadata = app_metadata(&game.steam_root, &wanted).map_err(|error| {
-        failure(format!(
-            "Windows launch needs Steam Play tool metadata in {}/appcache/appinfo.vdf and an installed Proton: {error}",
-            game.steam_root.display()
-        ))
-    })?;
-    let configured = configured_tool(&game.steam_root, game.app_id, true)?;
-    let configured_id = configured.as_deref().map(|name| {
-        tool_app_id(&metadata, name).ok_or_else(|| failure(format!(
-            "Configured compatibility tool {name} has no unambiguous cached Steam Play registry entry; custom tools are not supported"
-        )))
-    }).transpose()?;
+    let metadata = tools::metadata(game, &wanted)?;
+    proton_plan_with_metadata(game, game_plan, &installs, &metadata)
+}
+
+fn proton_plan_with_metadata(
+    game: &InstalledGame,
+    game_plan: LaunchPlan,
+    installs: &BTreeMap<u32, PathBuf>,
+    metadata: &BTreeMap<u32, Node>,
+) -> Result<LaunchPlan> {
+    let configured = tools::proton_choice(game, metadata)?;
+    let configured_id = configured
+        .as_deref()
+        .map(|name| tool_app_id(metadata, name).ok_or_else(|| tools::registry_error(name)))
+        .transpose()?;
+    if let Some(id) = configured_id
+        && !installs.contains_key(&id)
+    {
+        return Err(Box::new(MissingTool {
+            app_id: id,
+            name: configured.clone().expect("configured ID has a name"),
+        }));
+    }
     let mut proton = Vec::new();
-    for (id, directory) in &installs {
+    for (id, directory) in installs {
         let Ok(doc) = read_vdf(&directory.join("toolmanifest.vdf")) else {
             continue;
         };
@@ -630,11 +648,22 @@ fn proton_plan(game: &InstalledGame, game_plan: LaunchPlan) -> Result<LaunchPlan
         if configured_id.is_some_and(|selected| selected != *id) {
             continue;
         }
-        proton.push((directory, doc));
+        proton.push((*id, directory, doc));
+    }
+    if proton.len() != 1 && configured.is_none() {
+        let id = tool_app_id(metadata, "proton-stable")
+            .ok_or_else(|| tools::registry_error("proton-stable"))?;
+        if !installs.contains_key(&id) {
+            return Err(Box::new(MissingTool {
+                app_id: id,
+                name: "Proton Stable".into(),
+            }));
+        }
+        proton.retain(|(candidate, _, _)| *candidate == id);
     }
     if proton.len() != 1 {
         return Err(failure(format!(
-            "Windows launch needs one unambiguous installed Proton tool{}; found {}. Install the selected Proton/runtime with Steam, initialize this game's prefix, then close Steam",
+            "Windows launch needs one usable Proton tool{}; found {}. Check the selected tool's installation and manifest",
             configured
                 .as_ref()
                 .map(|s| format!(" matching {s}"))
@@ -642,7 +671,7 @@ fn proton_plan(game: &InstalledGame, game_plan: LaunchPlan) -> Result<LaunchPlan
             proton.len()
         )));
     }
-    let (directory, document) = proton.remove(0);
+    let (root_id, directory, document) = proton.remove(0);
     let manifest = document
         .child("manifest")
         .ok_or_else(|| failure("Selected Proton has no tool manifest"))?;
@@ -671,33 +700,7 @@ fn proton_plan(game: &InstalledGame, game_plan: LaunchPlan) -> Result<LaunchPlan
     let mut command = tool_command(directory, manifest, "run")?;
     command.push(game_plan.executable.to_string_lossy().into_owned());
     command.extend(game_plan.arguments);
-    let mut tool_paths = vec![directory.to_path_buf()];
-    if let Some(runtime_id) = manifest.text("require_tool_appid") {
-        let id = runtime_id
-            .parse::<u32>()
-            .map_err(|_| failure("Invalid Proton runtime app ID"))?;
-        let runtime = installs.get(&id).ok_or_else(|| {
-            failure(format!(
-                "Proton requires missing installed runtime app {id}; install it before launching"
-            ))
-        })?;
-        let runtime_doc = read_vdf(&runtime.join("toolmanifest.vdf"))?;
-        let runtime_manifest = runtime_doc
-            .child("manifest")
-            .ok_or_else(|| failure("Missing runtime manifest"))?;
-        if runtime_manifest.text("compatmanager_layer_name") != Some("container-runtime") {
-            return Err(failure("Unsupported Proton runtime layer"));
-        }
-        if runtime_manifest.text("require_tool_appid").is_some() {
-            return Err(failure(
-                "Nested runtime dependencies are not supported for direct launch",
-            ));
-        }
-        tool_paths.push(runtime.to_path_buf());
-        let mut wrapped = tool_command(runtime, runtime_manifest, "run")?;
-        wrapped.extend(command);
-        command = wrapped;
-    }
+    let (mut command, tool_paths) = tools::wrap_dependencies(installs, root_id, manifest, command)?;
     let executable = PathBuf::from(command.remove(0));
     let mut environment = game_plan.environment;
     environment.insert(
@@ -755,9 +758,9 @@ fn runtime_plan(game: &InstalledGame, app: &Node, plan: LaunchPlan) -> Result<La
     let installs = installed_apps(game);
     let mut wanted: BTreeSet<_> = installs.keys().copied().collect();
     wanted.insert(891390);
-    let metadata = app_metadata(&game.steam_root, &wanted)?;
-    // Container runtimes are absent from the compat_tools registry; Valve's
-    // fixed app IDs name them.
+    let metadata = tools::metadata(game, &wanted)?;
+    // Older registries omit container runtimes. Keep their established app IDs
+    // as a fallback; prefer names and aliases from current PICS.
     let known = match tool.as_str() {
         "SteamLinuxRuntime_scout" => Some(1070560),
         "SteamLinuxRuntime_soldier" => Some(1391110),
@@ -765,11 +768,9 @@ fn runtime_plan(game: &InstalledGame, app: &Node, plan: LaunchPlan) -> Result<La
         "SteamLinuxRuntime_4" | "SteamLinuxRuntime_medic" => Some(4183110),
         _ => None,
     };
-    let id = tool_app_id(&metadata, &tool).or(known).ok_or_else(|| {
-        failure(format!(
-            "Runtime {tool} has no unambiguous Steam Play registry entry"
-        ))
-    })?;
+    let id = tool_app_id(&metadata, &tool)
+        .or(known)
+        .ok_or_else(|| tools::registry_error(&tool))?;
     let directory = installs.get(&id).ok_or_else(|| MissingTool {
         app_id: id,
         name: tool.clone(),
@@ -784,6 +785,7 @@ fn runtime_plan(game: &InstalledGame, app: &Node, plan: LaunchPlan) -> Result<La
     let mut command = tool_command(directory, manifest, "run")?;
     command.push(plan.executable.to_string_lossy().into_owned());
     command.extend(plan.arguments);
+    let (mut command, tool_paths) = tools::wrap_dependencies(&installs, id, manifest, command)?;
     let executable = PathBuf::from(command.remove(0));
     let mut environment = plan.environment;
     for (key, value) in [
@@ -793,7 +795,10 @@ fn runtime_plan(game: &InstalledGame, app: &Node, plan: LaunchPlan) -> Result<La
             "STEAM_COMPAT_LIBRARY_PATHS",
             game.library_root.join("steamapps"),
         ),
-        ("STEAM_COMPAT_TOOL_PATHS", directory.clone()),
+        (
+            "STEAM_COMPAT_TOOL_PATHS",
+            std::env::join_paths(tool_paths)?.into(),
+        ),
     ] {
         environment.insert(key.into(), value.to_string_lossy().into_owned());
     }
@@ -816,7 +821,11 @@ fn tool_app_id(metadata: &BTreeMap<u32, Node>, name: &str) -> Option<u32> {
             continue;
         };
         for (key, tool) in &tools.children {
-            let Some(id) = tool.text("appid").and_then(|s| s.parse::<u32>().ok()) else {
+            let Some(id) = tool
+                .text("appid")
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|id| *id != 0)
+            else {
                 continue;
             };
             if key == name {
@@ -936,12 +945,7 @@ pub async fn run_with_backend(
         ));
     }
     let owned = game.clone();
-    let mut plan = {
-        let owned = owned.clone();
-        tokio::task::spawn_blocking(move || resolve(&owned))
-            .await
-            .map_err(|e| failure(format!("Launch worker failed: {e}")))??
-    };
+    let mut plan = tools::resolve_online(&owned, connection).await?;
     if plan.needs_steam && backend_kind != LaunchBackend::ValveHost {
         return Err(failure(
             "This VAC game requires Valve host: press Ctrl+Enter (CLI: --valve-host)",
@@ -1044,15 +1048,19 @@ pub async fn run_with_backend(
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
     if let Some((endpoint, sandbox, connection)) = backend {
         let app_id = owned.app_id;
+        let backend_events = events.clone();
         tokio::task::spawn_local(async move {
             let _sandbox = sandbox;
             tokio::select! {
-                _ = endpoint.run_with_events(&connection, app_id, events) => {}
+                _ = endpoint.run_with_events(&connection, app_id, backend_events) => {}
                 _ = done_rx => {}
             }
         });
     }
     let mut done_tx = Some(done_tx);
+    // Setup executables may call Steam APIs too. Serve them with the same
+    // account backend/private HOME, and close it on any setup failure.
+    setup::prepare(&owned, &plan, connection, events.as_ref()).await?;
     let watched_token = token.clone();
     let (mut child, log, mut status_log, mut host_lease) =
         tokio::task::spawn_blocking(move || -> Result<_> {

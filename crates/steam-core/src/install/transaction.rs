@@ -701,6 +701,50 @@ impl Session {
             }
         }
         app.children.insert("installeddepots".into(), installed);
+        let mut shared = Node::default();
+        for (depot, source) in &self.request.plan.shared_depots {
+            put(&mut shared, &depot.to_string(), source.to_string());
+        }
+        app.children.insert("shareddepots".into(), shared);
+        // Only depot-flagged, fully verified files may become first-run scripts.
+        let mut scripts = Node::default();
+        put(&mut scripts, "version", "1".into());
+        let files = scripts.children.entry("files".into()).or_default();
+        let mut legacy = Node::default();
+        for planned in layout.files.iter().filter(|p| p.file.flags & 256 != 0) {
+            let mut script = Node::default();
+            put(
+                &mut script,
+                "path",
+                planned.file.path.to_string_lossy().into_owned(),
+            );
+            let hash = planned
+                .file
+                .sha1
+                .ok_or_else(|| failure("Install script has no content hash"))?;
+            put(
+                &mut script,
+                "sha1",
+                hash.iter().map(|b| format!("{b:02x}")).collect(),
+            );
+            put(&mut script, "depot", planned.depot.depot_id.to_string());
+            put(
+                &mut script,
+                "manifest",
+                planned.depot.manifest_id.to_string(),
+            );
+            put(
+                &mut legacy,
+                &planned.depot.depot_id.to_string(),
+                planned.file.path.to_string_lossy().into_owned(),
+            );
+            files
+                .children
+                .insert(files.children.len().to_string(), script);
+        }
+        app.children
+            .insert("steamtuiinstallscripts".into(), scripts);
+        app.children.insert("installscripts".into(), legacy);
         Ok(doc)
     }
 

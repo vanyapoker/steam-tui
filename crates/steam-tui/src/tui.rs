@@ -154,11 +154,13 @@ enum JobEvent {
     /// Launch needs a tool that is not installed; install it, then retry.
     NeedsTool {
         game: Box<steam_core::installed::InstalledGame>,
-        tool: u32,
-        name: String,
+        dependency: steam_core::launch::Dependency,
         backend: LaunchBackend,
     },
-    ToolPlan(Result<InstallRequest, String>),
+    ToolPlan {
+        epoch: u64,
+        result: Result<InstallRequest, String>,
+    },
     Reconnected {
         trigger: Trigger,
         result: Result<Connection, String>,
@@ -721,11 +723,10 @@ fn spawn_launch(
                 result: Ok((result.pid, result.description)),
                 cloud: note,
             },
-            Err(error) => match error.downcast_ref::<steam_core::launch::MissingTool>() {
+            Err(error) => match steam_core::launch::Dependency::from_error(error.as_ref()) {
                 Some(missing) => JobEvent::NeedsTool {
                     backend,
-                    tool: missing.app_id,
-                    name: missing.name.clone(),
+                    dependency: missing,
                     game: Box::new(game),
                 },
                 None => JobEvent::Launch {
@@ -1466,34 +1467,30 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                             catalog_generation += 1;
                             scan(ScanJob { connection: connection.clone(), account: account.clone(), completion: Some(message), generation: catalog_generation, active_library: None, interim: false, awaiting_login: false }, job_tx.clone(), &mut workers);
                         }
-                        JobEvent::NeedsTool { game, tool, name, backend } => {
+                        JobEvent::NeedsTool { game, dependency, backend } => {
                             model.launching.remove(&game.app_id);
                             match (connection.clone(), account.clone()) {
-                                (Some(connection), Some(account)) if !model.install_active => {
-                                    model.status = format!("{} needs {name}; installing it first…", game.name);
+                                (Some(connection), Some(account)) if !model.install_active && !model.preparing_install && model.pending_launch.is_none() => {
+                                    model.status = format!("{}: {dependency}; installing first…", game.name);
+                                    model.preparing_install = true;
                                     model.pending_launch = Some((*game.clone(), backend));
                                     let updates = job_tx.clone();
-                                    let library = game.library_root.clone();
-                                    let steam_root = game.steam_root.clone();
                                     workers.push(tokio::task::spawn_local(async move {
-                                        let result = async {
-                                            let plan = steam_core::catalog::plan_tool(&connection, tool).await.map_err(|e| e.to_string())?;
-                                            let destination = tokio::task::spawn_blocking(move || steam_core::install::destination(&library))
-                                                .await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-                                            Ok(InstallRequest { plan, destination: destination.path, steam_root, account, existing: None })
-                                        }.await;
-                                        let _ = updates.send(JobEvent::ToolPlan(result)).await;
+                                        let result = dependency.install_request(&connection, &game, &account)
+                                            .await.map_err(|e| e.to_string());
+                                        let _ = updates.send(JobEvent::ToolPlan { epoch, result }).await;
                                     }));
                                 }
                                 _ => {
-                                    let message = format!("Launch [{}] needs {name} (app {tool}); an online account and no running install are required to fetch it", game.app_id);
+                                    let message = format!("Launch [{}] needs {dependency}; an online account and no running install are required to fetch it", game.app_id);
                                     model.status = message.clone();
                                     model.launches.insert(game.app_id, message);
                                 }
                             }
                         }
-                        JobEvent::ToolPlan(result) => match (result, connection.clone()) {
-                            (Ok(request), Some(connection)) if !model.install_active => {
+                        JobEvent::ToolPlan { epoch: planned_epoch, result } => match (result, connection.clone()) {
+                            (Ok(request), Some(connection)) if planned_epoch == epoch && !model.install_active && model.pending_launch.is_some() => {
+                                model.preparing_install = false;
                                 let app_id = request.plan.app_id;
                                 model.active_install = Some((app_id, request.destination.clone()));
                                 model.install_active = true;
@@ -1504,16 +1501,23 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                 install_job = Some(spawn_install(connection, request, progress_tx.clone(), job_tx.clone()));
                             }
                             (Err(error), _) => {
+                                model.preparing_install = false;
                                 model.pending_launch = None;
                                 debug_log(&format!("tool plan failed: {error}"));
                                 model.status = format!("Dependency install unavailable: {error}");
                             }
                             _ => {
+                                model.preparing_install = false;
                                 model.pending_launch = None;
                                 model.status = "Dependency install could not start (busy or disconnected)".into();
                             }
                         },
-                        JobEvent::Backend(event) => model.push_backend(event),
+                        JobEvent::Backend(event) => {
+                            if event.channel == "Setup" && model.launching.contains(&event.app_id) {
+                                model.status = format!("Launch [{}]: {}", event.app_id, event.title);
+                            }
+                            model.push_backend(event);
+                        },
                         JobEvent::Cloud { app_id, message } => {
                             if model.launching.contains(&app_id) || model.cloud_busy.contains(&app_id) {
                                 model.status = message;

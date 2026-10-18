@@ -1203,6 +1203,11 @@ impl Model {
             KeyCode::Char('n') => return self.open_news(),
             KeyCode::Char('a') => return self.open_achievements(),
             KeyCode::Enter => {
+                if self.pending_launch.is_some() {
+                    self.status =
+                        "A launch is waiting for its dependency installation to finish".into();
+                    return Action::None;
+                }
                 let backend = if key.modifiers.contains(KeyModifiers::CONTROL)
                     || self
                         .selected_game()
@@ -1838,6 +1843,7 @@ mod tests {
                 platform: steam_core::catalog::InstallPlatform::Linux,
                 branch: "public".into(),
                 language: "english".into(),
+                shared_depots: Default::default(),
                 depots: vec![],
                 download_bytes: 50,
                 installed_bytes: 100,
@@ -1953,6 +1959,39 @@ mod tests {
         assert_eq!(model.key(enter), Action::None);
         model.selected = 1;
         assert_eq!(model.key(enter), Action::Launch(LaunchBackend::BuiltIn));
+    }
+
+    #[test]
+    fn dependency_install_prevents_duplicate_launch_and_manual_install_requests() {
+        let mut model = loaded();
+        model.pending_launch = Some((
+            model.selected_game().unwrap().installed.clone().unwrap(),
+            LaunchBackend::BuiltIn,
+        ));
+        model.preparing_install = true;
+        assert_eq!(
+            model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::None
+        );
+        assert_eq!(
+            model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
+            Action::None
+        );
+        assert_eq!(model.key(key('u')), Action::None);
+        model.preparing_install = false;
+        model.install_active = true;
+        model.active_install = Some((300, "/library".into()));
+        assert_eq!(
+            model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::None
+        );
+        model.pending_launch = None;
+        model.install_active = false;
+        model.active_install = None;
+        assert_eq!(
+            model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::Launch(LaunchBackend::BuiltIn)
+        );
     }
 }
 
@@ -2381,6 +2420,7 @@ mod notification_tests {
                 platform: steam_core::catalog::InstallPlatform::Linux,
                 branch: "public".into(),
                 language: "english".into(),
+                shared_depots: Default::default(),
                 depots: vec![],
                 download_bytes: 1,
                 installed_bytes: 1,

@@ -18,10 +18,11 @@
 //! tree, directory/file collisions require explicit user action, and obsolete
 //! depot files are retained rather than guessing which files are saves/mods.
 //! UserConfig defaults are verified but never replace existing configuration.
-//! Depot install scripts are downloaded as data, never executed; prerequisites
-//! or DRM requiring Steam remain explicit manual setup/launch limitations.
+//! Depot install scripts are downloaded as data, never executed by the installer.
+//! Verified script receipts are processed by launch-time setup in the game's
+//! Proton prefix; Steam-dependent DRM remains a launch limitation.
 mod download;
-mod filesystem;
+pub(crate) mod filesystem;
 #[cfg(test)]
 mod tests;
 mod transaction;
@@ -746,9 +747,9 @@ async fn run_inner(
         ));
     }
     if layout.install_scripts {
-        status.message.push_str(
-            "; depot install scripts/prerequisites were not executed (may require manual setup)",
-        );
+        status
+            .message
+            .push_str("; first-run scripts recorded for launch-time prerequisite checks");
     }
     report(progress, status);
     Ok(game)

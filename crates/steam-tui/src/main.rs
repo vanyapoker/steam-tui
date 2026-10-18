@@ -242,14 +242,49 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
             let local = tokio::task::LocalSet::new();
             local
                 .run_until(async {
-                    let result = steam_core::launch::run_with_backend(
-                        &game,
-                        Some(&connection),
-                        Some(&account),
-                        backend,
-                        None,
-                    )
-                    .await?;
+                    let mut dependencies = std::collections::BTreeSet::new();
+                    let result = loop {
+                        let result = steam_core::launch::run_with_backend(
+                            &game,
+                            Some(&connection),
+                            Some(&account),
+                            backend,
+                            None,
+                        )
+                        .await;
+                        match result {
+                            Ok(result) => break result,
+                            Err(error) => {
+                                let Some(missing) = steam_core::launch::Dependency::from_error(error.as_ref()) else {
+                                    return Err(error);
+                                };
+                                if !dependencies.insert(missing.app_id()) || dependencies.len() > 64 {
+                                    return Err(std::io::Error::other("Dependency installation made no progress or exceeded 64 dependencies").into());
+                                }
+                                println!("{}; installing…", terminal_text(&missing.to_string()));
+                                let request = missing.install_request(&connection, &game, &account).await?;
+                                let (progress, mut reports) = tokio::sync::mpsc::channel(64);
+                                let cancel = tokio_util::sync::CancellationToken::new();
+                                let install = steam_core::install::run(
+                                    connection.clone(), request, progress, cancel.clone(),
+                                    steam_core::install::PauseGate::default(),
+                                );
+                                tokio::pin!(install);
+                                loop {
+                                    tokio::select! {
+                                        result = &mut install => { result?; break; }
+                                        Some(report) = reports.recv() => println!("{}", terminal_text(&report.message)),
+                                        _ = tokio::signal::ctrl_c(), if !cancel.is_cancelled() => {
+                                            cancel.cancel();
+                                        }
+                                    }
+                                }
+                                if cancel.is_cancelled() {
+                                    return Err(std::io::Error::other("Dependency installation cancelled").into());
+                                }
+                            }
+                        }
+                    };
                     println!("{}", result.description);
                     // The per-launch backend lives until the game exits.
                     while steam_core::launch::is_running(app_id) {

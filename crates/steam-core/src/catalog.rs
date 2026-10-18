@@ -15,6 +15,7 @@
 //! (token denied) blocks only the games whose selected depots need it.
 mod cache;
 mod metadata;
+pub(crate) mod shared;
 #[cfg(test)]
 mod tests;
 
@@ -54,6 +55,9 @@ pub struct InstallPlan {
     pub branch: String,
     pub language: String,
     pub depots: Vec<DepotSpec>,
+    /// Shared depot -> source app, stored independently of game content.
+    #[serde(default)]
+    pub shared_depots: BTreeMap<u32, u32>,
     pub download_bytes: u64,
     pub installed_bytes: u64,
 }
@@ -426,8 +430,8 @@ pub async fn plan(
 }
 
 /// Shared-depot source apps named by `source`'s selectable depots. Redistributable
-/// (`sharedinstall`) depots are never installed, so their sources are never
-/// fetched. Sorted and deduplicated.
+/// (`sharedinstall`) depots have a separate launch-time planner, so their sources
+/// are not fetched while resolving game depots. Sorted and deduplicated.
 fn references(
     docs: &BTreeMap<u32, Node>,
     source: u32,

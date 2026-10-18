@@ -227,7 +227,7 @@ pub fn scan(steam_root: Option<&Path>, account: Option<&str>) -> Result<Inventor
     })
 }
 
-fn manifest_game(
+pub(crate) fn manifest_game(
     path: &Path,
     library: &Path,
     root: &Path,

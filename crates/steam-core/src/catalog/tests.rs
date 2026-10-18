@@ -290,7 +290,7 @@ fn current_branch_and_language_have_exact_manifests_and_build() {
 }
 
 #[test]
-fn shared_install_depots_are_skipped_not_blocking() {
+fn shared_install_depots_are_recorded_separately_from_game_content() {
     // Steamworks Common Redistributables: its source app 228980 is not even held.
     let doc = document(
         r#"
@@ -304,6 +304,10 @@ fn shared_install_depots_are_skipped_not_blocking() {
     assert_eq!(
         plan.depots.iter().map(|d| d.depot_id).collect::<Vec<_>>(),
         [101]
+    );
+    assert_eq!(
+        plan.shared_depots,
+        BTreeMap::from([(228984, 228980), (228985, 228980)])
     );
     // Nor are they fetched as shared sources.
     let docs = BTreeMap::from([(10, doc)]);
@@ -326,7 +330,7 @@ fn shared_install_depots_are_skipped_not_blocking() {
     let windows = document(
         r#"
         "102" { "config" { "oslist" "windows" } "manifests" { "public" { "gid" "1002" } } }
-        "228984" { "config" { "oslist" "windows" } "manifests" { "public" { "gid" "9" } } "sharedinstall" "1" }
+        "228984" { "config" { "oslist" "windows" } "manifests" { "public" { "gid" "9" } } "sharedinstall" "1" "depotfromapp" "228980" }
     "#,
         "windows",
     );
@@ -468,6 +472,7 @@ fn plan_for(app_id: u32, platform: InstallPlatform, manifest: u64) -> InstallPla
         platform,
         branch: "public".into(),
         language: "english".into(),
+        shared_depots: Default::default(),
         depots: vec![DepotSpec {
             depot_id: 101,
             manifest_id: manifest,

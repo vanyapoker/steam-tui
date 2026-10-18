@@ -30,9 +30,10 @@ enum Outcome {
 ///   build or manifest GID, a source app's metadata missing for a depot that must
 ///   be installed, ambiguous installed platform/architecture (an update never
 ///   guesses a target change), unsafe install directory.
-/// * Skipped silently: `sharedinstall` depots (Steamworks Common Redistributables,
-///   VC/DirectX redistributables; they are installed once per library, never into
-///   the game's directory), depots of other OS/language/low-violence/architecture,
+/// * Separate installs: `sharedinstall` depots (Steamworks Common Redistributables,
+///   VC/DirectX redistributables) are recorded for the launch-time shared planner,
+///   never overlaid into the game's directory.
+/// * Skipped: depots of other OS/language/low-violence/architecture,
 ///   unowned DLC depots, depots that are not content (no manifest and no source app),
 ///   and depots without a manifest for a non-public branch that are not installed.
 /// * Fallback: a new install prefers Linux; when no Linux depot remains it falls
@@ -302,6 +303,18 @@ fn for_platform(target: &Target<'_>, platform: InstallPlatform) -> Result<Outcom
         branch: branch.to_owned(),
         language: language.to_owned(),
         depots: selected,
+        shared_depots: super::shared::requirements(doc, platform, language)
+            .map_err(|e| failure(e.to_string()))?
+            .into_iter()
+            .flat_map(|(source, ids)| ids.into_iter().map(move |id| (id, source)))
+            .filter(|(id, _)| {
+                depots
+                    .child(&id.to_string())
+                    .and_then(|d| number(d, "dlcappid"))
+                    .and_then(|id| u32::try_from(id).ok())
+                    .is_none_or(|dlc| owned.contains(&dlc) || licensed_depots.contains(id))
+            })
+            .collect(),
         download_bytes,
         installed_bytes,
     }))
@@ -309,7 +322,7 @@ fn for_platform(target: &Target<'_>, platform: InstallPlatform) -> Result<Outcom
 
 /// Redistributable depots (`sharedinstall`), e.g. Steamworks Common Redistributables,
 /// are shared between games and installed by Steam into `steamapps/common/Steamworks
-/// Shared`; this installer never installs them and never treats them as blockers.
+/// Shared`; game plans record these separately for launch-time installation.
 pub(super) fn shared_install(depot: &Node) -> bool {
     depot
         .text("sharedinstall")

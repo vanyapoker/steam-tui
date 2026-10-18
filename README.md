@@ -8,6 +8,8 @@ Early state: some games won't work without original steam client.
 
 - Starts in ~2 ms and uses ~30 MB of memory.
 - Install and update games (native and Proton), with pause and resume.
+- Missing Proton and runtime dependencies install automatically before launch.
+- Shared redistributables install per library; verified first-run setup runs in each game's Proton prefix.
 - Friends, live notifications, game changelogs.
 - Steam Cloud saves, with a side-by-side local/cloud conflict picker.
 - Games run on our own Steam backend, so no Steam process is needed.

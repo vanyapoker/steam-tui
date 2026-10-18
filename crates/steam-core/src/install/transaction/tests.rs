@@ -15,6 +15,7 @@ fn request(root: &Path) -> InstallRequest {
             platform: InstallPlatform::Linux,
             branch: "public".into(),
             language: "english".into(),
+            shared_depots: Default::default(),
             depots: vec![depot()],
             download_bytes: 3,
             installed_bytes: 3,
@@ -337,6 +338,54 @@ fn user_config_and_unknown_manifest_keys_survive_manifest_rewrite() {
     assert_eq!(
         app.at(&["InstalledDepots", "10"]).unwrap().text("manifest"),
         Some("20")
+    );
+}
+
+#[test]
+fn appmanifest_separates_shared_depots_and_records_only_flagged_install_scripts() {
+    let temp = Temp::new();
+    let mut session = session(temp.path());
+    session.request.plan.shared_depots.insert(228990, 228980);
+    let mut script = file("redist/installscript.vdf", b"\"InstallScript\" {}");
+    script.flags = 256;
+    let script_hash = script
+        .sha1
+        .unwrap()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let layout = Layout::new(
+        vec![(
+            depot(),
+            DepotManifest {
+                depot_id: 10,
+                manifest_id: 20,
+                files: vec![script, file("ordinary.vdf", b"not a script")],
+            },
+        )],
+        vec![],
+    )
+    .unwrap();
+    let document = session.build_manifest(&layout).unwrap();
+    let app = document.child("AppState").unwrap();
+    assert_eq!(
+        app.at(&["SharedDepots"]).unwrap().text("228990"),
+        Some("228980")
+    );
+    assert!(app.at(&["InstalledDepots", "228990"]).is_none());
+    assert_eq!(
+        app.at(&["InstallScripts"]).unwrap().text("10"),
+        Some("redist/installscript.vdf")
+    );
+    let receipt = app.at(&["SteamTuiInstallScripts", "files", "0"]).unwrap();
+    assert_eq!(receipt.text("sha1"), Some(script_hash.as_str()));
+    assert_eq!(receipt.text("manifest"), Some("20"));
+    assert_eq!(
+        app.at(&["SteamTuiInstallScripts", "files"])
+            .unwrap()
+            .children
+            .len(),
+        1
     );
 }
 

@@ -339,6 +339,300 @@ fn resolves_cached_windows_entry_through_configured_proton_and_required_runtime(
     );
 }
 
+fn dependency_tool(fixture: &Fixture, id: u32, required: Option<u32>, layer: &str) -> PathBuf {
+    let path = fixture.0.join(format!("steamapps/common/tool-{id}"));
+    fs::create_dir_all(path.join("files/bin")).unwrap();
+    for binary in ["run", "files/bin/wine", "files/bin/wineserver"] {
+        let executable = path.join(binary);
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let required = required
+        .map(|id| format!("\"require_tool_appid\" \"{id}\""))
+        .unwrap_or_default();
+    fs::write(path.join("toolmanifest.vdf"), format!(
+        "\"manifest\" {{ \"version\" \"2\" \"commandline\" \"/run %verb% --\" \"compatmanager_layer_name\" \"{layer}\" {required} }}"
+    )).unwrap();
+    path
+}
+
+fn dependency_plan(fixture: &Fixture) -> LaunchPlan {
+    LaunchPlan {
+        executable: fixture.game().install_dir.join("bin/game.exe"),
+        arguments: vec!["--game-option".into()],
+        working_dir: fixture.game().install_dir,
+        environment: BTreeMap::new(),
+        needs_steam: false,
+    }
+}
+
+fn dependency_registry(source: &str) -> BTreeMap<u32, Node> {
+    BTreeMap::from([(891390, crate::installed::text(source).unwrap())])
+}
+
+#[test]
+fn missing_configured_proton_is_installable_without_valve_appinfo() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.0.join("config")).unwrap();
+    fs::write(
+        fixture.0.join("config/config.vdf"),
+        r#"
+        "InstallConfigStore" { "Software" { "Valve" { "Steam" { "CompatToolMapping" {
+            "123" { "name" "selected" } "0" { "name" "other" }
+        } } } } }
+    "#,
+    )
+    .unwrap();
+    let metadata = dependency_registry(
+        r#""extended" { "compat_tools" {
+        "selected" { "appid" "200" } "other" { "appid" "201" }
+    } }"#,
+    );
+    let error = proton_plan_with_metadata(
+        &fixture.game(),
+        dependency_plan(&fixture),
+        &BTreeMap::new(),
+        &metadata,
+    )
+    .unwrap_err();
+    assert_eq!(error.downcast_ref::<MissingTool>().unwrap().app_id, 200);
+    assert!(!fixture.0.join("appcache/appinfo.vdf").exists());
+}
+
+#[test]
+fn fresh_windows_install_selects_registry_stable_alias_not_a_hardcoded_app_id() {
+    let fixture = Fixture::new();
+    let metadata = dependency_registry(
+        r#""extended" { "compat_tools" {
+        "future_proton" { "appid" "98765" "aliases" "old-name,proton-stable" }
+    } }"#,
+    );
+    let error = proton_plan_with_metadata(
+        &fixture.game(),
+        dependency_plan(&fixture),
+        &BTreeMap::new(),
+        &metadata,
+    )
+    .unwrap_err();
+    assert_eq!(error.downcast_ref::<MissingTool>().unwrap().app_id, 98765);
+    let missing_registry = proton_plan_with_metadata(
+        &fixture.game(),
+        dependency_plan(&fixture),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
+    .unwrap_err();
+    assert!(!missing_registry.is::<MissingTool>());
+    assert!(missing_registry.to_string().contains("registry"));
+}
+
+#[test]
+fn app_mapping_selects_its_missing_proton_instead_of_an_unrelated_installed_one() {
+    let fixture = Fixture::new();
+    let installed = BTreeMap::from([(200, dependency_tool(&fixture, 200, None, "proton"))]);
+    let metadata = dependency_registry(
+        r#""extended" {
+        "app_mappings" { "123" { "platform" "linux" "tool" "recommended" } }
+        "compat_tools" { "recommended" { "appid" "201" } }
+    }"#,
+    );
+    let error = proton_plan_with_metadata(
+        &fixture.game(),
+        dependency_plan(&fixture),
+        &installed,
+        &metadata,
+    )
+    .unwrap_err();
+    assert_eq!(error.downcast_ref::<MissingTool>().unwrap().app_id, 201);
+}
+
+#[test]
+fn proton_missing_runtime_uses_the_same_install_retry_error_as_native() {
+    let fixture = Fixture::new();
+    let installed = BTreeMap::from([(200, dependency_tool(&fixture, 200, Some(300), "proton"))]);
+    let error = proton_plan_with_metadata(
+        &fixture.game(),
+        dependency_plan(&fixture),
+        &installed,
+        &BTreeMap::new(),
+    )
+    .unwrap_err();
+    assert_eq!(error.downcast_ref::<MissingTool>().unwrap().app_id, 300);
+}
+
+#[test]
+fn nested_runtime_chain_keeps_wrapper_order_and_all_tool_paths() {
+    let fixture = Fixture::new();
+    let installed = BTreeMap::from([
+        (200, dependency_tool(&fixture, 200, Some(300), "proton")),
+        (
+            300,
+            dependency_tool(&fixture, 300, Some(400), "container-runtime"),
+        ),
+        (
+            400,
+            dependency_tool(&fixture, 400, None, "container-runtime"),
+        ),
+    ]);
+    let plan = proton_plan_with_metadata(
+        &fixture.game(),
+        dependency_plan(&fixture),
+        &installed,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(plan.executable, installed[&400].join("run"));
+    assert_eq!(
+        plan.arguments,
+        [
+            "run".into(),
+            "--".into(),
+            installed[&300].join("run").to_string_lossy().into_owned(),
+            "run".into(),
+            "--".into(),
+            installed[&200].join("run").to_string_lossy().into_owned(),
+            "run".into(),
+            "--".into(),
+            fixture
+                .game()
+                .install_dir
+                .join("bin/game.exe")
+                .to_string_lossy()
+                .into_owned(),
+            "--game-option".into(),
+        ]
+    );
+    let paths: Vec<_> =
+        std::env::split_paths(&plan.environment["STEAM_COMPAT_TOOL_PATHS"]).collect();
+    assert_eq!(
+        paths,
+        [
+            installed[&200].clone(),
+            installed[&300].clone(),
+            installed[&400].clone()
+        ]
+    );
+}
+
+#[test]
+fn runtime_dependencies_reject_cycles_invalid_ids_and_wrong_layers() {
+    let fixture = Fixture::new();
+    let metadata = dependency_registry(
+        r#""extended" {
+        "app_mappings" { "123" { "platform" "linux" "tool" "selected" } }
+        "compat_tools" { "selected" { "appid" "200" } }
+    }"#,
+    );
+    for (required, layer, expected) in [
+        (200, "container-runtime", "cycle"),
+        (0, "container-runtime", "Invalid"),
+        (300, "proton", "Unsupported runtime layer"),
+    ] {
+        let installed = BTreeMap::from([
+            (
+                200,
+                dependency_tool(&fixture, 200, Some(required), "proton"),
+            ),
+            (300, dependency_tool(&fixture, 300, Some(200), layer)),
+        ]);
+        let error = proton_plan_with_metadata(
+            &fixture.game(),
+            dependency_plan(&fixture),
+            &installed,
+            &metadata,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    let installed = BTreeMap::from([
+        (200, dependency_tool(&fixture, 200, Some(300), "proton")),
+        (
+            300,
+            dependency_tool(&fixture, 300, Some(200), "container-runtime"),
+        ),
+    ]);
+    let error = proton_plan_with_metadata(
+        &fixture.game(),
+        dependency_plan(&fixture),
+        &installed,
+        &BTreeMap::new(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("cycle"));
+}
+
+#[test]
+fn dependency_chain_is_bounded_even_without_a_cycle() {
+    let fixture = Fixture::new();
+    let installed = (200..233)
+        .map(|id| {
+            (
+                id,
+                dependency_tool(
+                    &fixture,
+                    id,
+                    (id < 232).then_some(id + 1),
+                    if id == 200 {
+                        "proton"
+                    } else {
+                        "container-runtime"
+                    },
+                ),
+            )
+        })
+        .collect();
+    let error = proton_plan_with_metadata(
+        &fixture.game(),
+        dependency_plan(&fixture),
+        &installed,
+        &BTreeMap::new(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("exceeds 32"));
+}
+
+#[test]
+fn nonexistent_tool_directory_is_not_an_installed_dependency() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("steamapps/appmanifest_200.acf"),
+        r#"
+        "AppState" { "appid" "200" "StateFlags" "4" "installdir" "removed-tool" }
+    "#,
+    )
+    .unwrap();
+    assert!(!installed_apps(&fixture.game()).contains_key(&200));
+}
+
+#[test]
+fn native_runtime_bootstrap_and_nested_wrapping_do_not_require_valve_appinfo() {
+    let fixture = Fixture::new();
+    let app = crate::installed::text(
+        r#""config" { "app_mappings" {
+        "0" { "platform" "linux" "tool" "SteamLinuxRuntime_sniper" }
+    } }"#,
+    )
+    .unwrap();
+    let error = runtime_plan(&fixture.game(), &app, dependency_plan(&fixture)).unwrap_err();
+    assert_eq!(error.downcast_ref::<MissingTool>().unwrap().app_id, 1628350);
+    for (id, required) in [(1628350, Some(300)), (300, None)] {
+        dependency_tool(&fixture, id, required, "container-runtime");
+        fs::write(fixture.0.join(format!("steamapps/appmanifest_{id}.acf")), format!(
+            "\"AppState\" {{ \"appid\" \"{id}\" \"StateFlags\" \"4\" \"installdir\" \"tool-{id}\" }}"
+        )).unwrap();
+    }
+    let plan = runtime_plan(&fixture.game(), &app, dependency_plan(&fixture)).unwrap();
+    assert_eq!(
+        plan.executable,
+        fixture.0.join("steamapps/common/tool-300/run")
+    );
+    assert_eq!(
+        std::env::split_paths(&plan.environment["STEAM_COMPAT_TOOL_PATHS"]).count(),
+        2
+    );
+    assert!(!fixture.0.join("appcache/appinfo.vdf").exists());
+}
+
 #[test]
 fn presence_reports_only_selected_accounts_builtin_games() {
     let fixture = Fixture::new();

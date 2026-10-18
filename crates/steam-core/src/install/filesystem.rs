@@ -140,7 +140,7 @@ pub(super) fn exists(path: &Path) -> Result<bool> {
 
 /// Reject symlink traversal, even if the link happens to point inside the tree.
 /// The library root itself is canonicalized once before this function is used.
-pub(super) fn checked(base: &Path, path: &Path, include_leaf: bool) -> Result<PathBuf> {
+pub(crate) fn checked(base: &Path, path: &Path, include_leaf: bool) -> Result<PathBuf> {
     relative(path)?;
     let mut current = base.to_path_buf();
     let count = path.components().count();
@@ -170,7 +170,7 @@ pub(super) fn checked(base: &Path, path: &Path, include_leaf: bool) -> Result<Pa
     Ok(base.join(path))
 }
 
-pub(super) fn private_directory(path: &Path) -> Result<()> {
+pub(crate) fn private_directory(path: &Path) -> Result<()> {
     if !exists(path)? {
         fs::DirBuilder::new().mode(0o700).create(path)?;
         sync_dir(
@@ -326,9 +326,9 @@ pub(super) fn disk_error(path: &Path, error: std::io::Error) -> super::Error {
     }
 }
 
-pub(super) struct Lock(File);
+pub(crate) struct Lock(File);
 impl Lock {
-    pub(super) fn acquire(path: &Path) -> Result<Self> {
+    pub(crate) fn acquire(path: &Path) -> Result<Self> {
         let file = regular(path, true, true)?;
         use std::os::fd::AsRawFd;
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
