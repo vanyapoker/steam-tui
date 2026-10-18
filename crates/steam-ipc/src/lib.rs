@@ -30,6 +30,12 @@ pub enum Operation {
     },
     P2PRecv,
     Ownership,
+    /// Check another app (including DLC) using this backend's authenticated CM
+    /// session. Request.app_id remains the running game's scope; tickets never
+    /// leave the backend.
+    AppOwnership {
+        app_id: u32,
+    },
     Persona,
     Country,
     AuthSessionTicket {

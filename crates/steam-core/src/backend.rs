@@ -5,6 +5,7 @@ mod gc;
 pub mod images;
 mod lobby;
 mod networking;
+mod ownership;
 pub mod sdr;
 pub mod stats;
 mod tickets;
@@ -150,7 +151,7 @@ impl Endpoint {
             connection,
             app_id,
             alive: None,
-            ownership: None,
+            ownership: ownership::Service::default(),
             networking: networking::Networking::start(connection, app_id, events.clone()),
             tickets: tickets::Service::start(connection, app_id, events.clone())?,
             gc: gc::Gc::start(connection, app_id, events.clone()).await?,
@@ -256,7 +257,7 @@ struct Session<'a> {
     connection: &'a Connection,
     app_id: u32,
     alive: Option<(Instant, bool)>,
-    ownership: Option<(Instant, bool)>,
+    ownership: ownership::Service,
     networking: networking::Networking,
     tickets: tickets::Service,
     gc: gc::Gc,
@@ -314,7 +315,7 @@ impl Session<'_> {
             let alive = crate::liveness::probe(self.connection, Duration::from_secs(3)).await;
             self.alive = Some((Instant::now(), alive));
             if !alive {
-                self.ownership = None;
+                self.ownership.clear();
             }
             alive
         };
@@ -331,6 +332,7 @@ impl Session<'_> {
             | Operation::P2PSend { .. }
             | Operation::P2PRecv
             | Operation::Ownership
+            | Operation::AppOwnership { .. }
             | Operation::Persona
             | Operation::AuthSessionTicket { .. }
             | Operation::WebAuthTicket { .. }
@@ -354,44 +356,14 @@ impl Session<'_> {
                     .await
             }
             Operation::Ownership => {
-                if let Some((at, owned)) = self.ownership
-                    && at.elapsed() < Duration::from_secs(2)
-                {
-                    return Response::Ownership { owned };
-                }
-                let request = CMsgClientGetAppOwnershipTicket {
-                    app_id: Some(self.app_id),
-                    ..Default::default()
-                };
-                let response = timeout(
-                    Duration::from_secs(5),
-                    self.connection
-                        .job::<_, CMsgClientGetAppOwnershipTicketResponse>(request),
-                )
-                .await;
-                let result = match response {
-                    Ok(Ok(response)) => owns_app(&response, self.app_id),
-                    _ => Err("App ownership request failed or timed out"),
-                };
-                match result {
-                    Ok(owned) => {
-                        self.ownership = Some((Instant::now(), owned));
-                        self.note(
-                            Direction::ToSteam,
-                            "CM",
-                            "ClientGetAppOwnershipTicket",
-                            if owned {
-                                "app is owned (ticket not forwarded)"
-                            } else {
-                                "access denied: app not owned"
-                            },
-                        );
-                        Response::Ownership { owned }
-                    }
-                    Err(message) => Response::Error {
-                        message: message.into(),
-                    },
-                }
+                self.ownership
+                    .query(self.connection, self.app_id, self.app_id, &self.events)
+                    .await
+            }
+            Operation::AppOwnership { app_id } => {
+                self.ownership
+                    .query(self.connection, self.app_id, app_id, &self.events)
+                    .await
             }
             Operation::Persona => {
                 let steam_id = self.connection.steam_id().steam64();
@@ -581,6 +553,11 @@ mod tests {
         };
         assert!(request_error(&request, 440).is_none());
         assert!(request_error(&request, 570).is_some());
+        // A DLC target is carried inside the operation, never in the outer
+        // capability scope. It does not grant access to another app's backend.
+        request.operation = Operation::AppOwnership { app_id: 441 };
+        assert!(request_error(&request, 440).is_none());
+        assert!(request_error(&request, 441).is_some());
         request.version += 1;
         assert!(request_error(&request, 440).is_some());
     }

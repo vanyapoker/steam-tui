@@ -34,7 +34,7 @@ unsafe extern "C" fn available_languages(_this: *mut c_void) -> *const c_char {
 }
 unsafe extern "C" fn subscribed_app(_this: *mut c_void, app_id: u32) -> bool {
     trace(format_args!("apps.BIsSubscribedApp {app_id}"));
-    app_id == current_app_id() && bridge::owned(app_id)
+    bridge::subscribed_app(current_app_id(), app_id)
 }
 unsafe extern "C" fn slot_3() -> ! {
     unsupported("apps.BIsVACBanned")

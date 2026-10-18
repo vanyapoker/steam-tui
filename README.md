@@ -77,6 +77,7 @@ Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK h
 
 - VAC-secured games run through Valve's Steam client without its web helpers. It must be signed in to the same account, and costs about 200 MB extra. Enter picks this automatically.
 - Online matchmaking and relay networking are unfinished.
+- DLC ownership checks use the account backend. DLC enumeration, installed-state queries, and in-game install/uninstall are not implemented yet.
 - Linux only.
 
 ## Not implemented yet
