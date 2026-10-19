@@ -185,18 +185,41 @@ fn select_entry<'a>(game: &InstalledGame, app: &'a Node) -> Result<(&'a Node, bo
     entries.sort_by_key(|(index, _)| *index);
     // Launch entries marked DLC/demo/server or conditional account/beta options
     // cannot be selected correctly without Steam's launch-option dialog.
-    let supported: Vec<_> = entries
-        .into_iter()
+    let plain = |n: &Node| {
+        n.child("config").is_none_or(|c| {
+            c.children
+                .keys()
+                .all(|k| matches!(k.to_ascii_lowercase().as_str(), "oslist" | "osarch"))
+        })
+    };
+    let default_entries: Vec<_> = entries
+        .iter()
         .filter(|(_, n)| {
             n.text("type")
                 .is_none_or(|t| t.eq_ignore_ascii_case("default"))
-                && n.child("config").is_none_or(|c| {
-                    c.children
-                        .keys()
-                        .all(|k| matches!(k.to_ascii_lowercase().as_str(), "oslist" | "osarch"))
-                })
+                && plain(n)
         })
+        .cloned()
         .collect();
+    // An app with no default entry offers only user-selectable options (e.g.
+    // DirectX 11 / DirectX 12). Steam's dialog preselects the lowest index, so
+    // that is the entry used without a choice.
+    let supported: Vec<_> = if default_entries.is_empty() {
+        entries
+            .into_iter()
+            .filter(|(_, n)| {
+                n.text("type").is_some_and(|t| {
+                    t.to_ascii_lowercase()
+                        .strip_prefix("option")
+                        .is_some_and(|rest| {
+                            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+                        })
+                }) && plain(n)
+            })
+            .collect()
+    } else {
+        default_entries
+    };
     let native = supported
         .iter()
         .find(|(_, node)| platform(node, app, "linux"));

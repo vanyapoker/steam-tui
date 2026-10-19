@@ -118,6 +118,25 @@ fn linux_launch_entry_stays_native_when_app_supports_linux() {
     );
 }
 #[test]
+fn option_only_apps_use_the_lowest_plain_option_but_never_conditional_ones() {
+    let fixture = Fixture::new();
+    fixture.executable("bin/game.exe");
+    let path = fixture.0.join("options.vdf");
+    fs::write(&path, r#""common" { "oslist" "windows" } "config" { "launch" {
+        "3" { "executable" "bin/game.exe" "arguments" "-force-d3d12" "type" "option2" "config" { "osarch" "64" "oslist" "windows" } }
+        "2" { "executable" "bin/game.exe" "arguments" "-force-d3d11" "type" "option1" "config" { "osarch" "64" "oslist" "windows" } } } }"#).unwrap();
+    let app = read_vdf(&path).unwrap();
+    assert!(uses_proton(&fixture.game(), &app).unwrap());
+    let game = fixture.game();
+    let (entry, windows) = select_entry(&game, &app).unwrap();
+    assert!(windows);
+    assert_eq!(entry.text("arguments"), Some("-force-d3d11"));
+    // Betas, DLC and account-conditional options stay unsupported.
+    fs::write(&path, r#""common" { "oslist" "windows" } "config" { "launch" {
+        "0" { "executable" "bin/game.exe" "type" "option1" "config" { "betakey" "x" "oslist" "windows" } } } }"#).unwrap();
+    assert!(uses_proton(&fixture.game(), &read_vdf(&path).unwrap()).is_err());
+}
+#[test]
 fn refuses_missing_paths_escape_symlink_and_client_helpers() {
     let fixture = Fixture::new();
     let game = fixture.game();
