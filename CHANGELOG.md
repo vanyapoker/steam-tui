@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.2 - 2026-10-19
+
 ### Fixed
 - The commit phase of an install or update took hours on large games (about 6 files per second for Path of Exile 2 on btrfs) because every file move fsynced its directories. Moves are now made durable with one filesystem barrier per phase, the same for rollback and recovery, so the phase takes seconds to minutes. The write-ahead journal and its ordering guarantees are unchanged. The Committing phase also shows how many steps are done.
 
