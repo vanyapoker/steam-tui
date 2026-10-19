@@ -150,6 +150,27 @@ fn option_only_apps_use_the_lowest_plain_option_but_never_conditional_ones() {
     assert!(uses_proton(&fixture.game(), &read_vdf(&path).unwrap(), None).is_err());
 }
 #[test]
+fn launches_get_persistent_per_game_gpu_caches_in_the_library() {
+    let fixture = Fixture::new();
+    fixture.executable("bin/game");
+    let plan = resolve_app(&fixture.game(), &fixture.metadata("bin/game"), None).unwrap();
+    let cache = fixture.0.join("steamapps/shadercache/123");
+    let env = |key: &str| plan.environment.get(key).map(String::as_str);
+    if std::env::var_os("DXVK_STATE_CACHE_PATH").is_none() {
+        assert_eq!(
+            env("DXVK_STATE_CACHE_PATH"),
+            cache.join("DXVK_state_cache").to_str()
+        );
+        assert!(cache.join("DXVK_state_cache").is_dir());
+        assert_eq!(env("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP"), Some("1"));
+        assert_eq!(
+            env("__GL_SHADER_DISK_CACHE_PATH"),
+            cache.join("nvidiav1").to_str()
+        );
+        assert_eq!(env("MESA_SHADER_CACHE_MAX_SIZE"), Some("5G"));
+    }
+}
+#[test]
 fn refuses_missing_paths_escape_symlink_and_client_helpers() {
     let fixture = Fixture::new();
     let game = fixture.game();

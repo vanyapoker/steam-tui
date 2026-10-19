@@ -7,6 +7,7 @@
 
 ### Changed
 - Panels use square corners like btop.
+- Launches get persistent per-game GPU caches in `steamapps/shadercache/<app>` (DXVK state cache, Mesa and NVIDIA shader caches, NVIDIA cleanup disabled), the layout Valve's client uses, so pipelines stop being recompiled on every launch. Variables you already export are kept.
 
 ### Fixed
 - Apps with only selectable launch options and no default entry (Moonlighter 2) launched with an error; the lowest plain option, which Steam's dialog preselects, is now used. Beta, DLC and account-conditional options remain unsupported.

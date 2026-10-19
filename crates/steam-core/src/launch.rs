@@ -413,8 +413,57 @@ fn resolve_app(game: &InstalledGame, app: &Node, choice: Option<u32>) -> Result<
         }
         plan = runtime_plan(game, app, plan)?;
     }
+    shader_cache_environment(game, &mut plan);
     apply_options(&mut plan, game.launch_options.as_deref())?;
     Ok(plan)
+}
+
+/// Persistent per-game GPU caches in the library's `steamapps/shadercache/<app>`,
+/// the layout Valve's client uses. Without them the driver and DXVK fall back to
+/// shared or throwaway locations and pipelines are recompiled (stutter). Values
+/// the user already exports are left alone; a directory that cannot be created
+/// only costs the cache, never the launch.
+fn shader_cache_environment(game: &InstalledGame, plan: &mut LaunchPlan) {
+    use std::os::unix::fs::DirBuilderExt;
+    let root = game
+        .library_root
+        .join("steamapps/shadercache")
+        .join(game.app_id.to_string());
+    let directory = |name: &str| {
+        let path = root.join(name);
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&path)
+            .ok()
+            .map(|()| path.to_string_lossy().into_owned())
+    };
+    let mut set = |key: &str, value: Option<String>| {
+        if std::env::var_os(key).is_none()
+            && let Some(value) = value
+        {
+            plan.environment.entry(key.into()).or_insert(value);
+        }
+    };
+    let mesa = directory("mesa_shader_cache");
+    set("DXVK_STATE_CACHE_PATH", directory("DXVK_state_cache"));
+    set("MESA_SHADER_CACHE_DIR", mesa.clone());
+    set("MESA_GLSL_CACHE_DIR", mesa.clone());
+    set(
+        "MESA_SHADER_CACHE_MAX_SIZE",
+        mesa.is_some().then(|| "5G".into()),
+    );
+    set("MESA_GLSL_CACHE_MAX_SIZE", mesa.map(|_| "5G".into()));
+    let nvidia = directory("nvidiav1");
+    set(
+        "__GL_SHADER_DISK_CACHE",
+        nvidia.as_ref().map(|_| "1".into()),
+    );
+    set(
+        "__GL_SHADER_DISK_CACHE_SKIP_CLEANUP",
+        nvidia.as_ref().map(|_| "1".into()),
+    );
+    set("__GL_SHADER_DISK_CACHE_PATH", nvidia);
 }
 
 fn supports_os(oslist: &str, os: &str) -> bool {
