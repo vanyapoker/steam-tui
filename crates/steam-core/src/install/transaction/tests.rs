@@ -1,8 +1,8 @@
 use super::*;
 use crate::catalog::{InstallPlan, InstallPlatform};
 use crate::content::DepotManifest;
-use crate::install::EarlyVerifier;
 use crate::install::tests::{Temp, depot, file};
+use crate::install::{EarlyVerifier, StagedLedger};
 use crate::install::{Layout, PlannedFile};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -113,6 +113,7 @@ fn staged(s: &Session, layout: &Layout, contents: &[(&str, &[u8])]) {
         &CancellationToken::new(),
         &VerifyProgress::default(),
         &HashSet::new(),
+        VerifyMode::Full,
     )
     .unwrap();
 }
@@ -231,8 +232,14 @@ async fn early_verification_covers_submitted_files_and_finish_stage_skips_them()
     let verified = early.finish().await.unwrap();
     assert_eq!(verified.len(), 4);
     assert_eq!(progress.snapshot().1, 4);
-    s.finish_stage(&layout, &CancellationToken::new(), &progress, &verified)
-        .unwrap();
+    s.finish_stage(
+        &layout,
+        &CancellationToken::new(),
+        &progress,
+        &verified,
+        VerifyMode::Full,
+    )
+    .unwrap();
     // Only the two remaining files were hashed by finish_stage.
     assert_eq!(progress.snapshot().1, 6);
 }
@@ -254,6 +261,69 @@ async fn early_verification_reports_a_corrupted_file() {
     }
     let error = early.finish().await.unwrap_err();
     assert!(error.to_string().contains("SHA1 mismatch"), "{error}");
+}
+
+#[test]
+fn quick_scan_accepts_exact_sizes_without_reading_and_rejects_missing_or_wrong_sized_files() {
+    let temp = Temp::new();
+    fs::create_dir(temp.path().join("steamapps")).unwrap();
+    let s = Arc::new(session(temp.path()));
+    let (layout, _) = early_layout(&s);
+    let quick = |layout: &Layout| {
+        s.finish_stage(
+            layout,
+            &CancellationToken::new(),
+            &VerifyProgress::default(),
+            &HashSet::new(),
+            VerifyMode::Quick,
+        )
+    };
+    quick(&layout).unwrap();
+    // Content is vouched for by the chunk ledger, not re-read: same-length
+    // corruption passes the quick scan and fails the full one.
+    let path = s.stage.join("content").join(&layout.files[1].file.path);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[0] ^= 0xff;
+    fs::write(&path, &bytes).unwrap();
+    quick(&layout).unwrap();
+    let full = s.finish_stage(
+        &layout,
+        &CancellationToken::new(),
+        &VerifyProgress::default(),
+        &HashSet::new(),
+        VerifyMode::Full,
+    );
+    assert!(full.unwrap_err().to_string().contains("SHA1 mismatch"));
+    // A wrong length and a missing file are rejected.
+    fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+    let error = quick(&layout).unwrap_err();
+    assert!(error.to_string().contains("expected"), "{error}");
+    fs::remove_file(&path).unwrap();
+    let error = quick(&layout).unwrap_err();
+    assert!(error.to_string().contains("missing"), "{error}");
+}
+
+#[test]
+fn the_ledger_refuses_to_commit_while_any_expected_chunk_is_unaccounted_for() {
+    let temp = Temp::new();
+    fs::create_dir(temp.path().join("steamapps")).unwrap();
+    let s = Arc::new(session(temp.path()));
+    let (layout, _) = early_layout(&s);
+    let mut ledger = StagedLedger::default();
+    for (index, planned) in layout.files.iter().enumerate() {
+        ledger.expect(index, planned.file.chunks.len());
+    }
+    let error = ledger.ensure_complete(&layout).unwrap_err().to_string();
+    assert!(error.contains("never verified and written"), "{error}");
+    for (index, planned) in layout.files.iter().enumerate() {
+        for chunk in 0..planned.file.chunks.len() {
+            ledger.mark(index, chunk);
+        }
+    }
+    ledger.ensure_complete(&layout).unwrap();
+    // Re-expecting a file (for example a retry) starts it unstaged again.
+    ledger.expect(0, layout.files[0].file.chunks.len());
+    assert!(ledger.ensure_complete(&layout).is_err());
 }
 
 #[test]
@@ -898,6 +968,7 @@ fn parallel_verification_accepts_many_files_and_counts_every_byte() {
                 &CancellationToken::new(),
                 &progress,
                 &HashSet::new(),
+                VerifyMode::Full,
             )
             .unwrap();
             done.store(true, Ordering::SeqCst);
@@ -938,6 +1009,7 @@ fn a_flipped_byte_in_any_staged_file_fails_verification() {
         &CancellationToken::new(),
         &VerifyProgress::default(),
         &HashSet::new(),
+        VerifyMode::Full,
     )
     .unwrap();
     // Restage and corrupt one byte in the middle chunk, keeping the length.
@@ -949,6 +1021,7 @@ fn a_flipped_byte_in_any_staged_file_fails_verification() {
             &CancellationToken::new(),
             &VerifyProgress::default(),
             &HashSet::new(),
+            VerifyMode::Full,
         )
         .unwrap_err();
     assert!(error.to_string().contains("SHA1 mismatch"), "{error}");
@@ -969,6 +1042,7 @@ fn cancellation_stops_verification() {
             &cancelled,
             &VerifyProgress::default(),
             &HashSet::new(),
+            VerifyMode::Full,
         )
         .unwrap_err();
     assert!(error.to_string().contains("cancelled"), "{error}");

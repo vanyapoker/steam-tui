@@ -90,6 +90,8 @@ steam-tui shaders enabled off            # disables downloads and processing
 steam-tui shaders clear APPID            # reclaim this game's generated cache
 ```
 
+Installs verify every chunk as it is downloaded or resumed and check each staged file's size before committing, as Valve's client does. Set `STEAM_TUI_FULL_VERIFY=1` to also hash every file end to end before commit.
+
 Shader pre-caching is opt-in per game: nothing is downloaded until you press `Z` (or run `shaders add APPID`); only games with a downloaded cache are refreshed afterwards. Vulkan FOZ v6 archives have their own freshness checks and verified staging. Compilation uses two threads, low CPU priority and a 2 GiB address-space limit per helper process. Failed/skipped processing never marks a context complete and never prevents launching the game. TUI `S` skips; CLI launch/process uses Ctrl+C to skip this optional stage. Shader archives have an 8 GiB account budget including staging, adjustable with `shaders budget MIB`; old generations and unused replay contexts are pruned. The budget excludes driver-created cache data. State and caches live under `$XDG_STATE_HOME/steam-tui/updates-ACCOUNT` (`~/.local/state` by default).
 
 See [the update audit](docs/steam-update-gap-audit.md) for evidence, supported formats and validation limits.

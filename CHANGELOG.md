@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Changed
-- File verification is faster. Each file is now checked against its manifest SHA1 as soon as its last chunk is written, while later files still download, so the data is still in the page cache and the verifying phase only has the remainder left. Verification also no longer fsyncs every file (about 6 ms each on btrfs); one filesystem barrier makes the whole stage durable before the commit. The check itself is unchanged: every file is still hashed end to end before anything is committed.
+- Installs and updates no longer re-hash every file after the download. Like Valve's client, the check before commit is a quick scan: every chunk must have been verified and staged (downloaded and checked, validated from disk by the resume scan, or copied from a hash-verified old file) and each staged file must exist with exactly its manifest size. Per-file fsyncs are replaced by one filesystem barrier. Set `STEAM_TUI_FULL_VERIFY=1` for the previous whole-file SHA1 check, which then runs as each file completes while later files still download.
 
 ## 0.3.2 - 2026-10-19
 

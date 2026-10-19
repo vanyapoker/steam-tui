@@ -1,7 +1,7 @@
 use super::filesystem::{self as fsafe, Lock};
 use super::{
-    CommitProgress, InstallRequest, Layout, Result, ReusableChunk, VerifyProgress, failure,
-    hash_bytes,
+    CommitProgress, InstallRequest, Layout, Result, ReusableChunk, VerifyMode, VerifyProgress,
+    failure, hash_bytes,
 };
 use crate::catalog::InstallPlatform;
 use crate::content::{DepotChunk, DepotFile};
@@ -658,8 +658,8 @@ impl Session {
     /// Writes one verified chunk. There is deliberately no fsync here: a staged
     /// byte is never trusted without being re-hashed. Resume re-verifies each
     /// chunk from disk (`reuse_chunk`), so data lost or torn by a crash is
-    /// detected and downloaded again, and `verify_file` hashes the complete file
-    /// and fsyncs it before the file can be committed.
+    /// detected and downloaded again, and one filesystem barrier in
+    /// `finish_stage` makes the stage durable before anything is committed.
     pub(super) fn write_chunk(&self, path: &Path, chunk: &DepotChunk, bytes: &[u8]) -> Result<()> {
         crate::content::verify_chunk(chunk, bytes)?;
         self.write_chunk_data(path, chunk, bytes)
@@ -737,6 +737,48 @@ impl Session {
                 file.path.display()
             )));
         }
+        self.apply_permissions(file, &path)?;
+        progress.finish_file();
+        Ok(())
+    }
+
+    /// Valve's quick scan of one staged file: it is a regular file with exactly
+    /// its manifest size. Its content is vouched for by the chunk ledger, not
+    /// re-read.
+    pub(super) fn check_file_quick(
+        &self,
+        file: &DepotFile,
+        progress: &VerifyProgress,
+    ) -> Result<()> {
+        progress.begin(&file.path);
+        let path = fsafe::checked(&self.stage.join("content"), &file.path, true)?;
+        let metadata = fs::symlink_metadata(&path).map_err(|e| {
+            failure(format!(
+                "Staged file {} is missing: {e}",
+                file.path.display()
+            ))
+        })?;
+        if !metadata.is_file() {
+            return Err(failure(format!(
+                "Staged file {} is not a regular file",
+                file.path.display()
+            )));
+        }
+        if metadata.len() != file.size {
+            return Err(failure(format!(
+                "Staged file {} has {} bytes, expected {}",
+                file.path.display(),
+                metadata.len(),
+                file.size
+            )));
+        }
+        self.apply_permissions(file, &path)?;
+        progress.add_bytes(file.size);
+        progress.finish_file();
+        Ok(())
+    }
+
+    fn apply_permissions(&self, file: &DepotFile, path: &Path) -> Result<()> {
         // Steam makes every file of a container runtime executable; its depots carry no flags.
         let tool = self
             .request
@@ -753,24 +795,24 @@ impl Session {
         } else {
             mode
         };
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
-        progress.finish_file();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
         Ok(())
     }
 
-    /// Verifies every staged regular file in parallel, then creates symlinks.
-    /// Each worker hashes whole files end to end against the manifest SHA1 (the
-    /// authoritative check; nothing unverified is ever committed) and applies
-    /// the final permissions. Files in `verified` were already checked while the
-    /// download was still running. The first error stops the others and
-    /// cancellation is honored at every buffer. A single filesystem barrier then
-    /// makes the whole stage durable.
+    /// Checks every staged regular file in parallel, then creates symlinks.
+    /// `Quick` confirms each file exists with its manifest size (the caller has
+    /// already established that every chunk was verified and staged); `Full`
+    /// also hashes whole files end to end against the manifest SHA1. Files in
+    /// `verified` were already hashed while the download was still running. The
+    /// first error stops the others and cancellation is honored at every
+    /// buffer. A single filesystem barrier then makes the whole stage durable.
     pub(super) fn finish_stage(
         &self,
         layout: &Layout,
         cancel: &CancellationToken,
         progress: &VerifyProgress,
         verified: &HashSet<PathBuf>,
+        mode: VerifyMode,
     ) -> Result<()> {
         // Largest first keeps the workers balanced when a few files dominate.
         let mut regular: Vec<&DepotFile> = layout
@@ -781,7 +823,10 @@ impl Session {
         regular.sort_by_key(|file| std::cmp::Reverse(file.size));
         parallel(regular.len(), |index| {
             super::check_cancel(cancel)?;
-            self.verify_file(regular[index], cancel, progress)
+            match mode {
+                VerifyMode::Full => self.verify_file(regular[index], cancel, progress),
+                VerifyMode::Quick => self.check_file_quick(regular[index], progress),
+            }
         })?;
         for planned in layout.active_files() {
             super::check_cancel(cancel)?;

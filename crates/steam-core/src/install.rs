@@ -4,10 +4,14 @@
 //! A `PauseGate` holds the download between chunks and resumes without redoing
 //! preflight; cancelling while paused still ends the job as Cancelled.
 //! Staged chunk writes are not fsynced: resume re-hashes every chunk from disk.
-//! Each file is verified end to end against its manifest SHA1 as soon as its
-//! last chunk is written, while later files still download; `finish_stage`
-//! verifies the rest in parallel and makes the whole stage durable with one
-//! filesystem barrier before anything is committed.
+//! Like Valve's client, the check after a download is a quick scan: every chunk
+//! of every file must be accounted for (downloaded and verified, or re-verified
+//! from disk by the resume scan or copied from a hash-verified old file), and
+//! each staged file must exist with exactly its manifest size. Whole-file SHA1
+//! hashing, Valve's full scan, is opt-in through `STEAM_TUI_FULL_VERIFY=1`; it
+//! then runs as each file completes while later files still download, and
+//! `finish_stage` hashes the rest in parallel. Either way one filesystem barrier
+//! makes the stage durable before anything is committed.
 //! Changed local managed files are retained under `.steam-tui/preserved`; files
 //! absent from new depots are deleted only when their old manifest proves that they
 //! are unchanged and not supplied by any remaining depot.
@@ -226,6 +230,7 @@ async fn download_group(
     progress: &mpsc::Sender<InstallProgress>,
     status: &mut InstallProgress,
     last_report: &mut std::time::Instant,
+    ledger: &mut StagedLedger,
 ) -> Result<()> {
     let group = std::mem::take(group);
     if group.items.is_empty() && group.prepare.is_empty() {
@@ -258,6 +263,7 @@ async fn download_group(
         let file = &layout.files[*file_index].file;
         for (offset, chunk) in file.chunks[range.clone()].iter().enumerate() {
             if flags[offset] {
+                ledger.mark(*file_index, range.start + offset);
                 status.total_download_bytes -= u64::from(chunk.compressed_size);
                 status.completed_bytes += u64::from(chunk.uncompressed_size);
             } else {
@@ -361,6 +367,7 @@ async fn download_group(
             }
         },
         |(file_index, chunk_index, downloaded)| {
+            ledger.mark(file_index, chunk_index);
             let file = &layout.files[file_index].file;
             let chunk = &file.chunks[chunk_index];
             status.downloaded_bytes += downloaded;
@@ -409,6 +416,72 @@ impl VerifyProgress {
             self.files.load(Ordering::Relaxed),
             self.current.lock().clone(),
         )
+    }
+}
+
+/// How a finished stage is checked before it is committed.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum VerifyMode {
+    /// Every chunk accounted for, each file present with its manifest size.
+    Quick,
+    /// Quick checks plus a whole-file SHA1 of every staged file.
+    Full,
+}
+
+impl VerifyMode {
+    fn from_environment() -> Self {
+        match std::env::var("STEAM_TUI_FULL_VERIFY").as_deref() {
+            Ok("1" | "true" | "yes" | "on") => Self::Full,
+            _ => Self::Quick,
+        }
+    }
+}
+
+/// Records which chunks of the stage are known good: downloaded and written
+/// after verification, or validated from disk by the resume scan, or copied
+/// from a hash-verified old file. The quick scan refuses to commit while any
+/// expected chunk is unaccounted for, which is what makes a size check
+/// meaningful for files created at their full length up front.
+#[derive(Default)]
+struct StagedLedger {
+    files: HashMap<usize, Vec<bool>>,
+}
+
+impl StagedLedger {
+    /// Expects `chunks` chunks of `layout.files[file]`, none staged yet.
+    fn expect(&mut self, file: usize, chunks: usize) {
+        self.files.insert(file, vec![false; chunks]);
+    }
+
+    fn mark(&mut self, file: usize, chunk: usize) {
+        if let Some(slot) = self.files.get_mut(&file).and_then(|f| f.get_mut(chunk)) {
+            *slot = true;
+        }
+    }
+
+    /// Fails naming the first expected chunk that was never staged.
+    fn ensure_complete(&self, layout: &Layout) -> Result<()> {
+        let mut missing = 0usize;
+        let mut first = None;
+        for (&file, chunks) in &self.files {
+            for (chunk, &staged) in chunks.iter().enumerate() {
+                if !staged {
+                    missing += 1;
+                    let candidate = (&layout.files[file].file.path, chunk);
+                    if first.is_none_or(|current: (&PathBuf, usize)| candidate < current) {
+                        first = Some(candidate);
+                    }
+                }
+            }
+        }
+        match first {
+            None => Ok(()),
+            Some((path, chunk)) => Err(failure(format!(
+                "{missing} staged chunk(s) were never verified and written, first {} chunk {chunk}; \
+                 refusing to commit",
+                path.display()
+            ))),
+        }
     }
 }
 
@@ -1009,8 +1082,11 @@ async fn run_inner(
     let mut group = Group::default();
     let mut last_report = std::time::Instant::now();
     let verify = Arc::new(VerifyProgress::default());
-    let mut early = EarlyVerifier::new(&session, &layout, cancel, &verify);
+    let mode = VerifyMode::from_environment();
+    let mut early =
+        (mode == VerifyMode::Full).then(|| EarlyVerifier::new(&session, &layout, cancel, &verify));
     let mut complete: Vec<usize> = Vec::new();
+    let mut ledger = StagedLedger::default();
     for (file_index, planned) in layout.files.iter().enumerate() {
         check_cancel(cancel)?;
         let file = &planned.file;
@@ -1026,6 +1102,7 @@ async fn run_inner(
         }
         group.prepare.push(file_index);
         let chunks = file.chunks.len();
+        ledger.expect(file_index, chunks);
         let mut start = 0;
         while start < chunks {
             let end = (start + SCAN_WINDOW).min(chunks);
@@ -1046,12 +1123,18 @@ async fn run_inner(
                     progress,
                     status,
                     &mut last_report,
+                    &mut ledger,
                 )
                 .await?;
-                // The group is fully written: its finished files can be hashed
-                // now, while the next group downloads.
-                complete.drain(..).for_each(|index| early.submit(index));
-                early.reap()?;
+                // The group is fully written: with full verification its
+                // finished files can be hashed now, while the next group
+                // downloads.
+                if let Some(early) = early.as_mut() {
+                    complete.drain(..).for_each(|index| early.submit(index));
+                    early.reap()?;
+                } else {
+                    complete.clear();
+                }
             }
         }
     }
@@ -1065,9 +1148,14 @@ async fn run_inner(
         progress,
         status,
         &mut last_report,
+        &mut ledger,
     )
     .await?;
-    complete.drain(..).for_each(|index| early.submit(index));
+    if let Some(early) = early.as_mut() {
+        complete.drain(..).for_each(|index| early.submit(index));
+    }
+    // Valve's commit asserts the same: every chunk must be accounted for.
+    ledger.ensure_complete(&layout)?;
     status.phase = InstallPhase::Verifying;
     status.verify_bytes_total = layout.verify_bytes();
     let verify_files = layout.verify_files();
@@ -1075,18 +1163,21 @@ async fn run_inner(
     status.verify_bytes_done = bytes.min(status.verify_bytes_total);
     status.message = format!("Verifying files {files}/{verify_files} · {current}");
     report(progress, status);
-    // Files checked during the download are not hashed again.
-    let verified = poll_verify(early.finish(), &verify, verify_files, progress, status).await?;
+    // Files hashed during the download are not hashed again.
+    let verified = match early.as_mut() {
+        Some(early) => poll_verify(early.finish(), &verify, verify_files, progress, status).await?,
+        None => HashSet::new(),
+    };
     let (s, l, token, v) = (
         Arc::clone(&session),
         Arc::clone(&layout),
         cancel.clone(),
         Arc::clone(&verify),
     );
-    // Whole-file hashing runs on worker threads; poll its counters so the UI
+    // Hashing (full mode) runs on worker threads; poll its counters so the UI
     // sees steady progress.
     let job = async move {
-        tokio::task::spawn_blocking(move || s.finish_stage(&l, &token, &v, &verified))
+        tokio::task::spawn_blocking(move || s.finish_stage(&l, &token, &v, &verified, mode))
             .await
             .map_err(|e| failure(format!("Installer filesystem worker failed: {e}")))?
     };
