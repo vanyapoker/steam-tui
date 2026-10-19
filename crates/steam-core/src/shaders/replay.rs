@@ -254,7 +254,6 @@ async fn process(
         &archive,
         &directory,
         &plan.environment,
-        queue,
         game.app_id,
         cancel,
         events,
@@ -272,7 +271,6 @@ pub(super) async fn run_helper(
     archive: &Path,
     directory: &Path,
     environment: &std::collections::BTreeMap<String, String>,
-    queue: &Queue,
     app: u32,
     cancel: &CancellationToken,
     events: Option<&EventSender>,
@@ -361,7 +359,6 @@ pub(super) async fn run_helper(
     }
     let _group = Group(pgid);
     let start = std::time::Instant::now();
-    let mut paused = false;
     let mut poll = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
@@ -376,9 +373,7 @@ pub(super) async fn run_helper(
                 return Err(failure(format!("Shader helper exited with {status}: {detail}"))); },
             _ = poll.tick() => {
                 if start.elapsed() > Duration::from_secs(30 * 60) { unsafe { libc::kill(-pgid, libc::SIGKILL); } let _ = child.wait().await; return Err(failure("Shader processing reached its 30-minute limit")); }
-                let suspend = queue.settings().map(|s| s.pause_during_games && !crate::launch::running_app_ids().is_empty()).unwrap_or(true);
-                if suspend != paused { unsafe { libc::kill(-pgid, if suspend { libc::SIGSTOP } else { libc::SIGCONT }); } paused = suspend; }
-                emit(events, app, &format!("{} Vulkan shaders · {}s · S to skip", if paused { "Paused processing" } else { "Processing" }, start.elapsed().as_secs()));
+                emit(events, app, &format!("Processing Vulkan shaders · {}s · S to skip", start.elapsed().as_secs()));
             }
         }
     }
