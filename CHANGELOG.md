@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Transcoded media databases now live directly in `steamapps/shadercache/<app>`, the layout Valve's client uses, so either client reuses the other's download. Files from the old `fozmediav1` location are moved or removed, and a database already in place is adopted when its SHA-1 matches the bucket manifest.
+
 ## 0.3.1 - 2026-10-19
 
 ### Added

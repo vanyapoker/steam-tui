@@ -3,8 +3,9 @@
 //! codecs Valve has pre-transcoded for the app. The per-app databases come
 //! from the same bucket service as shader caches (`G7:CompatVideoTCMediaV1`,
 //! `G7:CompatAudioTCMediaV1`) and are handed to Proton through
-//! `STEAM_COMPAT_TRANSCODED_MEDIA_PATH`, as Valve's client does. The path
-//! layout is `steamapps/shadercache/<app>/fozmediav1`.
+//! `STEAM_COMPAT_TRANSCODED_MEDIA_PATH`, as Valve's client does. The files sit
+//! directly in `steamapps/shadercache/<app>`, where Valve's client keeps them
+//! too, so either client can use the other's download.
 use crate::backend::{Direction, Event, EventSender};
 use crate::catalog::DepotSpec;
 use crate::content::{ContentClient, DepotFile, DepotManifest};
@@ -25,6 +26,10 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_FILE: u64 = 4 * 1024 * 1024 * 1024;
 const STATE: &str = "steam-tui-media.json";
+const LOCK: &str = "steam-tui-media.lock";
+/// Where earlier steam-tui versions kept the databases; Valve uses this
+/// directory for media it captures, so only our own files are moved out.
+const LEGACY: &str = "fozmediav1";
 /// (bucket driver description, database file name Proton reads)
 const KINDS: [(&str, &str); 2] = [
     ("G7:CompatVideoTCMediaV1", "transcoded_video.foz"),
@@ -57,13 +62,37 @@ fn directory(game: &InstalledGame) -> Result<PathBuf> {
     let path = game
         .library_root
         .join("steamapps/shadercache")
-        .join(game.app_id.to_string())
-        .join("fozmediav1");
+        .join(game.app_id.to_string());
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&path)?;
+    migrate_legacy(&path);
     Ok(path)
+}
+
+/// Moves databases an earlier version stored in `fozmediav1` next to Valve's
+/// layout. An existing file in the new place wins; either way the content is
+/// verified against the bucket manifest before it is trusted.
+fn migrate_legacy(directory: &Path) {
+    let legacy = directory.join(LEGACY);
+    for (_, name) in KINDS {
+        let old = legacy.join(name);
+        let Ok(metadata) = fs::symlink_metadata(&old) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        if fs::symlink_metadata(directory.join(name)).is_ok() {
+            let _ = fs::remove_file(&old);
+        } else {
+            let _ = fs::rename(&old, directory.join(name));
+        }
+    }
+    for name in [STATE, "cache.lock"] {
+        let _ = fs::remove_file(legacy.join(name));
+    }
 }
 
 fn load(directory: &Path) -> State {
@@ -183,7 +212,7 @@ async fn refresh(
     directory: &Path,
     events: Option<&EventSender>,
 ) -> Result<()> {
-    let _lock = safe::Lock::try_acquire(&directory.join("cache.lock"))?
+    let _lock = safe::Lock::try_acquire(&directory.join(LOCK))?
         .ok_or_else(|| failure("another launch is updating this app's media databases"))?;
     let mut state = load(directory);
     let mut failures = Vec::new();
@@ -255,6 +284,23 @@ async fn download(
     let client = ContentClient::new(connection.clone()).await?;
     let manifest = client.manifest(&spec, &cancel).await?;
     let file = database(&manifest, name, bucket.depotsize())?;
+    // A database already in place (Valve's own download, or one moved from the
+    // old layout) is adopted when its content matches the manifest.
+    let target = directory.join(name);
+    if fs::symlink_metadata(&target).is_ok_and(|m| m.is_file() && m.len() == file.size) {
+        let (path, size) = (target.clone(), file.size);
+        let digest = tokio::task::spawn_blocking(move || hash(&path, size))
+            .await
+            .map_err(|_| failure("Media verification worker failed"))??;
+        if digest.is_some() && digest == file.sha1 {
+            return Ok(Entry {
+                bucket: bucket.bucketid(),
+                manifest: bucket.manifestid(),
+                size: file.size,
+                sha1: digest.unwrap_or_default(),
+            });
+        }
+    }
     let staging = directory.join(format!("{name}.part"));
     let mut output = open(&staging, true)?;
     output.set_len(file.size)?;
@@ -331,6 +377,28 @@ mod tests {
         assert!(database(&directory, "transcoded_video.foz", 10).is_err());
         let huge = manifest(vec![file("transcoded_video.foz", MAX_FILE + 1, 0)]);
         assert!(database(&huge, "transcoded_video.foz", MAX_FILE + 1).is_err());
+    }
+
+    #[test]
+    fn legacy_databases_move_to_valve_layout_without_touching_captures() {
+        let dir = std::env::temp_dir().join(format!("steam-tui-media-mig-{}", std::process::id()));
+        let legacy = dir.join(LEGACY);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("transcoded_video.foz"), b"old").unwrap();
+        fs::write(legacy.join("transcoded_audio.foz"), b"legacy-audio").unwrap();
+        fs::write(dir.join("transcoded_audio.foz"), b"valve-audio").unwrap();
+        fs::write(legacy.join("video.foz"), b"capture").unwrap();
+        fs::write(legacy.join(STATE), b"{}").unwrap();
+        migrate_legacy(&dir);
+        assert_eq!(fs::read(dir.join("transcoded_video.foz")).unwrap(), b"old");
+        assert_eq!(
+            fs::read(dir.join("transcoded_audio.foz")).unwrap(),
+            b"valve-audio"
+        );
+        assert!(!legacy.join("transcoded_audio.foz").exists());
+        assert!(!legacy.join(STATE).exists());
+        assert_eq!(fs::read(legacy.join("video.foz")).unwrap(), b"capture");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
