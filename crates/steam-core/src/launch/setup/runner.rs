@@ -232,6 +232,48 @@ impl Runner {
         Ok(value >= process.minimum)
     }
 
+    /// Microsoft's 2015-2022 Visual C++ redistributables share one binary-compatible
+    /// 14.x runtime. Proton prefixes already carry one, and the installer bundle is
+    /// unreliable under Wine, so an installed 14.x runtime of the same architecture
+    /// satisfies the Valve prerequisite.
+    fn runtime_satisfied(&mut self, process: &Process, root: &Path) -> Result<bool> {
+        let Some(key) = &process.has_run_key else {
+            return Ok(false);
+        };
+        let key = script::expand(key, root)?.to_ascii_lowercase();
+        let Some(year) = key
+            .rsplit_once("\\commonredist\\vcredist\\")
+            .map(|(_, y)| y)
+        else {
+            return Ok(false);
+        };
+        if !matches!(year, "2015" | "2017" | "2019" | "2022") {
+            return Ok(false);
+        }
+        let mut fields = process.name.split_whitespace();
+        let (arch, view) = match fields.next() {
+            Some(a) if a.eq_ignore_ascii_case("x64") => ("x64", "/reg:64"),
+            Some(a) if a.eq_ignore_ascii_case("x86") => ("x86", "/reg:32"),
+            _ => return Ok(false),
+        };
+        if fields.next().and_then(|v| v.split('.').next()) != Some("14") {
+            return Ok(false);
+        }
+        let (code, text) = self.invoke(&[
+            "C:\\windows\\system32\\reg.exe".into(),
+            "query".into(),
+            format!("HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\{arch}"),
+            view.into(),
+        ])?;
+        if code == 1 {
+            return Ok(false);
+        }
+        if code != 0 {
+            return Err(failure(format!("Runtime query exited with code {code}")));
+        }
+        Ok(runtime_installed(&text))
+    }
+
     fn recipes(&mut self, prefix: &Path, recipes: &[Recipe]) -> Result<()> {
         let win64 = match fs::File::open(prefix.join("pfx/system.reg")) {
             Ok(file) => {
@@ -299,6 +341,14 @@ impl Runner {
                 {
                     continue;
                 }
+                if self.runtime_satisfied(process, &recipe.root)? {
+                    writeln!(
+                        self.log,
+                        "[steam-tui] {} satisfied by the prefix's installed 14.x runtime",
+                        process.name
+                    )?;
+                    continue;
+                }
                 writeln!(self.log, "[steam-tui] Setting up {}", process.name)?;
                 for (path, args) in &process.programs {
                     let (host, windows) = script::program_path(path, &recipe.root)?;
@@ -322,6 +372,21 @@ impl Runner {
         self.log.sync_all()?;
         Ok(())
     }
+}
+
+pub(super) fn runtime_installed(text: &str) -> bool {
+    let dword = |name: &str| {
+        let fields: Vec<_> = text.split_whitespace().collect();
+        fields.windows(3).find_map(|w| {
+            (w[0].eq_ignore_ascii_case(name) && w[1].eq_ignore_ascii_case("REG_DWORD"))
+                .then(|| {
+                    w[2].strip_prefix("0x")
+                        .and_then(|n| u32::from_str_radix(n, 16).ok())
+                })
+                .flatten()
+        })
+    };
+    dword("Installed") == Some(1) && dword("Major") == Some(14)
 }
 
 fn applies(process: &Process, win64: bool, os: Option<&str>) -> bool {

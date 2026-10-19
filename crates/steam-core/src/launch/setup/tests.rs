@@ -459,3 +459,15 @@ fn native_scripts_preserve_filename_case_and_apply_only_verified_file_operations
         0o700
     );
 }
+#[test]
+fn installed_fourteen_series_runtime_is_recognised_from_registry_output() {
+    let present = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64\r\n    Bld    REG_DWORD    0x8681\r\n    Installed    REG_DWORD    0x1\r\n    Major    REG_DWORD    0xe\r\n    Minor    REG_DWORD    0x2a\r\n    Version    REG_SZ    14.42.34433.0\r\n";
+    assert!(runner::runtime_installed(present));
+    assert!(!runner::runtime_installed(
+        &present.replace("0x1\r", "0x0\r")
+    ));
+    assert!(!runner::runtime_installed(
+        &present.replace("0xe\r", "0xc\r")
+    ));
+    assert!(!runner::runtime_installed(""));
+}
