@@ -3738,6 +3738,7 @@ mod tests {
     /// Draws a mock-data session for the README. Run with
     /// `STEAM_TUI_SCREENSHOT=out.svg cargo test -p steam-tui readme_screenshot -- --ignored`
     /// and convert with `rsvg-convert -z 2 out.svg -o assets/screenshot.png`.
+    /// Set `STEAM_TUI_SCREENSHOT_THEME` to a terminal theme (an Omarchy `alacritty.toml`) to colour it.
     #[test]
     #[ignore = "writes a file; run by hand"]
     fn readme_screenshot() {
@@ -4025,32 +4026,66 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut model)).unwrap();
         let buffer = terminal.backend().buffer();
 
+        // Colours come from a terminal theme so the picture matches the terminal it
+        // is meant to show: STEAM_TUI_SCREENSHOT_THEME=path/to/alacritty.toml (an
+        // Omarchy theme file). Without it the old Catppuccin palette is used.
+        let palette: std::collections::HashMap<String, String> =
+            std::env::var_os("STEAM_TUI_SCREENSHOT_THEME")
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .map(|text| {
+                    let mut section = String::new();
+                    let mut colors = std::collections::HashMap::new();
+                    for line in text.lines().map(str::trim) {
+                        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']'))
+                        {
+                            section = name.trim_start_matches("colors.").to_owned();
+                        } else if let Some((key, value)) = line.split_once('=') {
+                            let value = value.trim().trim_matches('"');
+                            if value.starts_with('#') {
+                                colors
+                                    .insert(format!("{section}.{}", key.trim()), value.to_owned());
+                            }
+                        }
+                    }
+                    colors
+                })
+                .unwrap_or_default();
+        let themed = |key: &str, fallback: &str| -> String {
+            palette
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| fallback.to_owned())
+        };
+        let (foreground, background) = (
+            themed("primary.foreground", "#cdd6f4"),
+            themed("primary.background", "#1e1e2e"),
+        );
         let rgb = |color: Color, default: &str| -> String {
             match color {
                 Color::Reset => default.into(),
-                Color::Black => "#45475a".into(),
-                Color::Red => "#f38ba8".into(),
-                Color::Green => "#a6e3a1".into(),
-                Color::Yellow => "#f9e2af".into(),
-                Color::Blue => "#89b4fa".into(),
-                Color::Magenta => "#f5c2e7".into(),
-                Color::Cyan => "#94e2d5".into(),
-                Color::Gray => "#bac2de".into(),
-                Color::DarkGray => "#6c7086".into(),
-                Color::LightRed => "#f38ba8".into(),
-                Color::LightGreen => "#a6e3a1".into(),
-                Color::LightYellow => "#f9e2af".into(),
-                Color::LightBlue => "#89b4fa".into(),
-                Color::LightMagenta => "#f5c2e7".into(),
-                Color::LightCyan => "#94e2d5".into(),
-                Color::White => "#cdd6f4".into(),
+                Color::Black => themed("normal.black", "#45475a"),
+                Color::Red => themed("normal.red", "#f38ba8"),
+                Color::Green => themed("normal.green", "#a6e3a1"),
+                Color::Yellow => themed("normal.yellow", "#f9e2af"),
+                Color::Blue => themed("normal.blue", "#89b4fa"),
+                Color::Magenta => themed("normal.magenta", "#f5c2e7"),
+                Color::Cyan => themed("normal.cyan", "#94e2d5"),
+                Color::Gray => themed("normal.white", "#bac2de"),
+                Color::DarkGray => themed("bright.black", "#6c7086"),
+                Color::LightRed => themed("bright.red", "#f38ba8"),
+                Color::LightGreen => themed("bright.green", "#a6e3a1"),
+                Color::LightYellow => themed("bright.yellow", "#f9e2af"),
+                Color::LightBlue => themed("bright.blue", "#89b4fa"),
+                Color::LightMagenta => themed("bright.magenta", "#f5c2e7"),
+                Color::LightCyan => themed("bright.cyan", "#94e2d5"),
+                Color::White => themed("bright.white", "#cdd6f4"),
                 Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
                 Color::Indexed(_) => default.into(),
             }
         };
         let (cw, ch, pad) = (8.4f32, 18.0f32, 14.0f32);
         let mut svg = format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\" font-family=\"JetBrainsMono Nerd Font, Noto Sans Symbols, monospace\" font-size=\"14\">\n<rect width=\"100%\" height=\"100%\" rx=\"10\" fill=\"#1e1e2e\"/>\n",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\" font-family=\"JetBrainsMono Nerd Font, Noto Sans Symbols, monospace\" font-size=\"14\">\n<rect width=\"100%\" height=\"100%\" rx=\"10\" fill=\"{background}\"/>\n",
             w = width as f32 * cw + pad * 2.0,
             h = height as f32 * ch + pad * 2.0
         );
@@ -4059,10 +4094,10 @@ mod tests {
                 let cell = &buffer[(x, y)];
                 let style = cell.style();
                 let reversed = style.add_modifier.contains(Modifier::REVERSED);
-                let (fg, bg) = (rgb(cell.fg, "#cdd6f4"), rgb(cell.bg, "#1e1e2e"));
+                let (fg, bg) = (rgb(cell.fg, &foreground), rgb(cell.bg, &background));
                 let (fg, bg) = if reversed { (bg, fg) } else { (fg, bg) };
                 let (px, py) = (pad + x as f32 * cw, pad + y as f32 * ch);
-                if bg != "#1e1e2e" {
+                if bg != background {
                     svg.push_str(&format!("<rect x=\"{px:.1}\" y=\"{py:.1}\" width=\"{cw:.1}\" height=\"{ch:.1}\" fill=\"{bg}\"/>\n"));
                 }
                 let symbol = cell.symbol();
