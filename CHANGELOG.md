@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 - 2026-10-19
+
+### Added
+- **Updates and queue:** a persistent, account-scoped content queue (`J`) with pause, retry, cancel, priorities, download windows and update-before-launch policies; content properties (`P`) for branch, language and DLC, including protected branches; optional verified depot delta patches with ordinary chunk fallback; safe removal of obsolete managed files.
+- **DLC:** DLC ownership and state APIs served through the authenticated backend, with safe optional-content install transactions.
+- **Launch dependencies:** missing Proton, container runtimes and additional dependencies install automatically, and verified first-run prerequisites run in the game's Proton prefix; supported Linux setup actions run in the game tree.
+- **Shader pre-caching (opt-in):** press `Z` on an installed game to download its Vulkan FOZ v6 pre-cache; games with a cache are refreshed hourly and processed before launch with a pinned standalone Fossilize helper (`S` skips). Nothing is downloaded unless requested. `shaders` CLI commands manage budget, clearing and the master switch.
+
+### Changed
+- Proton games are marked with `⊞` in the OS column instead of `⚛`, which rendered as an oversized block in common terminal fonts.
+- The prebuilt archive now includes the Fossilize replay helper and its licenses.
+
+### Fixed
+- Launch-time shader processing no longer freezes ("Paused processing Vulkan shaders") while another game process exists.
+- First-run setup no longer fails launches when the Proton prefix already has a Visual C++ 14.x runtime; the Microsoft redistributable installer does not complete under Wine.
+- Backend callbacks are polled on a background thread, so slow backend operations cannot stall the game thread.
+
 ## 0.2.1 - 2026-10-17
 
 ### Added
