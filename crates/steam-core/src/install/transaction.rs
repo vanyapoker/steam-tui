@@ -1,5 +1,8 @@
 use super::filesystem::{self as fsafe, Lock};
-use super::{InstallRequest, Layout, Result, ReusableChunk, VerifyProgress, failure, hash_bytes};
+use super::{
+    CommitProgress, InstallRequest, Layout, Result, ReusableChunk, VerifyProgress, failure,
+    hash_bytes,
+};
 use crate::catalog::InstallPlatform;
 use crate::content::{DepotChunk, DepotFile};
 use crate::installed::{InstalledGame, Node, read_vdf};
@@ -109,6 +112,12 @@ where
 }
 
 fn create_dirs(base: &Path, relative: &Path) -> Result<()> {
+    make_dirs(base, relative, true)
+}
+
+/// `durable` fsyncs the parent of every directory created; callers that issue
+/// a filesystem barrier afterwards pass false.
+fn make_dirs(base: &Path, relative: &Path, durable: bool) -> Result<()> {
     fsafe::relative(relative)?;
     let mut current = base.to_path_buf();
     for part in relative.components() {
@@ -116,11 +125,13 @@ fn create_dirs(base: &Path, relative: &Path) -> Result<()> {
         if !fsafe::exists(&current)? {
             fs::create_dir(&current).map_err(|e| fsafe::disk_error(&current, e))?;
             fs::set_permissions(&current, fs::Permissions::from_mode(0o755))?;
-            fsafe::sync_dir(
-                current
-                    .parent()
-                    .ok_or_else(|| failure("Directory has no parent"))?,
-            )?;
+            if durable {
+                fsafe::sync_dir(
+                    current
+                        .parent()
+                        .ok_or_else(|| failure("Directory has no parent"))?,
+                )?;
+            }
         }
         let metadata = fs::symlink_metadata(&current)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -937,7 +948,16 @@ impl Session {
         Ok(doc)
     }
 
+    #[cfg(test)]
     pub(super) fn commit(&self, layout: &Layout) -> Result<(InstalledGame, Option<PathBuf>)> {
+        self.commit_with_progress(layout, &CommitProgress::default())
+    }
+
+    pub(super) fn commit_with_progress(
+        &self,
+        layout: &Layout,
+        progress: &CommitProgress,
+    ) -> Result<(InstalledGame, Option<PathBuf>)> {
         self.check_processes()?;
         let manifest_path = self
             .steamapps
@@ -1098,42 +1118,43 @@ impl Session {
             .collect();
         journal.created_dirs.sort_by_key(|p| p.components().count());
         save_journal(&self.stage, &journal)?;
+        progress.start(
+            (journal.operations.len() + journal.operations.iter().filter(|o| !o.remove).count())
+                as u64,
+        );
         let result = (|| {
             for dir in &journal.created_dirs {
-                create_dirs(&self.steamapps, dir)?;
+                make_dirs(&self.steamapps, dir, false)?;
             }
+            // Every rename below is made durable by a filesystem barrier per
+            // phase rather than per file. Recovery derives each operation's
+            // state from which of source, target and backup exist, so it does
+            // not depend on the order renames reach the disk within a phase.
+            // Phase 1 sets originals aside; the barrier guarantees every
+            // backup is durable before any original can be replaced.
             for (index, operation) in journal.operations.iter().enumerate() {
                 let target = fsafe::checked(&self.steamapps, &operation.target, false)?;
-                let source = fsafe::checked(&self.stage, &operation.source, false)?;
-                let backup = self.stage.join("backup").join(index.to_string());
                 if fsafe::exists(&target)? != operation.existed {
                     return Err(failure("Install path changed during commit"));
                 }
                 if operation.existed {
+                    let backup = self.stage.join("backup").join(index.to_string());
                     fs::rename(&target, &backup).map_err(|e| fsafe::disk_error(&backup, e))?;
-                    fsafe::sync_dir(
-                        target
-                            .parent()
-                            .ok_or_else(|| failure("Target has no parent"))?,
-                    )?;
-                    fsafe::sync_dir(&self.stage.join("backup"))?;
                 }
-                if !operation.remove {
-                    fs::rename(&source, &target).map_err(|e| fsafe::disk_error(&target, e))?;
-                }
-                if !operation.remove {
-                    fsafe::sync_dir(
-                        source
-                            .parent()
-                            .ok_or_else(|| failure("Source has no parent"))?,
-                    )?;
-                }
-                fsafe::sync_dir(
-                    target
-                        .parent()
-                        .ok_or_else(|| failure("Target has no parent"))?,
-                )?;
+                progress.advance();
             }
+            fsafe::sync_filesystem(&self.stage)?;
+            // Phase 2 moves the verified files into place.
+            for operation in journal.operations.iter().filter(|o| !o.remove) {
+                let target = fsafe::checked(&self.steamapps, &operation.target, false)?;
+                let source = fsafe::checked(&self.stage, &operation.source, false)?;
+                if fsafe::exists(&target)? {
+                    return Err(failure("Install path changed during commit"));
+                }
+                fs::rename(&source, &target).map_err(|e| fsafe::disk_error(&target, e))?;
+                progress.advance();
+            }
+            fsafe::sync_filesystem(&self.stage)?;
             register_library(&self.request, &self.stage, &mut journal, layout.bytes)
         })();
         if let Err(error) = result {
@@ -1312,9 +1333,31 @@ fn rollback(library: &Path, stage: &Path, journal: &Journal) -> Result<()> {
         restore_registry(stage, registry)?;
     }
     let steamapps = library.join("steamapps");
+    // Two phases with a filesystem barrier between them, mirroring commit:
+    // first take installed files back into the stage, then restore originals.
+    // Each step is decided from which of source, target and backup exist, so a
+    // crash anywhere re-runs this idempotently.
     for (index, operation) in journal.operations.iter().enumerate().rev() {
+        if operation.remove {
+            continue;
+        }
         let target = fsafe::checked(&steamapps, &operation.target, false)?;
         let source = fsafe::checked(stage, &operation.source, false)?;
+        let backup = stage.join("backup").join(index.to_string());
+        let has_backup = fsafe::exists(&backup)?;
+        if has_backup || !operation.existed {
+            if fsafe::exists(&target)? && !fsafe::exists(&source)? {
+                fs::rename(&target, &source)?;
+            } else if has_backup && fsafe::exists(&target)? {
+                return Err(failure(
+                    "Both stage and commit target exist; refusing destructive recovery",
+                ));
+            }
+        }
+    }
+    fsafe::sync_filesystem(stage)?;
+    for (index, operation) in journal.operations.iter().enumerate().rev() {
+        let target = fsafe::checked(&steamapps, &operation.target, false)?;
         let backup = stage.join("backup").join(index.to_string());
         let has_backup = fsafe::exists(&backup)?;
         if operation.remove {
@@ -1325,61 +1368,30 @@ fn rollback(library: &Path, stage: &Path, journal: &Journal) -> Result<()> {
                     ));
                 }
                 fs::rename(&backup, &target)?;
-                fsafe::sync_dir(&stage.join("backup"))?;
-                fsafe::sync_dir(
-                    target
-                        .parent()
-                        .ok_or_else(|| failure("Target has no parent"))?,
-                )?;
             } else if !fsafe::exists(&target)? {
                 return Err(failure("Removed original and backup are both missing"));
             }
             continue;
         }
-        if has_backup || !operation.existed {
-            if fsafe::exists(&target)? && !fsafe::exists(&source)? {
-                fs::rename(&target, &source)?;
-                fsafe::sync_dir(
-                    target
-                        .parent()
-                        .ok_or_else(|| failure("Target has no parent"))?,
-                )?;
-                fsafe::sync_dir(
-                    source
-                        .parent()
-                        .ok_or_else(|| failure("Source has no parent"))?,
-                )?;
-            } else if has_backup && fsafe::exists(&target)? {
-                return Err(failure(
-                    "Both stage and commit target exist; refusing destructive recovery",
-                ));
-            }
-        }
         if has_backup {
             fs::rename(&backup, &target)?;
-            fsafe::sync_dir(&stage.join("backup"))?;
-            fsafe::sync_dir(
-                target
-                    .parent()
-                    .ok_or_else(|| failure("Target has no parent"))?,
-            )?;
         } else if operation.existed && !fsafe::exists(&target)? {
             return Err(failure("Recovery original and backup are both missing"));
         }
     }
+    fsafe::sync_filesystem(stage)?;
     for dir in journal.created_dirs.iter().rev() {
         let path = fsafe::checked(&steamapps, dir, true)?;
         if path.exists() {
             match fs::remove_dir(&path) {
-                Ok(()) => fsafe::sync_dir(
-                    path.parent()
-                        .ok_or_else(|| failure("Directory has no parent"))?,
-                )?,
+                Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
                 Err(e) => return Err(e.into()),
             }
         }
     }
+    // The journal goes away only after everything above is durable.
+    fsafe::sync_filesystem(stage)?;
     fs::remove_file(stage.join("journal.json"))?;
     fsafe::sync_dir(stage)?;
     Ok(())
@@ -1413,17 +1425,14 @@ fn finalize(library: &Path, stage: &Path, journal: &Journal) -> Result<Option<Pa
                 ));
             }
             fs::rename(&backup, &destination)?;
-            fsafe::sync_dir(
-                destination
-                    .parent()
-                    .ok_or_else(|| failure("Backup has no parent"))?,
-            )?;
             preserved = Some(collection);
         } else {
             fs::remove_file(&backup)?;
         }
-        fsafe::sync_dir(&stage.join("backup"))?;
     }
+    // One barrier makes every preserved original and removed backup durable
+    // before the journal that records them is deleted.
+    fsafe::sync_filesystem(stage)?;
     if stage.join("registry.before").exists() {
         fs::remove_file(stage.join("registry.before"))?;
     }

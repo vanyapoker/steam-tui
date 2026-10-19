@@ -5,3 +5,4 @@ target/
 /unused/
 __pycache__/
 *.pyc
+/todo.md

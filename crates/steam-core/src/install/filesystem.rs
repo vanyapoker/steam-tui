@@ -287,6 +287,18 @@ pub(super) fn sync_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Flushes everything pending on the filesystem holding `path` with one
+/// barrier. A transaction that renames thousands of files uses this instead of
+/// an fsync per directory, which costs a metadata commit each on btrfs.
+pub(super) fn sync_filesystem(path: &Path) -> Result<()> {
+    let file = File::open(path)?;
+    // SAFETY: `file` owns a valid open descriptor for the whole call.
+    if unsafe { libc::syncfs(file.as_raw_fd()) } != 0 {
+        return Err(disk_error(path, std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()

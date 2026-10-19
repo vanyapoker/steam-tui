@@ -156,6 +156,39 @@ fn ordinary_update_removes_only_unchanged_obsolete_managed_files() {
 }
 
 #[test]
+fn commit_reports_every_operation_and_installs_many_files() {
+    let temp = Temp::new();
+    fs::create_dir(temp.path().join("steamapps")).unwrap();
+    let s = session(temp.path());
+    let names: Vec<String> = (0..300).map(|i| format!("d{}/f{i}", i % 7)).collect();
+    let files: Vec<_> = names.iter().map(|n| file(n, n.as_bytes())).collect();
+    let layout = Layout::new(
+        vec![(
+            depot(),
+            DepotManifest {
+                depot_id: 10,
+                manifest_id: 20,
+                files,
+            },
+        )],
+        vec![],
+    )
+    .unwrap();
+    let content: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), n.as_bytes())).collect();
+    staged(&s, &layout, &content);
+    let progress = CommitProgress::default();
+    s.commit_with_progress(&layout, &progress).unwrap();
+    let (done, total) = progress.snapshot();
+    // One set-aside step for every operation (including the app manifest) and
+    // one move for each of them.
+    assert_eq!(done, total);
+    assert_eq!(total, 2 * (names.len() as u64 + 1));
+    for name in &names {
+        assert_eq!(fs::read(s.install.join(name)).unwrap(), name.as_bytes());
+    }
+}
+
+#[test]
 fn dlc_install_and_remove_restore_overlays_preserve_mods_and_leave_base_inode_untouched() {
     let temp = Temp::new();
     fs::create_dir(temp.path().join("steamapps")).unwrap();

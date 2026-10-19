@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- The commit phase of an install or update took hours on large games (about 6 files per second for Path of Exile 2 on btrfs) because every file move fsynced its directories. Moves are now made durable with one filesystem barrier per phase, the same for rollback and recovery, so the phase takes seconds to minutes. The write-ahead journal and its ordering guarantees are unchanged. The Committing phase also shows how many steps are done.
+
 ### Changed
 - Transcoded media databases now live directly in `steamapps/shadercache/<app>`, the layout Valve's client uses, so either client reuses the other's download. Files from the old `fozmediav1` location are moved or removed, and a database already in place is adopted when its SHA-1 matches the bucket manifest.
 

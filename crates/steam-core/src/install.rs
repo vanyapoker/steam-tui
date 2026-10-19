@@ -410,6 +410,31 @@ impl VerifyProgress {
     }
 }
 
+/// Operations finished in the commit phase, polled by the UI.
+#[derive(Default)]
+struct CommitProgress {
+    done: AtomicU64,
+    total: AtomicU64,
+}
+
+impl CommitProgress {
+    fn start(&self, total: u64) {
+        self.total.store(total, Ordering::Relaxed);
+        self.done.store(0, Ordering::Relaxed);
+    }
+
+    fn advance(&self) {
+        self.done.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> (u64, u64) {
+        (
+            self.done.load(Ordering::Relaxed),
+            self.total.load(Ordering::Relaxed),
+        )
+    }
+}
+
 struct Layout {
     files: Vec<PlannedFile>,
     old_files: BTreeMap<PathBuf, DepotFile>,
@@ -978,9 +1003,33 @@ async fn run_inner(
     status.phase = InstallPhase::Committing;
     status.message = "Committing verified files; cancellation waits for commit/rollback".into();
     report(progress, status);
-    let s = Arc::clone(&session);
-    let l = Arc::clone(&layout);
-    let (game, preserved) = blocking(move || s.commit(&l)).await?;
+    let commit = Arc::new(CommitProgress::default());
+    let (s, l, c) = (
+        Arc::clone(&session),
+        Arc::clone(&layout),
+        Arc::clone(&commit),
+    );
+    let job = tokio::task::spawn_blocking(move || s.commit_with_progress(&l, &c));
+    tokio::pin!(job);
+    let mut tick = tokio::time::interval(VERIFY_REPORT_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let (game, preserved) = loop {
+        tokio::select! {
+            joined = &mut job => {
+                break joined
+                    .map_err(|e| failure(format!("Installer filesystem worker failed: {e}")))??;
+            }
+            _ = tick.tick() => {
+                let (done, total) = commit.snapshot();
+                if total != 0 {
+                    status.message = format!(
+                        "Committing verified files {done}/{total}; cancellation waits for commit/rollback"
+                    );
+                    report(progress, status);
+                }
+            }
+        }
+    };
     status.phase = InstallPhase::Finished;
     status.completed_bytes = layout.bytes;
     status.message = "Installed and verified".into();
