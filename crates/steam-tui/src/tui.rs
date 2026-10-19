@@ -1161,6 +1161,15 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                             match action {
                                 Action::Quit => break,
                                 Action::SkipShaders(app) => { if steam_core::shaders::skip(app) { model.status = "Skipping shader processing; continuing launch…".into(); } },
+                                Action::CycleLaunchOption(app) => {
+                                    model.status = match model.selected_game().and_then(|g| g.installed.clone()) {
+                                        Some(game) if game.app_id == app => match steam_core::launch::options::cycle(&game) {
+                                            Ok(option) => format!("Launch option [{app}]: {}", option.description),
+                                            Err(error) => format!("Launch option [{app}]: {error}"),
+                                        },
+                                        _ => "Install the game before choosing a launch option".into(),
+                                    };
+                                }
                                 Action::PrecacheShaders(app) => {
                                     model.status = match (&queue, model.selected_game().and_then(|g| g.installed.clone())) {
                                         (None, _) => "Persistent queue unavailable for this account".into(),

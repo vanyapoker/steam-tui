@@ -88,7 +88,7 @@ fn resolves_exact_native_entry_with_safe_arguments_and_environment() {
     let executable = fixture.executable("bin/game");
     let mut game = fixture.game();
     game.launch_options = Some("env FOO='two words' %command% --user-option".into());
-    let plan = resolve_app(&game, &fixture.metadata("bin/game")).unwrap();
+    let plan = resolve_app(&game, &fixture.metadata("bin/game"), None).unwrap();
     assert_eq!(plan.executable, executable.canonicalize().unwrap());
     assert_eq!(
         plan.working_dir,
@@ -111,9 +111,9 @@ fn linux_launch_entry_stays_native_when_app_supports_linux() {
     let path = fixture.0.join("launch.vdf");
     fs::write(&path, r#""common" { "oslist" "windows,linux" } "config" { "launch" { "0" { "executable" "bin/game" "config" { "oslist" "linux" } } } }"#).unwrap();
     let app = read_vdf(&path).unwrap();
-    assert!(!uses_proton(&fixture.game(), &app).unwrap());
+    assert!(!uses_proton(&fixture.game(), &app, None).unwrap());
     assert_eq!(
-        resolve_app(&fixture.game(), &app).unwrap().executable,
+        resolve_app(&fixture.game(), &app, None).unwrap().executable,
         executable.canonicalize().unwrap()
     );
 }
@@ -126,31 +126,44 @@ fn option_only_apps_use_the_lowest_plain_option_but_never_conditional_ones() {
         "3" { "executable" "bin/game.exe" "arguments" "-force-d3d12" "type" "option2" "config" { "osarch" "64" "oslist" "windows" } }
         "2" { "executable" "bin/game.exe" "arguments" "-force-d3d11" "type" "option1" "config" { "osarch" "64" "oslist" "windows" } } } }"#).unwrap();
     let app = read_vdf(&path).unwrap();
-    assert!(uses_proton(&fixture.game(), &app).unwrap());
+    assert!(uses_proton(&fixture.game(), &app, None).unwrap());
     let game = fixture.game();
-    let (entry, windows) = select_entry(&game, &app).unwrap();
+    let (entry, windows) = select_entry(&game, &app, None).unwrap();
     assert!(windows);
     assert_eq!(entry.text("arguments"), Some("-force-d3d11"));
-    // Betas, DLC and account-conditional options stay unsupported.
+    // A stored choice picks another plain option; unusable choices are ignored.
+    let (entry, _) = select_entry(&game, &app, Some(3)).unwrap();
+    assert_eq!(entry.text("arguments"), Some("-force-d3d12"));
+    let (entry, _) = select_entry(&game, &app, Some(99)).unwrap();
+    assert_eq!(entry.text("arguments"), Some("-force-d3d11"));
+    assert_eq!(
+        options::list(&app)
+            .iter()
+            .map(|o| o.index)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
+    // Betas, DLC and account-conditional options stay unsupported, even when chosen.
     fs::write(&path, r#""common" { "oslist" "windows" } "config" { "launch" {
         "0" { "executable" "bin/game.exe" "type" "option1" "config" { "betakey" "x" "oslist" "windows" } } } }"#).unwrap();
-    assert!(uses_proton(&fixture.game(), &read_vdf(&path).unwrap()).is_err());
+    assert!(select_entry(&game, &read_vdf(&path).unwrap(), Some(0)).is_err());
+    assert!(uses_proton(&fixture.game(), &read_vdf(&path).unwrap(), None).is_err());
 }
 #[test]
 fn refuses_missing_paths_escape_symlink_and_client_helpers() {
     let fixture = Fixture::new();
     let game = fixture.game();
-    assert!(resolve_app(&game, &fixture.metadata("bin/missing")).is_err());
-    assert!(resolve_app(&game, &fixture.metadata("../outside")).is_err());
+    assert!(resolve_app(&game, &fixture.metadata("bin/missing"), None).is_err());
+    assert!(resolve_app(&game, &fixture.metadata("../outside"), None).is_err());
     let outside = fixture.0.join("outside");
     fs::write(&outside, "not a game").unwrap();
     symlink(&outside, game.install_dir.join("bin/link")).unwrap();
-    assert!(resolve_app(&game, &fixture.metadata("bin/link")).is_err());
+    assert!(resolve_app(&game, &fixture.metadata("bin/link"), None).is_err());
     fixture.executable("bin/steam");
-    assert!(resolve_app(&game, &fixture.metadata("bin/steam")).is_err());
+    assert!(resolve_app(&game, &fixture.metadata("bin/steam"), None).is_err());
     let plain = fixture.executable("bin/plain");
     fs::set_permissions(plain, fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(resolve_app(&game, &fixture.metadata("bin/plain")).is_err());
+    assert!(resolve_app(&game, &fixture.metadata("bin/plain"), None).is_err());
 }
 #[test]
 fn parsing_preserves_empty_quotes_and_rejects_shell_constructs() {
@@ -181,7 +194,7 @@ fn parsing_preserves_empty_quotes_and_rejects_shell_constructs() {
         let mut game = fixture.game();
         game.launch_options = Some(options.into());
         assert!(
-            resolve_app(&game, &fixture.metadata("bin/game")).is_err(),
+            resolve_app(&game, &fixture.metadata("bin/game"), None).is_err(),
             "{options}"
         );
     }
@@ -196,9 +209,9 @@ fn rejects_unknown_platform_and_windows_without_real_proton() {
         r#""config" { "launch" { "0" { "executable" "bin/game" } } }"#,
     )
     .unwrap();
-    assert!(resolve_app(&fixture.game(), &read_vdf(&path).unwrap()).is_err());
+    assert!(resolve_app(&fixture.game(), &read_vdf(&path).unwrap(), None).is_err());
     fs::write(&path, r#""config" { "launch" { "0" { "executable" "bin/game" "config" { "oslist" "windows" } } } }"#).unwrap();
-    assert!(resolve_app(&fixture.game(), &read_vdf(&path).unwrap()).is_err());
+    assert!(resolve_app(&fixture.game(), &read_vdf(&path).unwrap(), None).is_err());
 }
 #[test]
 fn tool_manifest_requires_real_executable_and_known_tokens() {
@@ -345,8 +358,8 @@ fn resolves_cached_windows_entry_through_configured_proton_and_required_runtime(
     let app = document.child("appinfo").unwrap();
     // Remove the per-game forced Proton setting to exercise automatic selection.
     fs::remove_file(fixture.0.join("config/config.vdf")).unwrap();
-    assert!(uses_proton(&fixture.game(), app).unwrap());
-    let linux_plan = resolve_app(&fixture.game(), app).unwrap();
+    assert!(uses_proton(&fixture.game(), app, None).unwrap());
+    let linux_plan = resolve_app(&fixture.game(), app, None).unwrap();
     assert_eq!(linux_plan.executable, plan.executable);
     assert_eq!(
         &linux_plan.arguments[linux_plan.arguments.len() - 2..],
@@ -704,7 +717,7 @@ fn vac_games_require_explicit_host_even_outside_the_tui() {
     let path = fixture.0.join("online.vdf");
     fs::write(&path, r#""common" { "category" { "category_8" "1" "category_36" "1" } } "config" { "launch" { "0" { "executable" "bin/game" "config" { "oslist" "linux" } } } }"#).unwrap();
     assert!(
-        resolve_app(&fixture.game(), &read_vdf(&path).unwrap())
+        resolve_app(&fixture.game(), &read_vdf(&path).unwrap(), None)
             .unwrap()
             .needs_steam
     );
@@ -729,19 +742,19 @@ fn native_tf2_selects_valves_sdl2_classic_without_affecting_other_games_or_overr
     let metadata = fixture.metadata("bin/game");
     let mut game = fixture.game();
     assert!(
-        !resolve_app(&game, &metadata)
+        !resolve_app(&game, &metadata, None)
             .unwrap()
             .environment
             .contains_key("STEAM_COMPAT_RUNTIME_SDL2")
     );
     game.app_id = 440;
-    let plan = resolve_app(&game, &metadata).unwrap();
+    let plan = resolve_app(&game, &metadata, None).unwrap();
     assert_eq!(plan.environment["STEAM_COMPAT_RUNTIME_SDL2"], "classic");
     assert!(plan.needs_steam);
     assert!(!plan.arguments.iter().any(|arg| arg == "-insecure"));
     game.launch_options = Some("STEAM_COMPAT_RUNTIME_SDL2=compat %command%".into());
     assert_eq!(
-        resolve_app(&game, &metadata).unwrap().environment["STEAM_COMPAT_RUNTIME_SDL2"],
+        resolve_app(&game, &metadata, None).unwrap().environment["STEAM_COMPAT_RUNTIME_SDL2"],
         "compat"
     );
 }

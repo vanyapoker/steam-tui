@@ -197,12 +197,16 @@ impl CloudApp {
         backend: crate::launch::LaunchBackend,
     ) -> Result<Option<Self>> {
         let document = crate::launch::app_document(game)?;
-        let proton =
-            crate::launch::uses_proton(game, &document).or_else(|error| match game.platform {
-                Some(crate::catalog::InstallPlatform::Windows) => Ok(true),
-                Some(crate::catalog::InstallPlatform::Linux) => Ok(false),
-                None => Err(error),
-            })?;
+        let proton = crate::launch::uses_proton(
+            game,
+            &document,
+            crate::launch::options::chosen(game.app_id),
+        )
+        .or_else(|error| match game.platform {
+            Some(crate::catalog::InstallPlatform::Windows) => Ok(true),
+            Some(crate::catalog::InstallPlatform::Linux) => Ok(false),
+            None => Err(error),
+        })?;
         let os = if proton { Os::Windows } else { Os::Linux };
         let Some(mut ufs) = Ufs::parse(&document, os) else {
             return Ok(None);

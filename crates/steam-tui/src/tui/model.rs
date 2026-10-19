@@ -255,6 +255,7 @@ pub(super) enum Action {
     LaunchInstalled(LaunchBackend),
     SkipShaders(u32),
     PrecacheShaders(u32),
+    CycleLaunchOption(u32),
     Queue,
     QueueControl(u64, steam_core::updates::JobState),
     QueuePriority(u32, i16),
@@ -1457,6 +1458,12 @@ impl Model {
                     return Action::ContentProperties;
                 }
             }
+            KeyCode::Char('O') => match self.selected_game() {
+                Some(game) if game.installed.is_some() => {
+                    return Action::CycleLaunchOption(game.app_id);
+                }
+                _ => self.status = "Install the game before choosing a launch option".into(),
+            },
             KeyCode::Char('Z') => match self.selected_game() {
                 Some(game) if game.installed.is_some() => {
                     return Action::PrecacheShaders(game.app_id);

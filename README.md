@@ -53,6 +53,7 @@ Press `?` in the app for the full list.
 | Shift+Enter / L | Explicitly launch the installed version |
 | J | Persistent content/shader queue |
 | P | Branch, language and DLC properties |
+| O | Cycle the selected game's launch option (e.g. DirectX 11 / 12) |
 | Z | Download a shader pre-cache for the selected game (opt-in) |
 | S while launching | Skip shader processing and continue launch |
 | Ctrl+Enter | Launch through Valve's Steam client |
@@ -80,6 +81,7 @@ steam-tui jobs run
 steam-tui updates policy APPID automatic  # or launch-only / manual
 steam-tui updates window 23:00 06:00
 steam-tui content show APPID
+steam-tui content launch-option APPID [INDEX|default]   # list or choose a launch entry (TUI: O)
 steam-tui content unlock APPID BRANCH    # hidden password prompt; remembers returned key
 steam-tui shaders add APPID              # opt in: queue a download (TUI: Z); then jobs run
 steam-tui shaders show APPID

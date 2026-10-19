@@ -128,8 +128,11 @@ pub async fn run(account: &str, settings_command: bool, args: &[String]) -> Resu
 }
 
 pub async fn content(account: &str, args: &[String]) -> Result {
-    let usage = "content show APPID | branch APPID NAME | unlock APPID BRANCH | language APPID NAME | dlc APPID DLCID enable|disable";
+    let usage = "content show APPID | branch APPID NAME | unlock APPID BRANCH | language APPID NAME | dlc APPID DLCID enable|disable | launch-option APPID [INDEX|default]";
     let command = args.first().map(String::as_str).ok_or(usage)?;
+    if command == "launch-option" {
+        return launch_option(account, args, usage);
+    }
     if !matches!(
         (command, args.len()),
         ("show", 2) | ("branch" | "language" | "unlock", 3) | ("dlc", 4)
@@ -331,6 +334,45 @@ pub async fn shaders(account: &str, args: &[String]) -> Result {
             }
         }
         _ => return Err(usage.into()),
+    }
+    Ok(())
+}
+
+/// Local only: reads cached app metadata and stores the choice; needs no login.
+fn launch_option(account: &str, args: &[String], usage: &str) -> Result {
+    if !matches!(args.len(), 2 | 3) {
+        return Err(usage.into());
+    }
+    let app_id = app(args.get(1))?;
+    let game = steam_core::installed::scan(None, Some(account))
+        .map_err(|e| e.to_string())?
+        .games
+        .into_iter()
+        .find(|g| g.app_id == app_id)
+        .ok_or("app is not installed")?;
+    if let Some(value) = args.get(2) {
+        let index = match value.as_str() {
+            "default" => None,
+            number => Some(number.parse::<u32>().map_err(|_| usage.to_string())?),
+        };
+        steam_core::launch::options::choose(&game, index).map_err(|e| e.to_string())?;
+    }
+    let options = steam_core::launch::options::available(&game).map_err(|e| e.to_string())?;
+    let current = steam_core::launch::options::effective(&game).map_err(|e| e.to_string())?;
+    if options.len() < 2 {
+        println!("This game has no alternative launch options");
+    }
+    for option in options {
+        println!(
+            "{}\t{}\t{}",
+            option.index,
+            terminal_text(&option.description),
+            if option.index == current.index {
+                "selected"
+            } else {
+                ""
+            }
+        );
     }
     Ok(())
 }

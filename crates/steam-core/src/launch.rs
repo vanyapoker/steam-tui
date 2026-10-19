@@ -11,6 +11,7 @@ mod reaper;
 mod tests;
 mod tools;
 pub use tools::Dependency;
+pub mod options;
 mod setup;
 
 use crate::installed::{
@@ -110,7 +111,7 @@ pub(crate) fn app_document(game: &InstalledGame) -> Result<Node> {
 }
 
 pub fn resolve(game: &InstalledGame) -> Result<LaunchPlan> {
-    resolve_app(game, &app_document(game)?)
+    resolve_app(game, &app_document(game)?, options::chosen(game.app_id))
 }
 
 /// Valve games whose secure online mode is served by Valve's unmodified host.
@@ -172,8 +173,18 @@ fn acquire_steam_host(steam_root: &Path, account: &HostAccount) -> Result<host::
     host::acquire(steam_root, account)
 }
 
-/// Picks the default launch entry and whether it runs through Proton.
-fn select_entry<'a>(game: &InstalledGame, app: &'a Node) -> Result<(&'a Node, bool)> {
+/// Picks the launch entry and whether it runs through Proton. `choice` is the
+/// user's pick among selectable entries (see `options`); it is ignored when it
+/// names no entry usable on this host.
+fn select_entry<'a>(
+    game: &InstalledGame,
+    app: &'a Node,
+    choice: Option<u32>,
+) -> Result<(&'a Node, bool)> {
+    select_indexed(game, app, choice).map(|(_, entry, proton)| (entry, proton))
+}
+
+fn launch_entries(app: &Node) -> Result<Vec<(u32, &Node)>> {
     let launches = app
         .at(&["config", "launch"])
         .ok_or_else(|| failure("Cached app metadata has no launch entries"))?;
@@ -183,42 +194,72 @@ fn select_entry<'a>(game: &InstalledGame, app: &'a Node) -> Result<(&'a Node, bo
         .filter_map(|(key, node)| key.parse::<u32>().ok().map(|index| (index, node)))
         .collect();
     entries.sort_by_key(|(index, _)| *index);
-    // Launch entries marked DLC/demo/server or conditional account/beta options
-    // cannot be selected correctly without Steam's launch-option dialog.
-    let plain = |n: &Node| {
-        n.child("config").is_none_or(|c| {
-            c.children
-                .keys()
-                .all(|k| matches!(k.to_ascii_lowercase().as_str(), "oslist" | "osarch"))
-        })
-    };
-    let default_entries: Vec<_> = entries
+    Ok(entries)
+}
+
+fn is_default_entry(node: &Node) -> bool {
+    node.text("type")
+        .is_none_or(|t| t.eq_ignore_ascii_case("default"))
+}
+
+fn is_option_entry(node: &Node) -> bool {
+    node.text("type").is_some_and(|t| {
+        t.to_ascii_lowercase()
+            .strip_prefix("option")
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// Launch entries marked DLC/demo/server or conditional account/beta options
+/// cannot be selected correctly without Steam's launch-option dialog; only the
+/// OS and architecture conditions are understood.
+fn is_plain_entry(node: &Node) -> bool {
+    node.child("config").is_none_or(|c| {
+        c.children
+            .keys()
+            .all(|k| matches!(k.to_ascii_lowercase().as_str(), "oslist" | "osarch"))
+    })
+}
+
+fn usable_here(node: &Node, app: &Node) -> bool {
+    platform(node, app, "linux") || platform(node, app, "windows")
+}
+
+fn select_indexed<'a>(
+    game: &InstalledGame,
+    app: &'a Node,
+    choice: Option<u32>,
+) -> Result<(u32, &'a Node, bool)> {
+    let entries = launch_entries(app)?;
+    let selectable =
+        |(_, n): &&(u32, &Node)| (is_default_entry(n) || is_option_entry(n)) && is_plain_entry(n);
+    let chosen = choice.and_then(|index| {
+        entries
+            .iter()
+            .filter(selectable)
+            .find(|(i, n)| *i == index && usable_here(n, app))
+            .copied()
+    });
+    let defaults: Vec<_> = entries
         .iter()
-        .filter(|(_, n)| {
-            n.text("type")
-                .is_none_or(|t| t.eq_ignore_ascii_case("default"))
-                && plain(n)
-        })
-        .cloned()
+        .filter(selectable)
+        .filter(|(_, n)| is_default_entry(n))
+        .copied()
         .collect();
     // An app with no default entry offers only user-selectable options (e.g.
     // DirectX 11 / DirectX 12). Steam's dialog preselects the lowest index, so
     // that is the entry used without a choice.
-    let supported: Vec<_> = if default_entries.is_empty() {
-        entries
-            .into_iter()
-            .filter(|(_, n)| {
-                n.text("type").is_some_and(|t| {
-                    t.to_ascii_lowercase()
-                        .strip_prefix("option")
-                        .is_some_and(|rest| {
-                            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
-                        })
-                }) && plain(n)
-            })
-            .collect()
+    let supported: Vec<_> = if let Some(chosen) = chosen {
+        vec![chosen]
+    } else if !defaults.is_empty() {
+        defaults
     } else {
-        default_entries
+        entries
+            .iter()
+            .filter(selectable)
+            .filter(|(_, n)| is_option_entry(n))
+            .copied()
+            .collect()
     };
     let native = supported
         .iter()
@@ -228,17 +269,18 @@ fn select_entry<'a>(game: &InstalledGame, app: &'a Node) -> Result<(&'a Node, bo
         .find(|(_, node)| platform(node, app, "windows"));
     let forced = configured_tool(&game.steam_root, game.app_id, false)?.is_some();
     if forced {
-        Ok((windows.ok_or_else(|| failure("This app explicitly selects a compatibility tool, but has no supported Windows launch entry"))?.1, true))
-    } else if let Some((_, entry)) = native {
+        let (index, entry) = windows.ok_or_else(|| failure("This app explicitly selects a compatibility tool, but has no supported Windows launch entry"))?;
+        Ok((*index, entry, true))
+    } else if let Some((index, entry)) = native {
         // A Windows-only app can label a launch option for Linux hosts (e.g.
         // Far Far West's DX11 option). It still needs Proton to run its build.
         let windows_only = app
             .child("common")
             .and_then(|common| common.text("oslist"))
             .is_some_and(|oslist| supports_os(oslist, "windows") && !supports_os(oslist, "linux"));
-        Ok((*entry, windows_only))
-    } else if let Some((_, entry)) = windows {
-        Ok((*entry, true))
+        Ok((*index, entry, windows_only))
+    } else if let Some((index, entry)) = windows {
+        Ok((*index, entry, true))
     } else {
         Err(failure(
             "No supported default Linux or Windows launch entry in local metadata; conditional launch options require Steam and are not guessed",
@@ -247,8 +289,8 @@ fn select_entry<'a>(game: &InstalledGame, app: &'a Node) -> Result<(&'a Node, bo
 }
 
 /// True when direct launch would run this game as a Windows build through Proton.
-pub(crate) fn uses_proton(game: &InstalledGame, app: &Node) -> Result<bool> {
-    Ok(select_entry(game, app)?.1)
+pub(crate) fn uses_proton(game: &InstalledGame, app: &Node, choice: Option<u32>) -> Result<bool> {
+    Ok(select_entry(game, app, choice)?.1)
 }
 
 /// True while any process of this user carries the game's `SteamAppId` (the
@@ -314,8 +356,8 @@ fn running_app_ids_filtered(proc_root: &Path, account: Option<u64>) -> BTreeSet<
         .collect()
 }
 
-fn resolve_app(game: &InstalledGame, app: &Node) -> Result<LaunchPlan> {
-    let (entry, is_windows) = select_entry(game, app)?;
+fn resolve_app(game: &InstalledGame, app: &Node, choice: Option<u32>) -> Result<LaunchPlan> {
+    let (entry, is_windows) = select_entry(game, app, choice)?;
     let exe = entry
         .text("executable")
         .filter(|s| !s.is_empty())

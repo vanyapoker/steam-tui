@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Launch options:** apps that offer selectable launch entries (e.g. Moonlighter 2's DirectX 11 / DirectX 12) can be switched with `O` in the library or `steam-tui content launch-option APPID [INDEX|default]`. The choice is remembered per game.
+
+### Changed
+- Panels use square corners like btop.
+
+### Fixed
+- Apps with only selectable launch options and no default entry (Moonlighter 2) launched with an error; the lowest plain option, which Steam's dialog preselects, is now used. Beta, DLC and account-conditional options remain unsupported.
+
 ## 0.3.0 - 2026-10-19
 
 ### Added
