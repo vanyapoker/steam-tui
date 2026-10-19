@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- File verification is faster. Each file is now checked against its manifest SHA1 as soon as its last chunk is written, while later files still download, so the data is still in the page cache and the verifying phase only has the remainder left. Verification also no longer fsyncs every file (about 6 ms each on btrfs); one filesystem barrier makes the whole stage durable before the commit. The check itself is unchanged: every file is still hashed end to end before anything is committed.
+
 ## 0.3.2 - 2026-10-19
 
 ### Fixed

@@ -1,9 +1,11 @@
 use super::*;
 use crate::catalog::{InstallPlan, InstallPlatform};
 use crate::content::DepotManifest;
+use crate::install::EarlyVerifier;
 use crate::install::tests::{Temp, depot, file};
 use crate::install::{Layout, PlannedFile};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 fn request(root: &Path) -> InstallRequest {
     InstallRequest {
@@ -110,6 +112,7 @@ fn staged(s: &Session, layout: &Layout, contents: &[(&str, &[u8])]) {
         layout,
         &CancellationToken::new(),
         &VerifyProgress::default(),
+        &HashSet::new(),
     )
     .unwrap();
 }
@@ -186,6 +189,71 @@ fn commit_reports_every_operation_and_installs_many_files() {
     for name in &names {
         assert_eq!(fs::read(s.install.join(name)).unwrap(), name.as_bytes());
     }
+}
+
+fn early_layout(s: &Session) -> (Arc<Layout>, Vec<String>) {
+    let names: Vec<String> = (0..6).map(|i| format!("early{i}.bin")).collect();
+    let files = names.iter().map(|n| file(n, n.as_bytes())).collect();
+    let layout = Layout::new(
+        vec![(
+            depot(),
+            DepotManifest {
+                depot_id: 10,
+                manifest_id: 20,
+                files,
+            },
+        )],
+        vec![],
+    )
+    .unwrap();
+    let content: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), n.as_bytes())).collect();
+    for (name, bytes) in &content {
+        let path = s.stage.join("content").join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    s.preflight(&layout, &CancellationToken::new()).unwrap();
+    (Arc::new(layout), names)
+}
+
+#[tokio::test]
+async fn early_verification_covers_submitted_files_and_finish_stage_skips_them() {
+    let temp = Temp::new();
+    fs::create_dir(temp.path().join("steamapps")).unwrap();
+    let s = Arc::new(session(temp.path()));
+    let (layout, names) = early_layout(&s);
+    let progress = Arc::new(VerifyProgress::default());
+    let mut early = EarlyVerifier::new(&s, &layout, &CancellationToken::new(), &progress);
+    for (index, planned) in layout.files.iter().enumerate().take(4) {
+        assert!(names.contains(&planned.file.path.display().to_string()));
+        early.submit(index);
+    }
+    let verified = early.finish().await.unwrap();
+    assert_eq!(verified.len(), 4);
+    assert_eq!(progress.snapshot().1, 4);
+    s.finish_stage(&layout, &CancellationToken::new(), &progress, &verified)
+        .unwrap();
+    // Only the two remaining files were hashed by finish_stage.
+    assert_eq!(progress.snapshot().1, 6);
+}
+
+#[tokio::test]
+async fn early_verification_reports_a_corrupted_file() {
+    let temp = Temp::new();
+    fs::create_dir(temp.path().join("steamapps")).unwrap();
+    let s = Arc::new(session(temp.path()));
+    let (layout, _) = early_layout(&s);
+    let path = s.stage.join("content").join(&layout.files[2].file.path);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[0] ^= 0xff;
+    fs::write(&path, bytes).unwrap();
+    let progress = Arc::new(VerifyProgress::default());
+    let mut early = EarlyVerifier::new(&s, &layout, &CancellationToken::new(), &progress);
+    for index in 0..layout.files.len() {
+        early.submit(index);
+    }
+    let error = early.finish().await.unwrap_err();
+    assert!(error.to_string().contains("SHA1 mismatch"), "{error}");
 }
 
 #[test]
@@ -825,8 +893,13 @@ fn parallel_verification_accepts_many_files_and_counts_every_byte() {
     let mut samples = Vec::new();
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            s.finish_stage(&layout, &CancellationToken::new(), &progress)
-                .unwrap();
+            s.finish_stage(
+                &layout,
+                &CancellationToken::new(),
+                &progress,
+                &HashSet::new(),
+            )
+            .unwrap();
             done.store(true, Ordering::SeqCst);
         });
         while !done.load(Ordering::SeqCst) {
@@ -864,6 +937,7 @@ fn a_flipped_byte_in_any_staged_file_fails_verification() {
         &layout,
         &CancellationToken::new(),
         &VerifyProgress::default(),
+        &HashSet::new(),
     )
     .unwrap();
     // Restage and corrupt one byte in the middle chunk, keeping the length.
@@ -874,6 +948,7 @@ fn a_flipped_byte_in_any_staged_file_fails_verification() {
             &layout,
             &CancellationToken::new(),
             &VerifyProgress::default(),
+            &HashSet::new(),
         )
         .unwrap_err();
     assert!(error.to_string().contains("SHA1 mismatch"), "{error}");
@@ -889,7 +964,12 @@ fn cancellation_stops_verification() {
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     let error = s
-        .finish_stage(&layout, &cancelled, &VerifyProgress::default())
+        .finish_stage(
+            &layout,
+            &cancelled,
+            &VerifyProgress::default(),
+            &HashSet::new(),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("cancelled"), "{error}");
 }

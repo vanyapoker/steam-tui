@@ -3,9 +3,11 @@
 //! Cancellation is honored until commit; callers must await `run`, not abort it.
 //! A `PauseGate` holds the download between chunks and resumes without redoing
 //! preflight; cancelling while paused still ends the job as Cancelled.
-//! Staged chunk writes are not fsynced: resume re-hashes every chunk from disk,
-//! and `finish_stage` verifies each file end to end in parallel and fsyncs it
-//! before anything is committed.
+//! Staged chunk writes are not fsynced: resume re-hashes every chunk from disk.
+//! Each file is verified end to end against its manifest SHA1 as soon as its
+//! last chunk is written, while later files still download; `finish_stage`
+//! verifies the rest in parallel and makes the whole stage durable with one
+//! filesystem barrier before anything is committed.
 //! Changed local managed files are retained under `.steam-tui/preserved`; files
 //! absent from new depots are deleted only when their old manifest proves that they
 //! are unchanged and not supplied by any remaining depot.
@@ -40,7 +42,7 @@ use crate::content::{ContentClient, DepotFile, DepotManifest};
 use crate::installed::InstalledGame;
 use parking_lot::Mutex;
 use sha1::{Digest, Sha1};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::error::Error as StdError;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -407,6 +409,96 @@ impl VerifyProgress {
             self.files.load(Ordering::Relaxed),
             self.current.lock().clone(),
         )
+    }
+}
+
+/// Files hashed at once while the download still runs. Few enough to leave the
+/// disk and cores to the transfer, many enough to outpace any connection.
+const EARLY_VERIFY_WORKERS: usize = 4;
+
+/// Verifies a file as soon as its last chunk is on disk, while its data is
+/// still in the page cache and the download is still waiting on the network,
+/// so the verifying phase only has the remainder left. The check is the same
+/// whole-file SHA1 `finish_stage` would run.
+struct EarlyVerifier {
+    session: Arc<transaction::Session>,
+    layout: Arc<Layout>,
+    cancel: CancellationToken,
+    progress: Arc<VerifyProgress>,
+    permits: Arc<tokio::sync::Semaphore>,
+    tasks: tokio::task::JoinSet<Result<usize>>,
+    done: HashSet<PathBuf>,
+}
+
+impl EarlyVerifier {
+    fn new(
+        session: &Arc<transaction::Session>,
+        layout: &Arc<Layout>,
+        cancel: &CancellationToken,
+        progress: &Arc<VerifyProgress>,
+    ) -> Self {
+        Self {
+            session: Arc::clone(session),
+            layout: Arc::clone(layout),
+            cancel: cancel.child_token(),
+            progress: Arc::clone(progress),
+            permits: Arc::new(tokio::sync::Semaphore::new(EARLY_VERIFY_WORKERS)),
+            tasks: tokio::task::JoinSet::new(),
+            done: HashSet::new(),
+        }
+    }
+
+    /// Queues `layout.files[index]`, whose chunks must all be written.
+    fn submit(&mut self, index: usize) {
+        let (s, l, token, p, permits) = (
+            Arc::clone(&self.session),
+            Arc::clone(&self.layout),
+            self.cancel.clone(),
+            Arc::clone(&self.progress),
+            Arc::clone(&self.permits),
+        );
+        self.tasks.spawn(async move {
+            let _permit = permits
+                .acquire_owned()
+                .await
+                .map_err(|e| failure(e.to_string()))?;
+            tokio::task::spawn_blocking(move || {
+                s.verify_file(&l.files[index].file, &token, &p)?;
+                Ok(index)
+            })
+            .await
+            .map_err(|e| failure(format!("Installer filesystem worker failed: {e}")))?
+        });
+    }
+
+    /// Collects finished checks without waiting for the others.
+    fn reap(&mut self) -> Result<()> {
+        while let Some(joined) = self.tasks.try_join_next() {
+            self.record(joined)?;
+        }
+        Ok(())
+    }
+
+    /// Waits for every queued check and returns the paths that passed.
+    async fn finish(&mut self) -> Result<HashSet<PathBuf>> {
+        while let Some(joined) = self.tasks.join_next().await {
+            self.record(joined)?;
+        }
+        Ok(std::mem::take(&mut self.done))
+    }
+
+    fn record(&mut self, joined: Result<Result<usize>, tokio::task::JoinError>) -> Result<()> {
+        let index =
+            joined.map_err(|e| failure(format!("Installer verification task failed: {e}")))??;
+        self.done.insert(self.layout.files[index].file.path.clone());
+        Ok(())
+    }
+}
+
+impl Drop for EarlyVerifier {
+    fn drop(&mut self) {
+        // Stops hashing promptly when the install ends early.
+        self.cancel.cancel();
     }
 }
 
@@ -916,6 +1008,9 @@ async fn run_inner(
     // pipeline instead of paying a blocking round trip and an idle pipeline each.
     let mut group = Group::default();
     let mut last_report = std::time::Instant::now();
+    let verify = Arc::new(VerifyProgress::default());
+    let mut early = EarlyVerifier::new(&session, &layout, cancel, &verify);
+    let mut complete: Vec<usize> = Vec::new();
     for (file_index, planned) in layout.files.iter().enumerate() {
         check_cancel(cancel)?;
         let file = &planned.file;
@@ -936,6 +1031,9 @@ async fn run_inner(
             let end = (start + SCAN_WINDOW).min(chunks);
             group.items.push((file_index, start..end));
             group.chunks += end - start;
+            if end == chunks {
+                complete.push(file_index);
+            }
             start = end;
             if group.chunks >= GROUP_CHUNKS {
                 download_group(
@@ -950,6 +1048,10 @@ async fn run_inner(
                     &mut last_report,
                 )
                 .await?;
+                // The group is fully written: its finished files can be hashed
+                // now, while the next group downloads.
+                complete.drain(..).for_each(|index| early.submit(index));
+                early.reap()?;
             }
         }
     }
@@ -965,13 +1067,16 @@ async fn run_inner(
         &mut last_report,
     )
     .await?;
+    complete.drain(..).for_each(|index| early.submit(index));
     status.phase = InstallPhase::Verifying;
-    status.verify_bytes_done = 0;
     status.verify_bytes_total = layout.verify_bytes();
     let verify_files = layout.verify_files();
-    status.message = format!("Verifying files 0/{verify_files}");
+    let (bytes, files, current) = verify.snapshot();
+    status.verify_bytes_done = bytes.min(status.verify_bytes_total);
+    status.message = format!("Verifying files {files}/{verify_files} · {current}");
     report(progress, status);
-    let verify = Arc::new(VerifyProgress::default());
+    // Files checked during the download are not hashed again.
+    let verified = poll_verify(early.finish(), &verify, verify_files, progress, status).await?;
     let (s, l, token, v) = (
         Arc::clone(&session),
         Arc::clone(&layout),
@@ -980,24 +1085,12 @@ async fn run_inner(
     );
     // Whole-file hashing runs on worker threads; poll its counters so the UI
     // sees steady progress.
-    let job = tokio::task::spawn_blocking(move || s.finish_stage(&l, &token, &v));
-    tokio::pin!(job);
-    let mut tick = tokio::time::interval(VERIFY_REPORT_INTERVAL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            joined = &mut job => {
-                joined.map_err(|e| failure(format!("Installer filesystem worker failed: {e}")))??;
-                break;
-            }
-            _ = tick.tick() => {
-                let (bytes, files, current) = verify.snapshot();
-                status.verify_bytes_done = bytes.min(status.verify_bytes_total);
-                status.message = format!("Verifying files {files}/{verify_files} · {current}");
-                report(progress, status);
-            }
-        }
-    }
+    let job = async move {
+        tokio::task::spawn_blocking(move || s.finish_stage(&l, &token, &v, &verified))
+            .await
+            .map_err(|e| failure(format!("Installer filesystem worker failed: {e}")))?
+    };
+    poll_verify(job, &verify, verify_files, progress, status).await?;
     status.verify_bytes_done = status.verify_bytes_total;
     check_cancel(cancel)?;
     status.phase = InstallPhase::Committing;
@@ -1046,6 +1139,30 @@ async fn run_inner(
     }
     report(progress, status);
     Ok(game)
+}
+
+/// Drives `job` to completion while publishing the verification counters.
+async fn poll_verify<T>(
+    job: impl Future<Output = Result<T>>,
+    verify: &VerifyProgress,
+    verify_files: u64,
+    progress: &mpsc::Sender<InstallProgress>,
+    status: &mut InstallProgress,
+) -> Result<T> {
+    tokio::pin!(job);
+    let mut tick = tokio::time::interval(VERIFY_REPORT_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            result = &mut job => return result,
+            _ = tick.tick() => {
+                let (bytes, files, current) = verify.snapshot();
+                status.verify_bytes_done = bytes.min(status.verify_bytes_total);
+                status.message = format!("Verifying files {files}/{verify_files} · {current}");
+                report(progress, status);
+            }
+        }
+    }
 }
 
 fn hash_bytes(bytes: &[u8]) -> [u8; 20] {

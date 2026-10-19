@@ -8,7 +8,7 @@ use crate::content::{DepotChunk, DepotFile};
 use crate::installed::{InstalledGame, Node, read_vdf};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -718,7 +718,8 @@ impl Session {
     }
 
     /// Hashes the complete staged file against the manifest SHA1, then applies the
-    /// final permissions and fsyncs it.
+    /// final permissions. Durability is one barrier in `finish_stage`, not an
+    /// fsync per file.
     pub(super) fn verify_file(
         &self,
         file: &DepotFile,
@@ -753,27 +754,29 @@ impl Session {
             mode
         };
         fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
-        fsafe::regular(&path, false, false)?.sync_all()?;
         progress.finish_file();
         Ok(())
     }
 
     /// Verifies every staged regular file in parallel, then creates symlinks.
     /// Each worker hashes whole files end to end against the manifest SHA1 (the
-    /// authoritative check; nothing unverified is ever committed), applies the
-    /// final permissions and fsyncs that file. The first error stops the others
-    /// and cancellation is honored at every buffer.
+    /// authoritative check; nothing unverified is ever committed) and applies
+    /// the final permissions. Files in `verified` were already checked while the
+    /// download was still running. The first error stops the others and
+    /// cancellation is honored at every buffer. A single filesystem barrier then
+    /// makes the whole stage durable.
     pub(super) fn finish_stage(
         &self,
         layout: &Layout,
         cancel: &CancellationToken,
         progress: &VerifyProgress,
+        verified: &HashSet<PathBuf>,
     ) -> Result<()> {
         // Largest first keeps the workers balanced when a few files dominate.
         let mut regular: Vec<&DepotFile> = layout
             .active_files()
             .map(|planned| &planned.file)
-            .filter(|file| file.flags & (64 | 512) == 0)
+            .filter(|file| file.flags & (64 | 512) == 0 && !verified.contains(&file.path))
             .collect();
         regular.sort_by_key(|file| std::cmp::Reverse(file.size));
         parallel(regular.len(), |index| {
@@ -816,6 +819,7 @@ impl Session {
                 )?;
             }
         }
+        fsafe::sync_filesystem(&self.stage)?;
         let manifest = self.build_manifest(layout)?;
         fsafe::atomic_write(
             &self.stage.join("metadata/appmanifest.acf"),
