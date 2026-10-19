@@ -1161,6 +1161,17 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                             match action {
                                 Action::Quit => break,
                                 Action::SkipShaders(app) => { if steam_core::shaders::skip(app) { model.status = "Skipping shader processing; continuing launch…".into(); } },
+                                Action::PrecacheShaders(app) => {
+                                    model.status = match (&queue, model.selected_game().and_then(|g| g.installed.clone())) {
+                                        (None, _) => "Persistent queue unavailable for this account".into(),
+                                        (Some(queue), _) if !queue.settings().is_ok_and(|s| s.shaders_enabled) => "Shader pre-caching is disabled (steam-tui shaders enabled on)".into(),
+                                        (Some(queue), Some(game)) if game.app_id == app => match queue.enqueue(steam_core::updates::Intent::shader(&game), true) {
+                                            Ok(_) => format!("Queued Vulkan shader pre-cache [{app}]; press J to follow it"),
+                                            Err(error) => format!("Cannot queue shader pre-cache [{app}]: {error}"),
+                                        },
+                                        _ => "Install the game before pre-caching its shaders".into(),
+                                    };
+                                }
                                 Action::None => {},
                                 Action::ResolveCloud => {
                                     if let (Some(modal), Some(connection), Some(account)) = (&model.cloud_conflicts, connection.clone(), account.clone()) {
@@ -1496,7 +1507,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                             trace("catalog_live");
                             if let Some(queue) = &queue {
                                 for row in &catalog.items {
-                                    if let Some(game) = &row.installed && queue.settings().is_ok_and(|s| s.shaders_enabled) && steam_core::shaders::due(queue, game.app_id).unwrap_or(false)
+                                    if let Some(game) = &row.installed && queue.settings().is_ok_and(|s| s.shaders_enabled) && steam_core::shaders::state(queue, game.app_id).is_ok_and(|s| s.manifest != 0) && steam_core::shaders::due(queue, game.app_id).unwrap_or(false)
                                         && let Err(error) = queue.enqueue(steam_core::updates::Intent::shader(game), false) { model.warnings.push(format!("Cannot queue shaders [{}]: {error}", game.app_id)); }
                                     if matches!(row.update, steam_core::catalog::UpdateStatus::Available { .. }) && let Some(game) = &row.installed
                                         && let Err(error) = row.plan.as_ref().map_or_else(|| Ok(steam_core::updates::Intent::installed(game)), |plan| steam_core::updates::Intent::catalog(game, plan)).and_then(|intent| queue.enqueue(intent, false))

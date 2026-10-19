@@ -10,7 +10,7 @@ Early state: some games won't work without original steam client.
 - Install and update games (native and Proton), with a persistent queue, pause/resume, priorities and download windows.
 - Check for updates before launch, with an explicit option to launch the installed version.
 - Select branches, languages and optional DLC; protected branch keys stay in the keyring.
-- Download verified Vulkan shader pre-caches and process them before launch, with progress and skip.
+- Optional Vulkan shader pre-caches, requested per game with `Z`, processed before launch with progress and skip.
 - Missing Proton and runtime dependencies install automatically before launch.
 - Shared redistributables install per library; verified Windows prerequisites run in the Proton prefix and supported Linux setup actions run in the game tree.
 - DLC enumeration, ownership, installed state, downloads, and optional removal through the game's Steamworks APIs.
@@ -53,6 +53,7 @@ Press `?` in the app for the full list.
 | Shift+Enter / L | Explicitly launch the installed version |
 | J | Persistent content/shader queue |
 | P | Branch, language and DLC properties |
+| Z | Download a shader pre-cache for the selected game (opt-in) |
 | S while launching | Skip shader processing and continue launch |
 | Ctrl+Enter | Launch through Valve's Steam client |
 | i / u | Install / update |
@@ -80,13 +81,13 @@ steam-tui updates policy APPID automatic  # or launch-only / manual
 steam-tui updates window 23:00 06:00
 steam-tui content show APPID
 steam-tui content unlock APPID BRANCH    # hidden password prompt; remembers returned key
-steam-tui shaders add APPID              # queue a download; then jobs run
+steam-tui shaders add APPID              # opt in: queue a download (TUI: Z); then jobs run
 steam-tui shaders show APPID
 steam-tui shaders enabled off            # disables downloads and processing
 steam-tui shaders clear APPID            # reclaim this game's generated cache
 ```
 
-Vulkan FOZ v6 archives have their own freshness checks and verified staging. Compilation uses two threads, low CPU priority and a 2 GiB address-space limit per helper process. Failed/skipped processing never marks a context complete and never prevents launching the game. TUI `S` skips; CLI launch/process uses Ctrl+C to skip this optional stage. Shader archives have an 8 GiB account budget including staging, adjustable with `shaders budget MIB`; old generations and unused replay contexts are pruned. The budget excludes driver-created cache data. State and caches live under `$XDG_STATE_HOME/steam-tui/updates-ACCOUNT` (`~/.local/state` by default).
+Shader pre-caching is opt-in per game: nothing is downloaded until you press `Z` (or run `shaders add APPID`); only games with a downloaded cache are refreshed afterwards. Vulkan FOZ v6 archives have their own freshness checks and verified staging. Compilation uses two threads, low CPU priority and a 2 GiB address-space limit per helper process. Failed/skipped processing never marks a context complete and never prevents launching the game. TUI `S` skips; CLI launch/process uses Ctrl+C to skip this optional stage. Shader archives have an 8 GiB account budget including staging, adjustable with `shaders budget MIB`; old generations and unused replay contexts are pruned. The budget excludes driver-created cache data. State and caches live under `$XDG_STATE_HOME/steam-tui/updates-ACCOUNT` (`~/.local/state` by default).
 
 See [the update audit](docs/steam-update-gap-audit.md) for evidence, supported formats and validation limits.
 
