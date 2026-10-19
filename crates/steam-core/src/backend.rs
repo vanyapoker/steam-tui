@@ -27,6 +27,7 @@ use steam_ipc::{MAX_FRAME, Operation, Reply, Request, Response, UgcOp, VERSION};
 use steam_vent::{Connection, ConnectionTrait};
 use steam_vent_proto_steam::steammessages_clientserver::{
     CMsgClientGetAppOwnershipTicket, CMsgClientGetAppOwnershipTicketResponse,
+    CMsgClientRequestEncryptedAppTicket, CMsgClientRequestEncryptedAppTicketResponse,
 };
 use steam_vent_proto_steam::steammessages_clientserver_login::CMsgClientLoggedOff;
 use steam_vent_proto_steam::steammessages_player_steamclient::CPlayer_GetPlayerLinkDetails_Request;
@@ -335,6 +336,67 @@ impl Session<'_> {
         events::emit(&self.events, self.app_id, direction, channel, title, detail);
     }
 
+    /// Asks the CM for an encrypted app ticket of the running app (returned as the serialized `EncryptedAppTicket`). Only the CM's
+    /// own answer is relayed: a refusal keeps its `EResult` and carries no ticket.
+    async fn encrypted_app_ticket(&self, user_data: Vec<u8>) -> Response {
+        const E_FAIL: i32 = 2;
+        const E_TIMEOUT: i32 = 16;
+        if user_data.len() > steam_ipc::ENCRYPTED_TICKET_USER_DATA_MAX {
+            return Response::Error {
+                message: "Encrypted ticket user data is too large".into(),
+            };
+        }
+        let request = CMsgClientRequestEncryptedAppTicket {
+            app_id: Some(self.app_id),
+            userdata: Some(user_data),
+            ..Default::default()
+        };
+        let reply = timeout(
+            Duration::from_secs(10),
+            self.connection
+                .job::<_, CMsgClientRequestEncryptedAppTicketResponse>(request),
+        )
+        .await;
+        let reply = match reply {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => {
+                return Response::EncryptedAppTicket {
+                    result: E_FAIL,
+                    ticket: Vec::new(),
+                };
+            }
+            Err(_) => {
+                return Response::EncryptedAppTicket {
+                    result: E_TIMEOUT,
+                    ticket: Vec::new(),
+                };
+            }
+        };
+        if reply.app_id() != self.app_id {
+            return Response::Error {
+                message: "CM answered the encrypted ticket request for another app".into(),
+            };
+        }
+        let result = reply.eresult();
+        // Valve's client keeps the whole EncryptedAppTicket message and serializes
+        // it for the game; the game's server library parses that wire form.
+        let ticket = reply
+            .encrypted_app_ticket
+            .as_ref()
+            .and_then(|t| protobuf::Message::write_to_bytes(t).ok())
+            .unwrap_or_default();
+        if result == 1 && (ticket.is_empty() || ticket.len() > steam_ipc::ENCRYPTED_TICKET_MAX) {
+            return Response::EncryptedAppTicket {
+                result: E_FAIL,
+                ticket: Vec::new(),
+            };
+        }
+        Response::EncryptedAppTicket {
+            result,
+            ticket: if result == 1 { ticket } else { Vec::new() },
+        }
+    }
+
     /// Whether the CM session answers. Probed at most every two seconds, and only
     /// by operations that need the account connection.
     async fn alive(&self) -> bool {
@@ -388,6 +450,7 @@ impl Session<'_> {
             | Operation::Persona
             | Operation::AuthSessionTicket { .. }
             | Operation::WebAuthTicket { .. }
+            | Operation::EncryptedAppTicket { .. }
             | Operation::CancelAuthTicket { .. }
             | Operation::GcSend { .. }
             | Operation::Lobby(_)
@@ -489,6 +552,21 @@ impl Session<'_> {
                         message: message.into(),
                     },
                 }
+            }
+            Operation::EncryptedAppTicket { user_data } => {
+                let response = self.encrypted_app_ticket(user_data).await;
+                if let Response::EncryptedAppTicket { result, ticket } = &response {
+                    self.note(
+                        Direction::ToSteam,
+                        "CM",
+                        "ClientRequestEncryptedAppTicket",
+                        &format!(
+                            "result {result}, {} byte ticket (bytes hidden)",
+                            ticket.len()
+                        ),
+                    );
+                }
+                response
             }
             Operation::GcSend { msg_type, payload } => {
                 let Some(payload) = steam_ipc::hex_decode(&payload) else {

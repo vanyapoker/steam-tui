@@ -116,11 +116,12 @@ Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK h
 - Online matchmaking and relay networking are unfinished.
 - In-game DLC changes preserve the parent build; a parent update or ambiguous metadata requires closing/updating the game. Removal retains modified files and user configuration. Windows setup scripts run at the next launch. `SetDlcContext` usage reporting is unavailable.
 - Shader download/replay currently covers Vulkan FOZ v6. Legacy GPU-specific binary caches, media transcode caches, and capture/upload are not implemented. Real-driver replay performance has not been measured.
+- Controllers: Steam Input is not implemented, so there is no virtual gamepad or remapping and `SteamInput`/`SteamController` report no devices. Games see the physical pad through Wine's own XInput, which can fail: Path of Exile 2 disconnected itself over its controller right after entering the game.
 - Linux only.
 
 ## Not implemented yet
 
-Chat, game invites, publishing Workshop items, store and community pages, trading.
+Steam Input (virtual gamepad, remapping), chat, game invites, publishing Workshop items, store and community pages, trading.
 
 ## License
 

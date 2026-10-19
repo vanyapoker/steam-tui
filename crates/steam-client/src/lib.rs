@@ -26,6 +26,7 @@ mod client;
 mod compat;
 mod controller;
 mod crash;
+mod encrypted_ticket;
 mod friends;
 mod gc;
 mod htmlsurface;

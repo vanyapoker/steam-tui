@@ -63,23 +63,6 @@ unsafe extern "C" fn slot_18() -> bool {
 unsafe extern "C" fn slot_19() {
     trace("user.AdvertiseGame");
 }
-unsafe extern "C" fn slot_20() -> u64 {
-    trace("user.RequestEncryptedAppTicket = invalid call (not supported)");
-    0
-}
-unsafe extern "C" fn slot_21(
-    _this: *mut c_void,
-    _ticket: *mut u8,
-    _max: i32,
-    size: *mut u32,
-) -> bool {
-    trace("user.GetEncryptedAppTicket = false");
-    if !size.is_null() {
-        // SAFETY: caller-supplied out-pointer.
-        unsafe { size.write(0) };
-    }
-    false
-}
 unsafe extern "C" fn slot_22() -> i32 {
     trace("user.GetGameBadgeLevel = 0 (unknown)");
     0
@@ -122,38 +105,38 @@ unsafe extern "C" fn slot_31() -> bool {
 }
 
 pub(super) static TABLE: VTable<32> = VTable([
-    get_user as *const (),     // 0: GetHSteamUser
-    logged_on as *const (),    // 1: BLoggedOn
-    steam_id as *const (),     // 2: GetSteamID
-    slot_3 as *const (),       // 3: InitiateGameConnection_DEPRECATED
-    slot_4 as *const (),       // 4: TerminateGameConnection_DEPRECATED
-    slot_5 as *const (),       // 5: TrackAppUsageEvent
-    slot_6 as *const (),       // 6: GetUserDataFolder
-    slot_7 as *const (),       // 7: StartVoiceRecording
-    slot_8 as *const (),       // 8: StopVoiceRecording
-    slot_9 as *const (),       // 9: GetAvailableVoice
-    slot_10 as *const (),      // 10: GetVoice
-    slot_11 as *const (),      // 11: DecompressVoice
-    slot_12 as *const (),      // 12: GetVoiceOptimalSampleRate
-    auth::ticket as *const (), // 13: GetAuthSessionTicket
-    slot_14 as *const (),      // 14: BeginAuthSession
-    slot_15 as *const (),      // 15: EndAuthSession
-    auth::cancel as *const (), // 16: CancelAuthTicket
-    slot_17 as *const (),      // 17: UserHasLicenseForApp
-    slot_18 as *const (),      // 18: BIsBehindNAT
-    slot_19 as *const (),      // 19: AdvertiseGame
-    slot_20 as *const (),      // 20: RequestEncryptedAppTicket
-    slot_21 as *const (),      // 21: GetEncryptedAppTicket
-    slot_22 as *const (),      // 22: GetGameBadgeLevel
-    slot_23 as *const (),      // 23: GetPlayerSteamLevel
-    slot_24 as *const (),      // 24: RequestStoreAuthURL
-    slot_25 as *const (),      // 25: BIsPhoneVerified
-    slot_26 as *const (),      // 26: BIsTwoFactorEnabled
-    slot_27 as *const (),      // 27: BIsPhoneIdentifying
-    slot_28 as *const (),      // 28: BIsPhoneRequiringVerification
-    slot_29 as *const (),      // 29: GetMarketEligibility
-    slot_30 as *const (),      // 30: GetDurationControl
-    slot_31 as *const (),      // 31: BSetDurationControlOnlineState
+    get_user as *const (),                  // 0: GetHSteamUser
+    logged_on as *const (),                 // 1: BLoggedOn
+    steam_id as *const (),                  // 2: GetSteamID
+    slot_3 as *const (),                    // 3: InitiateGameConnection_DEPRECATED
+    slot_4 as *const (),                    // 4: TerminateGameConnection_DEPRECATED
+    slot_5 as *const (),                    // 5: TrackAppUsageEvent
+    slot_6 as *const (),                    // 6: GetUserDataFolder
+    slot_7 as *const (),                    // 7: StartVoiceRecording
+    slot_8 as *const (),                    // 8: StopVoiceRecording
+    slot_9 as *const (),                    // 9: GetAvailableVoice
+    slot_10 as *const (),                   // 10: GetVoice
+    slot_11 as *const (),                   // 11: DecompressVoice
+    slot_12 as *const (),                   // 12: GetVoiceOptimalSampleRate
+    auth::ticket as *const (),              // 13: GetAuthSessionTicket
+    slot_14 as *const (),                   // 14: BeginAuthSession
+    slot_15 as *const (),                   // 15: EndAuthSession
+    auth::cancel as *const (),              // 16: CancelAuthTicket
+    slot_17 as *const (),                   // 17: UserHasLicenseForApp
+    slot_18 as *const (),                   // 18: BIsBehindNAT
+    slot_19 as *const (),                   // 19: AdvertiseGame
+    encrypted_ticket::request as *const (), // 20: RequestEncryptedAppTicket
+    encrypted_ticket::get as *const (),     // 21: GetEncryptedAppTicket
+    slot_22 as *const (),                   // 22: GetGameBadgeLevel
+    slot_23 as *const (),                   // 23: GetPlayerSteamLevel
+    slot_24 as *const (),                   // 24: RequestStoreAuthURL
+    slot_25 as *const (),                   // 25: BIsPhoneVerified
+    slot_26 as *const (),                   // 26: BIsTwoFactorEnabled
+    slot_27 as *const (),                   // 27: BIsPhoneIdentifying
+    slot_28 as *const (),                   // 28: BIsPhoneRequiringVerification
+    slot_29 as *const (),                   // 29: GetMarketEligibility
+    slot_30 as *const (),                   // 30: GetDurationControl
+    slot_31 as *const (),                   // 31: BSetDurationControlOnlineState
 ]);
 pub(super) static OBJECT: Object = Object {
     table: TABLE.0.as_ptr(),

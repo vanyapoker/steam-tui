@@ -138,14 +138,23 @@ unsafe extern "C" fn slot_18() -> bool {
 unsafe extern "C" fn slot_19() -> ! {
     unsupported("utils.CheckFileSignature")
 }
-unsafe extern "C" fn slot_20() -> ! {
-    unsupported("utils.ShowGamepadTextInput")
+// There is no overlay to host the Big Picture keyboard; `false` is Steam's own
+// answer when it cannot show it, and games then use their built-in text entry.
+unsafe extern "C" fn slot_20() -> bool {
+    trace("utils.ShowGamepadTextInput = false (no overlay)");
+    false
 }
-unsafe extern "C" fn slot_21() -> ! {
-    unsupported("utils.GetEnteredGamepadTextLength")
+unsafe extern "C" fn slot_21() -> u32 {
+    trace("utils.GetEnteredGamepadTextLength = 0");
+    0
 }
-unsafe extern "C" fn slot_22() -> ! {
-    unsupported("utils.GetEnteredGamepadTextInput")
+unsafe extern "C" fn slot_22(_this: *mut c_void, text: *mut c_char, capacity: u32) -> bool {
+    trace("utils.GetEnteredGamepadTextInput = false");
+    if !text.is_null() && capacity > 0 {
+        // SAFETY: the caller supplied `capacity` writable bytes at `text`.
+        unsafe { text.write(0) };
+    }
+    false
 }
 unsafe extern "C" fn slot_23() -> *const c_char {
     trace("utils.GetSteamUILanguage");
@@ -219,14 +228,16 @@ unsafe extern "C" fn slot_34() -> bool {
     trace("utils.IsSteamRunningOnSteamDeck");
     false
 }
-unsafe extern "C" fn slot_35() -> ! {
-    unsupported("utils.ShowFloatingGamepadTextInput")
+unsafe extern "C" fn slot_35() -> bool {
+    trace("utils.ShowFloatingGamepadTextInput = false (no overlay)");
+    false
 }
 unsafe extern "C" fn slot_36() {
     trace("utils.SetGameLauncherMode");
 }
-unsafe extern "C" fn slot_37() -> ! {
-    unsupported("utils.DismissFloatingGamepadTextInput")
+unsafe extern "C" fn slot_37() -> bool {
+    trace("utils.DismissFloatingGamepadTextInput = false");
+    false
 }
 
 unsafe extern "C" fn slot_38() -> bool {

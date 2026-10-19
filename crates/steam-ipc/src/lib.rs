@@ -5,6 +5,10 @@ pub mod schema;
 pub mod storage;
 
 pub const VERSION: u32 = 1;
+/// Largest user payload the Steamworks API accepts for an encrypted app ticket.
+pub const ENCRYPTED_TICKET_USER_DATA_MAX: usize = 128;
+/// Largest encrypted ticket the backend hands to a game.
+pub const ENCRYPTED_TICKET_MAX: usize = 16 * 1024;
 /// Large enough for a Game Coordinator message (e.g. a full item cache) in hex.
 pub const MAX_FRAME: usize = 8 * 1024 * 1024;
 
@@ -47,6 +51,12 @@ pub enum Operation {
     },
     CancelAuthTicket {
         handle: u32,
+    },
+    /// `RequestEncryptedAppTicket`: the CM encrypts `user_data` (at most
+    /// `ENCRYPTED_TICKET_USER_DATA_MAX` bytes) together with the app ownership
+    /// ticket for the game's own developer to decrypt.
+    EncryptedAppTicket {
+        user_data: Vec<u8>,
     },
     /// Forward one Game Coordinator message (`payload` is hex) to the app's GC.
     GcSend {
@@ -484,6 +494,11 @@ pub enum Response {
     AuthTicketPending {
         handle: u32,
     },
+    /// The CM's verdict (an `EResult`) and, on success, the encrypted ticket.
+    EncryptedAppTicket {
+        result: i32,
+        ticket: Vec<u8>,
+    },
     Cancelled,
     Country {
         code: String,
@@ -699,6 +714,39 @@ mod tests {
         assert!(
             matches!(decoded.operation, Operation::WebAuthTicket { identity } if identity == b"service")
         );
+    }
+
+    #[test]
+    fn encrypted_ticket_messages_round_trip() {
+        let request = Request {
+            version: VERSION,
+            app_id: 2694490,
+            operation: Operation::EncryptedAppTicket {
+                user_data: vec![1, 2, 3],
+            },
+        };
+        let mut encoded = Vec::new();
+        write_frame(&mut encoded, &request).unwrap();
+        let decoded: Request = read_frame(&mut encoded.as_slice()).unwrap();
+        assert!(matches!(
+            decoded.operation,
+            Operation::EncryptedAppTicket { user_data } if user_data == [1, 2, 3]
+        ));
+        let reply = Reply {
+            version: VERSION,
+            app_id: 2694490,
+            response: Response::EncryptedAppTicket {
+                result: 1,
+                ticket: vec![9; 4],
+            },
+        };
+        let mut encoded = Vec::new();
+        write_frame(&mut encoded, &reply).unwrap();
+        let decoded: Reply = read_frame(&mut encoded.as_slice()).unwrap();
+        assert!(matches!(
+            decoded.response,
+            Response::EncryptedAppTicket { result: 1, ticket } if ticket == [9; 4]
+        ));
     }
 
     #[test]
