@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 - 2026-10-19
 
 ### Added
 - **Launch options:** apps that offer selectable launch entries (e.g. Moonlighter 2's DirectX 11 / DirectX 12) can be switched with `O` in the library or `steam-tui content launch-option APPID [INDEX|default]`. The choice is remembered per game.
