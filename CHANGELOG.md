@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.3.4 - 2026-10-19
+
+### Added
+- **Virtual gamepad.** Games on the built-in backend now see one stable virtual Xbox 360 pad (USB id 28de:11ff, `Microsoft X-Box 360 pad 0`, like Valve's Steam Input) instead of the raw controller, which is hidden from Wine/SDL with `SDL_GAMECONTROLLER_IGNORE_DEVICES`. Input is forwarded unchanged (no remapping), rumble is forwarded back, and the virtual pad stays alive, at rest, when a Bluetooth pad drops out and is re-attached when it returns. Supports Xbox-compatible pads (xpad layout and the Bluetooth HID layout), DualSense and DualShock 4; needs write access to `/dev/uinput`, otherwise nothing changes. `STEAM_TUI_NO_VIRTUAL_GAMEPAD=1` disables it.
+- **Steam Input device presence.** With a virtual gamepad, `ISteamInput` and `ISteamController` report one connected device (real type: Xbox 360/One, PS4, PS5) in gamepad slot 0, with the device-connected and gamepad-slot callbacks; `ISteamInput::Init` succeeds only in that case. Action data and motion data are inactive (the calls used to abort the game). `SteamInput001`/`002` now also serve `Init` and `RunFrame`. `STEAM_TUI_NO_GAMEPAD_PRESENCE=1` turns the presence reporting off.
+
+### Known issues
+- DualSense and DualShock 4 support follows the Linux drivers' axis layouts but has not been tried on real hardware. Touchpad, gyro and lightbar are not forwarded.
+- Games that rely on Steam Input actions (rather than XInput/SDL) see a connected device but get no input from it; set `STEAM_TUI_NO_GAMEPAD_PRESENCE=1` if one misbehaves. Action sets and remapping are not implemented.
+
 ## 0.3.3 - 2026-10-19
 
 ### Fixed
