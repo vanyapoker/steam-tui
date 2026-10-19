@@ -5,6 +5,11 @@
 ### Added
 - **Launch options:** apps that offer selectable launch entries (e.g. Moonlighter 2's DirectX 11 / DirectX 12) can be switched with `O` in the library or `steam-tui content launch-option APPID [INDEX|default]`. The choice is remembered per game.
 
+### Fixed (stutter)
+- The Steam backend served one request at a time, so a slow stats or ownership call stalled the game's per-frame polls (seconds per ten-second window in Moonlighter 2). Requests are now served concurrently with a lock per service, and queue-only polls no longer wait on the connection probe.
+- P2P signaling no longer makes a blocking backend round trip from the game thread every ten milliseconds; a background thread does it.
+- The game log now reports every ten seconds which backend calls blocked the caller, when it is long enough to be felt.
+
 ### Fixed (Proton media)
 - Proton games now get Valve's per-app transcoded video and audio databases (`transcoded_video.foz`, `transcoded_audio.foz`), downloaded and verified at launch into `steamapps/shadercache/<app>/fozmediav1` and passed to Proton through `STEAM_COMPAT_TRANSCODED_MEDIA_PATH`. Without them Proton cannot decode a game's videos, which showed up as lag in Moonlighter 2.
 
