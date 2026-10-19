@@ -14,6 +14,7 @@ use steam_core::install::{InstallPhase, InstallProgress};
 use steam_core::notifications::{CountKind, Notification};
 use unicode_width::UnicodeWidthStr;
 
+use super::keys::{self, Cmd};
 use super::model::{CloudIcon, Focus, Model, Sort};
 use super::theme::{
     self, PROTON_NOTE, Panel, PlatformMarker, Severity, accent, bold, dim, heading, highlight,
@@ -22,8 +23,6 @@ use super::theme::{
 
 /// One styled run of text; lines are built from these and truncated by display width.
 type Seg = (String, Style);
-
-const HELP: &str = "LIBRARY\nUp / Down     Select game (any focus)\nLMB           Select the clicked game; double-click launches; wheel moves selection\nn / RMB       Game changelog / developer updates (Esc closes)\na             Achievements of the selected game: unlocked state and date, rarity; s / S sort (status, name, rarity, date) and reverse, f filter all / unlocked / locked, r reload\nHome / End    First / last game\nEnter         Installed: launch (VAC: Valve host; others: built-in); not installed: choose destination\nShift+Enter / L  Explicitly launch installed version without updating\nCtrl+Enter    Launch installed game using Valve host (enhanced keyboard terminal)\ni / u         Install selected game / update installed game\nJ             Persistent update queue (p pause, r retry, c cancel, +/- priority, a policy)\nP             Content properties: branch, language, DLC\nO             Cycle the selected game’s launch option (e.g. DirectX 11 / 12); the choice is remembered and shown in the status bar\nZ             Download a Vulkan shader pre-cache for the selected game (off unless requested; refreshed hourly afterwards, processed before launch)\nS             Skip selected game’s shader processing while launching\nv             Cycle All / Installed / Not installed\n1 / 2 / 3 / 4 Sort by the column headings Name¹ Size² Last³ Played⁴\ns / S         Cycle sort / reverse direction (unknowns last; shown as sort: in the title)\n/             Filter library names in the table; type to filter\nf             Pin / unpin the selected game at the top (★)\n              Sort, filter, pins and offline-friends toggle are remembered\nEsc           Clear filter; Enter finishes filter editing\nC             Steam Cloud sync of the selected installed game: download newer saves, then upload local changes (blocked while it runs)\n              Launching always downloads cloud saves first (never uploads); conflicts keep the local file, backups go to ~/.local/state/steam-tui/cloud/backup\n              Conflict picker: l local / r cloud; Enter confirms this file; Esc keeps both\nb             Backend traffic: exactly what the built-in Steam backend sends to / receives from Steam (message ids, names, sizes, hex head, protobuf fields); x clears\nINSTALL DESTINATION\nUp / Down     Select library (available space shown)\nn             Enter custom library path (new installs only)\nEnter         Confirm destination / check custom path\nEsc           Cancel modal / stop editing custom path\nINSTALL PROGRESS\np             Pause / resume the download; the job stays alive, no new destination step\nc             Cancel safely (also while paused); retained staging resumes next install\n              Install panel: phase, bar, verified and downloaded bytes,\n              download speed, ETA and elapsed time (paused time excluded)\n              The game's State column shows download / verify / install and the percent, or paused and the percent\n              One install/update job at a time; no Steam required\nFRIENDS\nPgUp / PgDn   Page friends (the notification feed when it has focus)\no             Show / hide offline friends\nNOTIFICATIONS\nTab           Focus the feed (Library → Friends → Notifications)\nj / k         Scroll the focused feed; PgUp / PgDn page it\nx             Clear the feed (the count badges are Steam's and stay)\n              Live: new items appear on top, ● marks those not yet seen\n              Badges show pending trade offers, messages, items, gifts, invites\n              Only pushes received while running are listed; history cannot be fetched\nNAVIGATION\nTab           Switch focused pane (Shift-Tab goes back)\nj / k         Move within focused pane\nr             Refresh library/update metadata and friend presence\n? / F1        Toggle this help\nq / Ctrl-C    Quit; safely wait for installer (q is filter/path text while typing)\nHELP\nUp / Down     Scroll this help on small terminals\nEsc / ? / F1  Close help\nMARKERS\nOrange names  Automatic Valve host: TF2, Dota 2, CS2, Deadlock\n⊞             Proton: Windows build run through Proton (needs Proton + prefix for direct launch)\nλ             Native Linux build\n(blank)       Platform not known yet\n↻             Library title: live owned library is still refreshing (rows are local or cached)\n☁             Steam Cloud column (installed games with cloud saves): dim ☁ never synced · green ☁ synced · cyan ↑ local saves not uploaded (press C) · yellow ◐◓◑◒ syncing · red ✗ last sync failed or had conflicts\nState         new (not installed) · installed · update · blocked (reason in the status bar)\nNOTES\nDates are UTC (feed times are local); ? means metadata is unavailable.\nBlocked games show their reason in the status bar when selected.\nUpdate status: update available, installed (current or unknown), or blocked.\nDirect launch cannot bypass DRM or guarantee Steam-free compatibility.\nUpdates stay in their existing library; close Steam before installing.\nOnly depot-verified Windows install scripts run, inside the game's Proton prefix; unsupported setup directives block launch.\nFriends login uses saved credentials; run `steam-tui login` to sign in.";
 
 fn safe(value: &str) -> String {
     super::super::terminal_text(value).into_owned()
@@ -88,20 +87,42 @@ fn fit_line(segments: Vec<Seg>, width: usize) -> Line<'static> {
 }
 
 /// Key caps in bold cyan, descriptions dim; whole pairs are dropped rather than cut.
-fn hotkey_line(pairs: &[(&str, &str)], width: usize) -> Line<'static> {
-    let mut output = Vec::new();
-    let mut used = 0;
-    for (index, (key, description)) in pairs.iter().enumerate() {
+/// The first pair and the last `keep_tail` pairs (help and quit) are dropped
+/// last: the pairs between them go first, from the right.
+fn hotkey_line(pairs: &[(String, String)], keep_tail: usize, width: usize) -> Line<'static> {
+    let cost = |index: usize, (key, description): &(String, String)| {
         let gap = if index == 0 { 0 } else { 2 };
-        let needed = gap + UnicodeWidthStr::width(*key) + 1 + UnicodeWidthStr::width(*description);
-        if used + needed > width {
-            break;
+        gap + UnicodeWidthStr::width(key.as_str())
+            + 1
+            + UnicodeWidthStr::width(description.as_str())
+    };
+    let mut kept: Vec<usize> = (0..pairs.len()).collect();
+    let total = |kept: &[usize]| -> usize {
+        kept.iter()
+            .enumerate()
+            .map(|(position, &index)| cost(position, &pairs[index]))
+            .sum()
+    };
+    let tail_start = pairs.len().saturating_sub(keep_tail).max(1);
+    while total(&kept) > width {
+        let middle = kept
+            .iter()
+            .rposition(|&index| index >= 1 && index < tail_start);
+        let drop = middle.or_else(|| kept.len().checked_sub(1));
+        match drop {
+            Some(position) if !kept.is_empty() => {
+                kept.remove(position);
+            }
+            _ => break,
         }
-        used += needed;
-        if gap > 0 {
+    }
+    let mut output = Vec::new();
+    for (position, &index) in kept.iter().enumerate() {
+        let (key, description) = &pairs[index];
+        if position > 0 {
             output.push(Span::raw("  "));
         }
-        output.push(Span::styled((*key).to_owned(), key_cap()));
+        output.push(Span::styled(key.clone(), key_cap()));
         output.push(Span::styled(format!(" {description}"), dim()));
     }
     Line::from(output)
@@ -606,27 +627,22 @@ pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
 }
 
 fn draw_status(frame: &mut Frame<'_>, model: &Model, area: Rect, summary: bool, now: Instant) {
-    let keys: &[(&str, &str)] = if model
+    let host_game = model
         .selected_game()
-        .is_some_and(|game| steam_core::launch::requires_valve_host(game.app_id))
-    {
-        &[
-            ("Enter / 2×LMB", "Valve host"),
-            ("b", "backend"),
-            ("?", "help"),
-            ("q", "quit"),
-        ]
+        .is_some_and(|game| steam_core::launch::requires_valve_host(game.app_id));
+    let enter = keys::label(Cmd::Activate);
+    let mut pairs = vec![if host_game {
+        (enter, "launch (Valve host)".to_owned())
     } else {
-        &[
-            ("Enter", "built-in"),
-            ("Ctrl+Enter", "Valve host"),
-            ("b", "backend"),
-            ("?", "help"),
-            ("q", "quit"),
-        ]
-    };
-    // Keep room for the account, presence and status on the left.
-    let right = hotkey_line(keys, (area.width as usize).saturating_sub(34));
+        (enter, "launch".to_owned())
+    }];
+    if !host_game {
+        pairs.push((keys::label(Cmd::ValveHost), "Valve host".to_owned()));
+    }
+    pairs.push((keys::label(Cmd::Backend), "backend".to_owned()));
+    pairs.push((keys::label(Cmd::Help), "help".to_owned()));
+    pairs.push((keys::label(Cmd::Quit), "quit".to_owned()));
+    let right = hotkey_line(&pairs, 2, (area.width as usize).saturating_sub(34));
     let right_width = right.width() as u16;
     let columns =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width + 1)]).split(area);
@@ -872,30 +888,43 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
     let installed_selected = model
         .selected_game()
         .is_some_and(|game| game.installed.is_some());
-    let mut bottom = vec![
-        hint("↑↓", "select"),
-        hint("n", "news"),
-        hint("a", "achievements"),
-        hint(
-            "↵",
-            if installed_selected {
-                "launch"
-            } else {
-                "install"
-            },
-        ),
-        hint("i", "install"),
-        hint("u", "update"),
-    ];
-    if installed_selected {
-        bottom.push(hint("C", "cloud"));
+    let selected = model.selected_game();
+    let launching = selected.is_some_and(|game| model.launching.contains(&game.app_id));
+    let mut bottom = vec![hint(
+        &keys::label(Cmd::Activate),
+        if installed_selected {
+            "launch"
+        } else {
+            "install"
+        },
+    )];
+    if installed_selected
+        && !selected.is_some_and(|game| matches!(game.update, UpdateStatus::UpToDate))
+    {
+        bottom.push(hint(&keys::label(Cmd::Update), "update"));
     }
     if model.install_active {
-        bottom.push(hint("p", if model.paused { "resume" } else { "pause" }));
-        bottom.push(hint("c", "cancel"));
+        bottom.push(hint(
+            &keys::label(Cmd::Pause),
+            if model.paused { "resume" } else { "pause" },
+        ));
     }
-    bottom.push(hint("Tab", "pane"));
-    bottom.push(hint("r", "refresh"));
+    if launching {
+        bottom.push(hint(&keys::label(Cmd::Cancel), "skip shaders"));
+    } else if model.install_active {
+        bottom.push(hint(&keys::label(Cmd::Cancel), "cancel"));
+    }
+    if installed_selected {
+        bottom.push(hint(&keys::label(Cmd::Manage), "manage"));
+    }
+    bottom.push(hint(&keys::label(Cmd::Downloads), "downloads"));
+    bottom.push(hint(&keys::label(Cmd::News), "news"));
+    bottom.push(hint(&keys::label(Cmd::Achievements), "achievements"));
+    if installed_selected {
+        bottom.push(hint(&keys::label(Cmd::SyncSaves), "sync saves"));
+    }
+    bottom.push(hint(&keys::label(Cmd::NextPane), "pane"));
+    bottom.push(hint(&keys::label(Cmd::Refresh), "refresh"));
     let block = panel_block(border, area.width, left, right, bottom);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1329,8 +1358,11 @@ fn draw_install(frame: &mut Frame<'_>, model: &Model, area: Rect, now: Instant) 
         vec![vec![seg("cancel waits for install", dim())]]
     } else if model.install_active {
         vec![
-            hint("p", if model.paused { "resume" } else { "pause" }),
-            hint("c", "cancel"),
+            hint(
+                &keys::label(Cmd::Pause),
+                if model.paused { "resume" } else { "pause" },
+            ),
+            hint(&keys::label(Cmd::Cancel), "cancel"),
         ]
     } else {
         Vec::new()
@@ -1685,7 +1717,8 @@ fn is_help_heading(raw: &str) -> bool {
 fn help_lines(model: &Model) -> Vec<Vec<Seg>> {
     let mut lines: Vec<Vec<Seg>> = Vec::new();
     let mut keyed = true;
-    for raw in HELP.lines() {
+    let help = keys::help_text();
+    for raw in help.lines() {
         if is_help_heading(raw) {
             keyed = raw != "NOTES";
             lines.push(vec![seg(raw, heading())]);
@@ -1785,6 +1818,48 @@ fn help_lines(model: &Model) -> Vec<Vec<Seg>> {
         message_style(&model.friends_status),
     )]);
     lines
+}
+
+/// Width of the key column of a help entry (`help_entry` splits at this many cells).
+const HELP_KEY_COLUMN: usize = 14;
+
+/// Wraps a `key  description` help entry at word boundaries; continuation lines
+/// hang under the description. Anything else wraps by character.
+fn wrap_help_entry(segments: &[Seg], width: usize) -> Vec<Line<'static>> {
+    let [(key, key_style), (description, text_style)] = segments else {
+        return wrap_segments(segments, width);
+    };
+    let room = width.saturating_sub(HELP_KEY_COLUMN);
+    if UnicodeWidthStr::width(key.as_str()) != HELP_KEY_COLUMN || room < 8 {
+        return wrap_segments(segments, width);
+    }
+    let mut rows: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in description.split(' ') {
+        let candidate = if current.is_empty() {
+            word.to_owned()
+        } else {
+            format!("{current} {word}")
+        };
+        if UnicodeWidthStr::width(candidate.as_str()) > room && !current.is_empty() {
+            rows.push(std::mem::take(&mut current));
+            current = word.to_owned();
+        } else {
+            current = candidate;
+        }
+    }
+    rows.push(current);
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let lead = if index == 0 {
+                Span::styled(key.clone(), *key_style)
+            } else {
+                Span::raw(" ".repeat(HELP_KEY_COLUMN))
+            };
+            Line::from(vec![lead, Span::styled(row, *text_style)])
+        })
+        .collect()
 }
 
 /// Character-wraps one logical line across segments, preserving each run's style.
@@ -1904,10 +1979,10 @@ fn backend_overlay(frame: &mut Frame<'_>, model: &mut Model) {
                 vec![vec![seg("Steam backend traffic", bold())]],
                 right,
                 vec![
-                    hint("↑↓/jk", "scroll"),
+                    hint("↑↓", "scroll"),
                     hint("End", "follow"),
                     hint("x", "clear"),
-                    hint("b/Esc", "close"),
+                    hint("Esc", "close"),
                 ],
             ))
             .scroll((top.min(u16::MAX as usize) as u16, 0)),
@@ -2041,7 +2116,7 @@ fn news_overlay(frame: &mut Frame<'_>, model: &mut Model) {
                 width,
                 vec![vec![seg(format!("{} · Updates", safe(&news.name)), bold())]],
                 Vec::new(),
-                vec![hint("↑↓/wheel", "scroll"), hint("Esc/n/RMB", "close")],
+                vec![hint("↑↓", "scroll"), hint("Esc", "close")],
             )),
         area,
     );
@@ -2085,11 +2160,11 @@ fn achievements_overlay(frame: &mut Frame<'_>, model: &mut Model) {
         right,
         vec![
             hint("↑↓", "move"),
-            hint("s", "sort"),
-            hint("S", "reverse"),
+            hint("1-4", "sort"),
+            hint("s", "next sort"),
             hint("f", "filter"),
             hint("r", "reload"),
-            hint("Esc/a", "close"),
+            hint("Esc", "close"),
         ],
     );
     let inner = block.inner(area);
@@ -2386,7 +2461,7 @@ fn help(frame: &mut Frame<'_>, model: &mut Model) {
     let inner_width = width.saturating_sub(2).max(1) as usize;
     let lines: Vec<Line<'static>> = help_lines(model)
         .iter()
-        .flat_map(|logical| wrap_segments(logical, inner_width))
+        .flat_map(|logical| wrap_help_entry(logical, inner_width))
         .collect();
     model.help_offset = model.help_offset.min(
         lines
@@ -2811,11 +2886,18 @@ mod tests {
             "Common"
         );
         assert!(render(&mut model, 100, 40).contains("sort name"));
-        model.key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        // The active sort's own number reverses it.
+        model.key(key(KeyCode::Char('2')));
         assert_eq!(
             model.achievements.as_ref().unwrap().visible()[0].name,
             "Secret"
         );
+        model.key(key(KeyCode::Char('1')));
+        assert_eq!(
+            model.achievements.as_ref().unwrap().visible()[0].name,
+            "Rare"
+        );
+        model.key(key(KeyCode::Char('2')));
         model.key(key(KeyCode::Char('f')));
         assert_eq!(model.achievements.as_ref().unwrap().visible().len(), 1);
         // Library keys are blocked while it is open.
@@ -2876,7 +2958,9 @@ mod tests {
             model.cloud_conflicts.as_ref().unwrap().choice,
             Some(Choice::Local)
         );
-        assert_eq!(model.key(key(KeyCode::Char('q'))), Action::Quit);
+        // While a resolution is running nothing, not even q, closes the modal.
+        assert_eq!(model.key(key(KeyCode::Char('q'))), Action::None);
+        assert!(model.cloud_conflicts.is_some());
         model.cloud_conflicts.as_mut().unwrap().busy = false;
         model.key(key(KeyCode::Esc));
         assert!(model.cloud_conflicts.is_none());
@@ -2954,9 +3038,9 @@ mod tests {
             let last = screen.lines().last().unwrap();
             assert!(
                 (if id == 440 {
-                    last.contains("Enter / 2×LMB Valve host")
+                    last.contains("Enter launch (Valve host)") && !last.contains("Ctrl+Enter")
                 } else {
-                    last.contains("Ctrl+Enter Valve host") && last.contains("Enter built-in")
+                    last.contains("Ctrl+Enter Valve host") && last.contains("Enter launch")
                 }),
                 "{last}"
             );

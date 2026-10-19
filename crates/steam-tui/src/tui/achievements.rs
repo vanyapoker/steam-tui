@@ -183,6 +183,23 @@ impl AchievementsView {
         self.reselect(keep);
     }
 
+    /// `1`-`4`: that sort, or its reverse when it is already active.
+    pub fn select_sort(&mut self, digit: char) {
+        let sort = match digit {
+            '1' => AchSort::Status,
+            '2' => AchSort::Name,
+            '3' => AchSort::Rarity,
+            _ => AchSort::Date,
+        };
+        if self.sort == sort {
+            self.flip();
+        } else {
+            let keep = self.selected_name();
+            self.sort = sort;
+            self.reselect(keep);
+        }
+    }
+
     pub fn flip(&mut self) {
         let keep = self.selected_name();
         self.reverse = !self.reverse;

@@ -34,7 +34,7 @@ fn emit(events: Option<&EventSender>, app: u32, title: &str) {
             direction: Direction::Local,
             channel: "Shaders",
             title: title.into(),
-            detail: "Optional pre-launch Vulkan processing; S skips and continues launch".into(),
+            detail: "Optional pre-launch Vulkan processing; c skips and continues launch".into(),
         });
     }
 }

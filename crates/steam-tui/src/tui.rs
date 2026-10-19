@@ -1,4 +1,5 @@
 mod achievements;
+mod keys;
 mod model;
 mod reconnect;
 mod render;
@@ -1073,7 +1074,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                     }
                 }
                 let message = restored_note.take().unwrap_or(match trigger {
-                    Trigger::JobFailed => "Reconnected to Steam — press i to resume",
+                    Trigger::JobFailed => "Reconnected to Steam — press Enter or u to resume",
                     Trigger::Startup => "Signed in to Steam",
                     _ => "Reconnected to Steam",
                 });
@@ -1175,7 +1176,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                         (None, _) => "Persistent queue unavailable for this account".into(),
                                         (Some(queue), _) if !queue.settings().is_ok_and(|s| s.shaders_enabled) => "Shader pre-caching is disabled (steam-tui shaders enabled on)".into(),
                                         (Some(queue), Some(game)) if game.app_id == app => match queue.enqueue(steam_core::updates::Intent::shader(&game), true) {
-                                            Ok(_) => format!("Queued Vulkan shader pre-cache [{app}]; press J to follow it"),
+                                            Ok(_) => format!("Queued Vulkan shader pre-cache [{app}]; press d to follow it"),
                                             Err(error) => format!("Cannot queue shader pre-cache [{app}]: {error}"),
                                         },
                                         _ => "Install the game before pre-caching its shaders".into(),
@@ -1400,7 +1401,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                     if let Some(game) = model.selected_game().and_then(|g| g.installed.clone()) {
                                         if !model.launching.insert(game.app_id) { continue; }
                                         checking_updates.insert(game.app_id);
-                                        model.status = format!("Checking updates for {}… (Shift+Enter launches installed version)", game.name);
+                                        model.status = format!("Checking updates for {}… (l launches the installed version)", game.name);
                                         let updates = job_tx.clone(); let session = connection.clone();
                                         let selection = queue.as_ref().and_then(|q| q.settings().ok()).and_then(|s| s.selections.get(&game.app_id).cloned()).unwrap_or_default();
                                         workers.push(tokio::task::spawn_local(async move {
@@ -1581,12 +1582,12 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                                 if model.active_shader && let Some((cancel, pause, _)) = &install_job { cancel.cancel(); pause.set(false); }
                                                 model.status = format!("Updating {} before launch…", game.name);
                                             },
-                                            Err(e) => model.status = format!("Cannot queue update: {e}; Shift+Enter launches installed version"),
+                                            Err(e) => model.status = format!("Cannot queue update: {e}; l launches the installed version"),
                                         }
-                                    } else { model.status = "Update required, but queue is unavailable; use u or Shift+Enter".into(); }
+                                    } else { model.status = "Update required, but queue is unavailable; use u or l".into(); }
                                 }
-                                Ok(_) => model.status = "Update freshness is unknown; Shift+Enter explicitly launches installed version".into(),
-                                Err(error) => model.status = format!("Update check failed: {error}; Shift+Enter explicitly launches installed version"),
+                                Ok(_) => model.status = "Update freshness is unknown; l explicitly launches the installed version".into(),
+                                Err(error) => model.status = format!("Update check failed: {error}; l explicitly launches the installed version"),
                             }
                         }
                         JobEvent::Modal(result) => {
@@ -1594,7 +1595,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                             match result {
                                 Ok(modal) => model.modal = Some(*modal),
                                 Err(error) if error == PLAN_TIMEOUT_MESSAGE => {
-                                    restored_note = Some("Install planning timed out; reconnected — press i to retry");
+                                    restored_note = Some("Install planning timed out; reconnected — press Enter or u to retry");
                                     reconnect_request = Some(Trigger::JobFailed);
                                     model.status = "Install planning timed out".into();
                                 }
@@ -1653,7 +1654,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                                 pause.set(false);
                                                 stall_cancel = true;
                                                 model.cancel_requested = true;
-                                                restored_note = Some("Connection lost during install — reconnected, press i to resume");
+                                                restored_note = Some("Connection lost during install — reconnected, press Enter or u to resume");
                                                 model.status = "Connection lost during install — cancelling safely, then reconnecting…".into();
                                             }
                                         }

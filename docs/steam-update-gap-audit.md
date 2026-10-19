@@ -13,7 +13,7 @@ Updated 2026-10-19 after implementing the update plan. Primary evidence is the o
 | `additional_dependencies` | Reads **extended/additional_dependencies**, filters source/destination OS, validates the complete bounded graph, installs children before parents, retries launch. | `launch/tools.rs` |
 | DLC state and selection | Actual ownership/selection/installed bytes agree with Apps APIs; persistent SDK requests and completion callbacks; content properties can enable/disable DLC using normal closed-game transactions. | `backend/apps.rs`, `dlc.rs`, `content_options.rs` |
 | Update scheduling | Durable account-scoped queue, runner lease, atomic persistence, crash recovery, priority, automatic/launch-only/manual policies, cross-midnight windows, pause during games, explicit foreground override. No daemon. | `updates.rs`, `updates/store.rs` |
-| Launch freshness | Normal TUI/CLI launch freshly checks the desired content and installs a confirmed update first. Unknown freshness is visible. Shift+Enter/L or CLI `--installed` explicitly bypasses that check. Pending launches are volatile and bound to the exact content job; shader completions cannot release them. Optional shader downloads permit launch and yield to a required pre-launch game update. Cancellation clears pending launches even if commit finishes. | `steam-tui/src/{main.rs,tui.rs}` |
+| Launch freshness | Normal TUI/CLI launch freshly checks the desired content and installs a confirmed update first. Unknown freshness is visible. `l` or CLI `--installed` explicitly bypasses that check. Pending launches are volatile and bound to the exact content job; shader completions cannot release them. Optional shader downloads permit launch and yield to a required pre-launch game update. Cancellation clears pending launches even if commit finishes. | `steam-tui/src/{main.rs,tui.rs}` |
 | Branch/language controls | User-facing properties and CLI, validated selection, fresh planning, persisted desired choice without falsifying installed state. New installs retain public/English defaults. | `catalog.rs`, `catalog/metadata.rs`, `content_options.rs` |
 | Protected branches | Check beta password, decode returned branch key, confirm private PICS access, merge private depot section only in memory. SecretService stores returned keys, never passwords. TUI F2 offers explicit session-only mode. RPC debug output redacts secrets. | `branches.rs`, `account/store.rs` |
 | Obsolete managed files | Ordinary updates reconcile old depot ownership. Only unchanged old managed files absent from every selected depot are removed. Configuration, modified files, saves, mods and unmanaged content are preserved. Existing transaction journal covers removal/recovery. | `install.rs`, `install/transaction.rs` |
@@ -41,9 +41,9 @@ Private-beta message IDs and key semantics were cross-checked against primary [S
 
 ## Controls and lifecycle
 
-- **J** opens the content/shader queue: pause/resume, retry, cancel, priority and app policy.
-- **P** opens branch/language/DLC properties. Protected branches have masked password entry; F2 selects remembered returned key versus session-only access.
-- **S while the selected game is launching** skips optional shader processing and continues launch. CLI launch/process uses Ctrl+C for this optional stage.
+- **d** opens the downloads queue (content and shader jobs): pause/resume, retry, cancel, priority and app policy.
+- **m** opens manage content: branch, language and DLC. Protected branches have masked password entry; F2 selects remembered returned key versus session-only access.
+- **c while the selected game is launching** skips optional shader processing and continues launch. CLI launch/process uses Ctrl+C for this optional stage.
 - `jobs list|add APPID|run|pause ID|resume ID|cancel ID` manages durable work. `jobs add` targets installed games; new installation remains available through the TUI.
 - `updates show|policy APPID automatic|launch-only|manual|priority APPID N|window HH:MM HH:MM|window off|during-games pause|allow` manages scheduling. Times are local, with cross-midnight windows supported.
 - `content show APPID|branch APPID NAME|language APPID NAME|dlc APPID DLCID enable|disable|unlock APPID BRANCH` manages desired content. CLI unlock prompts for a password and stores the returned key; session-only access is available in the TUI.

@@ -50,27 +50,29 @@ Press `?` in the app for the full list.
 
 | Key | Action |
 | --- | --- |
-| Enter / double-click | Check/update, then launch |
-| Shift+Enter / L | Explicitly launch the installed version |
-| J | Persistent content/shader queue |
-| P | Branch, language and DLC properties |
-| O | Cycle the selected game's launch option (e.g. DirectX 11 / 12) |
-| Z | Download a shader pre-cache for the selected game (opt-in) |
-| S while launching | Skip shader processing and continue launch |
+| Enter / double-click | Launch (checks for an update first); install when not installed |
 | Ctrl+Enter | Launch through Valve's Steam client |
-| i / u | Install / update |
-| p / c | Pause / cancel the download |
-| C | Steam Cloud sync |
+| l | Launch the installed version without updating |
+| u | Update |
+| p / c | Pause / cancel the download; `c` also skips shader processing while launching |
+| m | Manage content: branch, language, DLC |
+| d | Downloads: the persistent content/shader queue |
+| o | Cycle the selected game's launch option (e.g. DirectX 11 / 12) |
+| z | Download a shader pre-cache for the selected game (opt-in) |
+| y | Sync Steam Cloud saves |
 | n / right-click | Changelog |
-| a | Achievements of the selected game (s / S sort, f filter, r reload) |
+| a | Achievements of the selected game (1-4 / s sort, f filter, r reload) |
 | / | Filter |
 | f | Pin a game |
 | v | All / installed / not installed |
-| 1-4, s, S | Sort by column, cycle sort, reverse |
-| Tab | Switch pane |
+| 1-4, s | Sort by column (the active column again reverses), cycle sort |
+| Tab | Switch pane; movement keys act on the focused pane |
+| o / x | In Friends: show offline friends. In Notifications: clear the feed |
 | r | Refresh |
 | b | Backend traffic |
-| q | Quit |
+| q | Quit (closes an overlay instead while one is open) |
+
+Overlays close with `Esc`, `q` or the key that opened them, and share `↑↓`/`jk`, `PgUp`/`PgDn` and `Home`/`End`.
 
 ## Updates and shader caches
 
@@ -82,9 +84,9 @@ steam-tui jobs run
 steam-tui updates policy APPID automatic  # or launch-only / manual
 steam-tui updates window 23:00 06:00
 steam-tui content show APPID
-steam-tui content launch-option APPID [INDEX|default]   # list or choose a launch entry (TUI: O)
+steam-tui content launch-option APPID [INDEX|default]   # list or choose a launch entry (TUI: o)
 steam-tui content unlock APPID BRANCH    # hidden password prompt; remembers returned key
-steam-tui shaders add APPID              # opt in: queue a download (TUI: Z); then jobs run
+steam-tui shaders add APPID              # opt in: queue a download (TUI: z); then jobs run
 steam-tui shaders show APPID
 steam-tui shaders enabled off            # disables downloads and processing
 steam-tui shaders clear APPID            # reclaim this game's generated cache
@@ -92,7 +94,7 @@ steam-tui shaders clear APPID            # reclaim this game's generated cache
 
 Installs verify every chunk as it is downloaded or resumed and check each staged file's size before committing, as Valve's client does. Set `STEAM_TUI_FULL_VERIFY=1` to also hash every file end to end before commit.
 
-Shader pre-caching is opt-in per game: nothing is downloaded until you press `Z` (or run `shaders add APPID`); only games with a downloaded cache are refreshed afterwards. Vulkan FOZ v6 archives have their own freshness checks and verified staging. Compilation uses two threads, low CPU priority and a 2 GiB address-space limit per helper process. Failed/skipped processing never marks a context complete and never prevents launching the game. TUI `S` skips; CLI launch/process uses Ctrl+C to skip this optional stage. Shader archives have an 8 GiB account budget including staging, adjustable with `shaders budget MIB`; old generations and unused replay contexts are pruned. The budget excludes driver-created cache data. State and caches live under `$XDG_STATE_HOME/steam-tui/updates-ACCOUNT` (`~/.local/state` by default).
+Shader pre-caching is opt-in per game: nothing is downloaded until you press `z` (or run `shaders add APPID`); only games with a downloaded cache are refreshed afterwards. Vulkan FOZ v6 archives have their own freshness checks and verified staging. Compilation uses two threads, low CPU priority and a 2 GiB address-space limit per helper process. Failed/skipped processing never marks a context complete and never prevents launching the game. TUI `c` skips; CLI launch/process uses Ctrl+C to skip this optional stage. Shader archives have an 8 GiB account budget including staging, adjustable with `shaders budget MIB`; old generations and unused replay contexts are pruned. The budget excludes driver-created cache data. State and caches live under `$XDG_STATE_HOME/steam-tui/updates-ACCOUNT` (`~/.local/state` by default).
 
 See [the update audit](docs/steam-update-gap-audit.md) for evidence, supported formats and validation limits.
 

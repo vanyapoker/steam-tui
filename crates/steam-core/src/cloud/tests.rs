@@ -861,7 +861,7 @@ fn no_cloud_files_and_summary_texts() {
         };
         assert_eq!(
             report.summary(),
-            "Steam Cloud: uploaded 1 file · 2 conflicts kept local (changed in both places) · 1 local save not uploaded — press C"
+            "Steam Cloud: uploaded 1 file · 2 conflicts kept local (changed in both places) · 1 local save not uploaded — press y"
         );
     });
 }
@@ -887,7 +887,7 @@ fn download_alone_reports_pending_local_saves_but_never_uploads() {
         assert!(
             report
                 .summary()
-                .contains("1 local save not uploaded — press C")
+                .contains("1 local save not uploaded — press y")
         );
     });
 }

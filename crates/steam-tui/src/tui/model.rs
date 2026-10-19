@@ -1,3 +1,4 @@
+use super::keys::{self, Cmd, Key, Nav};
 use steam_core::launch::LaunchBackend;
 /// Source of provisional rows shown while the live catalog loads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -849,15 +850,6 @@ impl Model {
         );
     }
 
-    /// PgUp/PgDn scroll the notification feed when it has focus, else the friends.
-    fn page_pane(&mut self, down: bool) {
-        if self.focus == Focus::Notifications {
-            self.page_notifications(down, true);
-        } else {
-            self.page_friends(down, true);
-        }
-    }
-
     fn page_notifications(&mut self, down: bool, page: bool) {
         let amount = if page { self.notif_rows.max(1) } else { 1 };
         self.notif_offset = if down {
@@ -1071,24 +1063,50 @@ impl Model {
         if self.modal.is_some() {
             return self.modal_key(key);
         }
-        if let Some(modal) = &mut self.cloud_conflicts {
-            if key.code == KeyCode::Char('q') {
-                return Action::Quit;
+        if self.cloud_conflicts.is_some() {
+            return self.conflict_key(key);
+        }
+        if self.achievements.is_some() {
+            return self.achievements_key(key);
+        }
+        if self.news.is_some() {
+            return self.news_key(key);
+        }
+        if self.queue_view {
+            return self.queue_key(key);
+        }
+        if self.properties.is_some() {
+            return self.manage_key(key);
+        }
+        if self.backend_view {
+            return self.backend_key(key);
+        }
+        if self.help {
+            return self.help_key(key);
+        }
+        self.main_key(key)
+    }
+
+    fn conflict_key(&mut self, key: KeyEvent) -> Action {
+        let modal = self.cloud_conflicts.as_mut().expect("conflict modal");
+        if modal.busy {
+            return Action::None;
+        }
+        if keys::closes(&key, &[]) {
+            self.cloud_conflicts = self.cloud_conflict_queue.pop_front();
+            return Action::None;
+        }
+        match keys::nav(&key) {
+            Some(Nav::Up) => {
+                modal.index = modal.index.saturating_sub(1);
+                modal.choice = None;
             }
-            if modal.busy {
-                return Action::None;
+            Some(Nav::Down) => {
+                modal.index = (modal.index + 1).min(modal.items.len().saturating_sub(1));
+                modal.choice = None;
             }
-            match key.code {
-                KeyCode::Esc => self.cloud_conflicts = self.cloud_conflict_queue.pop_front(),
-                KeyCode::Char('q') => return Action::Quit,
-                KeyCode::Up => {
-                    modal.index = modal.index.saturating_sub(1);
-                    modal.choice = None;
-                }
-                KeyCode::Down => {
-                    modal.index = (modal.index + 1).min(modal.items.len().saturating_sub(1));
-                    modal.choice = None;
-                }
+            Some(_) => {}
+            None => match key.code {
                 KeyCode::Char('l') => modal.choice = Some(steam_core::cloud::Choice::Local),
                 KeyCode::Char('r') => modal.choice = Some(steam_core::cloud::Choice::Cloud),
                 KeyCode::Enter if modal.choice.is_some() && !modal.items.is_empty() => {
@@ -1097,24 +1115,30 @@ impl Model {
                     return Action::ResolveCloud;
                 }
                 _ => {}
-            }
+            },
+        }
+        Action::None
+    }
+
+    fn achievements_key(&mut self, key: KeyEvent) -> Action {
+        if keys::closes(&key, &[Key::Char('a')]) {
+            self.achievements = None;
             return Action::None;
         }
-        if let Some(view) = &mut self.achievements {
+        let view = self.achievements.as_mut().expect("achievements view");
+        if let Some(nav) = keys::nav(&key) {
+            match nav {
+                Nav::Up => view.step(-1),
+                Nav::Down => view.step(1),
+                Nav::PageUp => view.step(-(keys::PAGE as isize)),
+                Nav::PageDown => view.step(keys::PAGE as isize),
+                Nav::Home => view.selected = 0,
+                Nav::End => view.selected = usize::MAX,
+            }
+        } else {
             match key.code {
-                KeyCode::Char('q') => return Action::Quit,
-                KeyCode::Esc | KeyCode::Char('a') => {
-                    self.achievements = None;
-                    return Action::None;
-                }
-                KeyCode::Down | KeyCode::Char('j') => view.step(1),
-                KeyCode::Up | KeyCode::Char('k') => view.step(-1),
-                KeyCode::PageDown => view.step(10),
-                KeyCode::PageUp => view.step(-10),
-                KeyCode::Home => view.selected = 0,
-                KeyCode::End => view.selected = usize::MAX,
                 KeyCode::Char('s') => view.cycle_sort(),
-                KeyCode::Char('S') => view.flip(),
+                KeyCode::Char(digit @ '1'..='4') => view.select_sort(digit),
                 KeyCode::Char('f') => view.cycle_filter(),
                 KeyCode::Char('r') => {
                     view.result = None;
@@ -1122,327 +1146,306 @@ impl Model {
                 }
                 _ => {}
             }
-            let last = view.visible().len().saturating_sub(1);
-            view.selected = view.selected.min(last);
+        }
+        let last = view.visible().len().saturating_sub(1);
+        view.selected = view.selected.min(last);
+        Action::None
+    }
+
+    fn news_key(&mut self, key: KeyEvent) -> Action {
+        if keys::closes(&key, &[Key::Char('n')]) {
+            self.news = None;
             return Action::None;
         }
-        if let Some(news) = &mut self.news {
-            match key.code {
-                KeyCode::Char('q') => return Action::Quit,
-                KeyCode::Esc | KeyCode::Char('n') => self.news = None,
-                KeyCode::Down | KeyCode::Char('j') => news.offset = news.offset.saturating_add(1),
-                KeyCode::Up | KeyCode::Char('k') => news.offset = news.offset.saturating_sub(1),
-                KeyCode::PageDown => news.offset = news.offset.saturating_add(10),
-                KeyCode::PageUp => news.offset = news.offset.saturating_sub(10),
-                KeyCode::Home => news.offset = 0,
-                KeyCode::End => news.offset = u16::MAX,
-                _ => {}
-            }
+        let news = self.news.as_mut().expect("news view");
+        let page = keys::PAGE as u16;
+        match keys::nav(&key) {
+            Some(Nav::Up) => news.offset = news.offset.saturating_sub(1),
+            Some(Nav::Down) => news.offset = news.offset.saturating_add(1),
+            Some(Nav::PageUp) => news.offset = news.offset.saturating_sub(page),
+            Some(Nav::PageDown) => news.offset = news.offset.saturating_add(page),
+            Some(Nav::Home) => news.offset = 0,
+            Some(Nav::End) => news.offset = u16::MAX,
+            None => {}
+        }
+        Action::None
+    }
+
+    fn queue_key(&mut self, key: KeyEvent) -> Action {
+        if keys::closes(&key, &[Key::Char('d')]) {
+            self.queue_view = false;
             return Action::None;
         }
-        if self.queue_view {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('J') => self.queue_view = false,
-                KeyCode::Char('q') => return Action::Quit,
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.queue_selected =
-                        (self.queue_selected + 1).min(self.queue_jobs.len().saturating_sub(1))
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.queue_selected = self.queue_selected.saturating_sub(1)
-                }
-                KeyCode::Char('p' | 'r' | 'c' | '+' | '-' | 'a') => {
-                    if let Some(job) = self.queue_jobs.get(self.queue_selected) {
-                        return match key.code {
-                            KeyCode::Char('p') => Action::QueueControl(
-                                job.id,
-                                if job.state == steam_core::updates::JobState::Paused {
-                                    steam_core::updates::JobState::Pending
-                                } else {
-                                    steam_core::updates::JobState::Paused
-                                },
-                            ),
-                            KeyCode::Char('r') => {
-                                Action::QueueControl(job.id, steam_core::updates::JobState::Pending)
-                            }
-                            KeyCode::Char('c') => Action::QueueControl(
-                                job.id,
-                                steam_core::updates::JobState::Cancelled,
-                            ),
-                            KeyCode::Char('+') => Action::QueuePriority(job.intent.app_id, 1),
-                            KeyCode::Char('-') => Action::QueuePriority(job.intent.app_id, -1),
-                            _ => Action::QueuePolicy(job.intent.app_id),
-                        };
-                    }
-                }
-                _ => {}
+        let last = self.queue_jobs.len().saturating_sub(1);
+        if let Some(nav) = keys::nav(&key) {
+            self.queue_selected = match nav {
+                Nav::Up => self.queue_selected.saturating_sub(1),
+                Nav::Down => self.queue_selected.saturating_add(1),
+                Nav::PageUp => self.queue_selected.saturating_sub(keys::PAGE),
+                Nav::PageDown => self.queue_selected.saturating_add(keys::PAGE),
+                Nav::Home => 0,
+                Nav::End => last,
             }
+            .min(last);
             return Action::None;
         }
-        if let Some(props) = &mut self.properties {
-            if let Some(password) = &mut props.password {
-                match key.code {
-                    KeyCode::Esc => props.password = None,
-                    KeyCode::Enter => {
-                        props.busy = true;
-                        return Action::UnlockBranch;
-                    }
-                    KeyCode::Backspace => {
-                        password.pop();
-                    }
-                    KeyCode::F(2) => props.remember_key = !props.remember_key,
-                    KeyCode::Char(c)
-                        if !c.is_control() && password.len() + c.len_utf8() <= 4096 =>
-                    {
-                        password.push(c)
-                    }
-                    _ => {}
-                }
-                return Action::None;
-            }
-            if key.code == KeyCode::Char('q') {
-                return Action::Quit;
-            }
-            if key.code == KeyCode::Esc {
-                self.properties = None;
-                return Action::None;
-            }
-            if props.busy {
-                return Action::None;
-            }
-            if let Some(data) = &props.data {
-                match key.code {
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        props.selected = (props.selected + 1).min(data.dlc.len() + 1)
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        props.selected = props.selected.saturating_sub(1)
-                    }
-                    KeyCode::Left | KeyCode::Right if props.selected < 2 => {
-                        let (index, count) = if props.selected == 0 {
-                            (&mut props.branch, data.branches.len())
-                        } else {
-                            (&mut props.language, data.languages.len())
-                        };
-                        if count > 0 {
-                            *index = if key.code == KeyCode::Right {
-                                (*index + 1) % count
-                            } else {
-                                (*index + count - 1) % count
-                            };
-                        }
-                    }
-                    KeyCode::Enter if props.selected < 2 => {
-                        if props.selected == 0
-                            && data
-                                .branches
-                                .get(props.branch)
-                                .is_some_and(|b| b.password_required)
-                        {
-                            props.password =
-                                Some(zeroize::Zeroizing::new(String::with_capacity(4096)));
-                        } else {
-                            props.busy = true;
-                            return Action::ApplyContent;
-                        }
-                    }
-                    KeyCode::Char(' ') | KeyCode::Enter => {
-                        if let Some(dlc) =
-                            props.selected.checked_sub(2).and_then(|i| data.dlc.get(i))
-                        {
-                            props.busy = true;
-                            return Action::ToggleDlc(dlc.app_id, !dlc.enabled);
-                        }
-                    }
-                    _ => {}
-                }
-            }
+        let Some(job) = self.queue_jobs.get(self.queue_selected) else {
             return Action::None;
-        }
-        if self.backend_view {
-            match key.code {
-                KeyCode::Char('q') => return Action::Quit,
-                KeyCode::Esc | KeyCode::Char('b' | 'B') => self.backend_view = false,
-                KeyCode::Char('x') => {
-                    self.backend_log.clear();
-                    self.backend_offset = 0;
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.backend_offset = self.backend_offset.saturating_add(1)
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.backend_offset = self.backend_offset.saturating_sub(1)
-                }
-                KeyCode::PageUp => self.backend_offset = self.backend_offset.saturating_add(10),
-                KeyCode::PageDown => self.backend_offset = self.backend_offset.saturating_sub(10),
-                KeyCode::End => self.backend_offset = 0,
-                KeyCode::Home => self.backend_offset = usize::MAX / 2,
-                _ => {}
-            }
-            return Action::None;
-        }
-        if self.help {
-            match key.code {
-                KeyCode::Char('q') => return Action::Quit,
-                KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?') => self.help = false,
-                KeyCode::Down | KeyCode::PageDown => {
-                    self.help_offset = self.help_offset.saturating_add(1)
-                }
-                KeyCode::Up | KeyCode::PageUp => {
-                    self.help_offset = self.help_offset.saturating_sub(1)
-                }
-                _ => {}
-            }
-            return Action::None;
-        }
-        // Navigation is global, including while typing a search.
+        };
+        use steam_core::updates::JobState;
         match key.code {
-            KeyCode::Up => {
-                self.move_library(false);
-                return Action::None;
+            KeyCode::Char('p') => Action::QueueControl(
+                job.id,
+                if job.state == JobState::Paused {
+                    JobState::Pending
+                } else {
+                    JobState::Paused
+                },
+            ),
+            KeyCode::Char('r') => Action::QueueControl(job.id, JobState::Pending),
+            KeyCode::Char('c') => Action::QueueControl(job.id, JobState::Cancelled),
+            KeyCode::Char('+') => Action::QueuePriority(job.intent.app_id, 1),
+            KeyCode::Char('-') => Action::QueuePriority(job.intent.app_id, -1),
+            KeyCode::Char('a') => Action::QueuePolicy(job.intent.app_id),
+            _ => Action::None,
+        }
+    }
+
+    fn manage_key(&mut self, key: KeyEvent) -> Action {
+        let props = self.properties.as_mut().expect("manage view");
+        if let Some(password) = &mut props.password {
+            match key.code {
+                KeyCode::Esc => props.password = None,
+                KeyCode::Enter => {
+                    props.busy = true;
+                    return Action::UnlockBranch;
+                }
+                KeyCode::Backspace => {
+                    password.pop();
+                }
+                KeyCode::F(2) => props.remember_key = !props.remember_key,
+                KeyCode::Char(c) if !c.is_control() && password.len() + c.len_utf8() <= 4096 => {
+                    password.push(c)
+                }
+                _ => {}
             }
-            KeyCode::Down => {
-                self.move_library(true);
-                return Action::None;
+            return Action::None;
+        }
+        if keys::closes(&key, &[Key::Char('m')]) {
+            self.properties = None;
+            return Action::None;
+        }
+        if props.busy {
+            return Action::None;
+        }
+        let Some(data) = &props.data else {
+            return Action::None;
+        };
+        let last = data.dlc.len() + 1;
+        if let Some(nav) = keys::nav(&key) {
+            props.selected = match nav {
+                Nav::Up => props.selected.saturating_sub(1),
+                Nav::Down => props.selected.saturating_add(1),
+                Nav::PageUp => props.selected.saturating_sub(keys::PAGE),
+                Nav::PageDown => props.selected.saturating_add(keys::PAGE),
+                Nav::Home => 0,
+                Nav::End => last,
             }
-            KeyCode::Home => {
-                self.selected = 0;
-                self.keep_visible();
-                return Action::None;
+            .min(last);
+            return Action::None;
+        }
+        match key.code {
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') if props.selected < 2 => {
+                let (index, count) = if props.selected == 0 {
+                    (&mut props.branch, data.branches.len())
+                } else {
+                    (&mut props.language, data.languages.len())
+                };
+                if count > 0 {
+                    let forward = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
+                    *index = if forward {
+                        (*index + 1) % count
+                    } else {
+                        (*index + count - 1) % count
+                    };
+                }
             }
-            KeyCode::End => {
-                self.selected = self.order.len().saturating_sub(1);
-                self.keep_visible();
-                return Action::None;
+            KeyCode::Enter if props.selected < 2 => {
+                if props.selected == 0
+                    && data
+                        .branches
+                        .get(props.branch)
+                        .is_some_and(|b| b.password_required)
+                {
+                    props.password = Some(zeroize::Zeroizing::new(String::with_capacity(4096)));
+                } else {
+                    props.busy = true;
+                    return Action::ApplyContent;
+                }
             }
-            KeyCode::PageUp => {
-                self.page_pane(false);
-                return Action::None;
-            }
-            KeyCode::PageDown => {
-                self.page_pane(true);
-                return Action::None;
-            }
-            KeyCode::F(1) => {
-                self.help = true;
-                return Action::None;
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                if let Some(dlc) = props.selected.checked_sub(2).and_then(|i| data.dlc.get(i)) {
+                    props.busy = true;
+                    return Action::ToggleDlc(dlc.app_id, !dlc.enabled);
+                }
             }
             _ => {}
         }
-        if self.searching {
-            let preserve = self.selected_game().map(|game| game.app_id);
-            match key.code {
-                KeyCode::Esc => {
-                    self.search.clear();
-                    self.searching = false;
-                }
-                KeyCode::Enter => self.searching = false,
-                KeyCode::Backspace | KeyCode::Char('h')
-                    if key.code == KeyCode::Backspace
-                        || key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
-                    self.search.pop();
-                }
-                KeyCode::Char(ch)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                        && !ch.is_control() =>
-                {
-                    self.search.push(ch)
-                }
-                _ => return Action::None,
-            }
-            self.reorder(preserve);
+        Action::None
+    }
+
+    fn backend_key(&mut self, key: KeyEvent) -> Action {
+        if keys::closes(&key, &[Key::Char('b')]) {
+            self.backend_view = false;
             return Action::None;
         }
-        let preserve = self.selected_game().map(|game| game.app_id);
-        match key.code {
-            KeyCode::Char('q') => return Action::Quit,
-            KeyCode::Char('S')
-                if self
-                    .selected_game()
-                    .is_some_and(|g| self.launching.contains(&g.app_id)) =>
-            {
-                return Action::SkipShaders(self.selected_game().unwrap().app_id);
+        if key.code == KeyCode::Char('x') {
+            self.backend_log.clear();
+            self.backend_offset = 0;
+            return Action::None;
+        }
+        // The offset counts lines back from the newest entry.
+        match keys::nav(&key) {
+            Some(Nav::Up) => self.backend_offset = self.backend_offset.saturating_add(1),
+            Some(Nav::Down) => self.backend_offset = self.backend_offset.saturating_sub(1),
+            Some(Nav::PageUp) => {
+                self.backend_offset = self.backend_offset.saturating_add(keys::PAGE)
             }
-            KeyCode::Char('r') => return Action::Refresh,
-            KeyCode::Char('n') => return self.open_news(),
-            KeyCode::Char('a') => return self.open_achievements(),
-            KeyCode::Enter | KeyCode::Char('L') => {
-                if self.pending_launch.is_some() {
-                    self.status =
-                        "A launch is waiting for its dependency installation to finish".into();
-                    return Action::None;
+            Some(Nav::PageDown) => {
+                self.backend_offset = self.backend_offset.saturating_sub(keys::PAGE)
+            }
+            Some(Nav::End) => self.backend_offset = 0,
+            Some(Nav::Home) => self.backend_offset = usize::MAX / 2,
+            None => {}
+        }
+        Action::None
+    }
+
+    fn help_key(&mut self, key: KeyEvent) -> Action {
+        if keys::closes(&key, &[Key::Char('?'), Key::Code(KeyCode::F(1))]) {
+            self.help = false;
+            return Action::None;
+        }
+        let page = keys::PAGE as u16;
+        match keys::nav(&key) {
+            Some(Nav::Up) => self.help_offset = self.help_offset.saturating_sub(1),
+            Some(Nav::Down) => self.help_offset = self.help_offset.saturating_add(1),
+            Some(Nav::PageUp) => self.help_offset = self.help_offset.saturating_sub(page),
+            Some(Nav::PageDown) => self.help_offset = self.help_offset.saturating_add(page),
+            Some(Nav::Home) => self.help_offset = 0,
+            Some(Nav::End) => self.help_offset = u16::MAX,
+            None => {}
+        }
+        Action::None
+    }
+
+    /// Movement keys act on the focused pane.
+    fn navigate(&mut self, cmd: Cmd) -> Action {
+        match self.focus {
+            Focus::Library => match cmd {
+                Cmd::Up => self.move_library(false),
+                Cmd::Down => self.move_library(true),
+                Cmd::PageUp => self.page_library(false),
+                Cmd::PageDown => self.page_library(true),
+                Cmd::Home => {
+                    self.selected = 0;
+                    self.keep_visible();
                 }
-                let backend = if key.modifiers.contains(KeyModifiers::CONTROL)
-                    || self
-                        .selected_game()
-                        .is_some_and(|game| steam_core::launch::requires_valve_host(game.app_id))
-                {
-                    LaunchBackend::ValveHost
-                } else {
-                    LaunchBackend::BuiltIn
+                _ => {
+                    self.selected = self.order.len().saturating_sub(1);
+                    self.keep_visible();
+                }
+            },
+            Focus::Friends => match cmd {
+                Cmd::Up => self.page_friends(false, false),
+                Cmd::Down => self.page_friends(true, false),
+                Cmd::PageUp => self.page_friends(false, true),
+                Cmd::PageDown => self.page_friends(true, true),
+                Cmd::Home => self.friend_offset = 0,
+                _ => {
+                    self.friend_offset = usize::MAX / 2;
+                    self.page_friends(true, false);
+                }
+            },
+            Focus::Notifications => match cmd {
+                Cmd::Up => self.page_notifications(false, false),
+                Cmd::Down => self.page_notifications(true, false),
+                Cmd::PageUp => self.page_notifications(false, true),
+                Cmd::PageDown => self.page_notifications(true, true),
+                Cmd::Home => self.notif_offset = 0,
+                _ => {
+                    self.notif_offset = usize::MAX / 2;
+                    self.page_notifications(true, false);
+                }
+            },
+        }
+        Action::None
+    }
+
+    fn main_key(&mut self, key: KeyEvent) -> Action {
+        let cmd = keys::lookup(self.focus, &key);
+        if self.searching {
+            return self.filter_key(key, cmd);
+        }
+        let Some(cmd) = cmd else {
+            return Action::None;
+        };
+        let preserve = self.selected_game().map(|game| game.app_id);
+        match cmd {
+            Cmd::Quit => return Action::Quit,
+            Cmd::Refresh => return Action::Refresh,
+            Cmd::News => return self.open_news(),
+            Cmd::Achievements => return self.open_achievements(),
+            Cmd::Activate | Cmd::ValveHost => {
+                let Some(backend) = self.launch_backend(cmd == Cmd::ValveHost) else {
+                    return Action::None;
                 };
-                if let Some(game) = self.selected_game().filter(|game| game.installed.is_some())
-                    && let Err(error) = steam_core::launch::validate_backend(game.app_id, backend)
-                {
-                    self.status = error.to_string();
-                    return Action::None;
-                }
-                if let Some(game) = self.selected_game().filter(|game| {
-                    game.installed.is_some() && self.cloud_busy.contains(&game.app_id)
-                }) {
-                    self.status = format!(
-                        "Steam Cloud is syncing {}; wait for it to finish",
-                        game.name
-                    );
-                    return Action::None;
-                }
-                if self.selected_game().is_some_and(|game| {
-                    game.installed.is_some()
-                        && !self.active_shader
-                        && self
-                            .active_install
-                            .as_ref()
-                            .is_some_and(|(app_id, _)| *app_id == game.app_id)
-                }) {
-                    self.status =
-                        "Cannot launch a game while its install/update transaction is active"
-                            .into();
-                    return Action::None;
-                }
                 return if self
                     .selected_game()
                     .is_some_and(|game| game.installed.is_some())
                 {
-                    if key.code == KeyCode::Char('L') || key.modifiers.contains(KeyModifiers::SHIFT)
-                    {
-                        Action::LaunchInstalled(backend)
-                    } else {
-                        Action::Launch(backend)
-                    }
+                    Action::Launch(backend)
                 } else {
                     self.request_install(false)
                 };
             }
-            KeyCode::Char('i') => return self.request_install(false),
-            KeyCode::Char('u') => return self.request_install(true),
-            KeyCode::Char('c') if self.install_active => {
-                self.set_paused(false, Instant::now());
-                self.cancel_requested = true;
-                self.status =
-                    "Cancellation requested; waiting for a safe transaction boundary…".into();
-                return Action::CancelInstall;
+            Cmd::LaunchInstalled => {
+                let Some(backend) = self.launch_backend(false) else {
+                    return Action::None;
+                };
+                if self
+                    .selected_game()
+                    .is_some_and(|game| game.installed.is_some())
+                {
+                    return Action::LaunchInstalled(backend);
+                }
+                self.status = "Install the game before launching it".into();
             }
-            KeyCode::Char('p') if self.install_active => {
+            Cmd::Update => return self.request_install(true),
+            Cmd::Pause if self.install_active => {
                 return self.toggle_pause_at(Instant::now());
             }
-            KeyCode::Char('J') => {
+            Cmd::Pause => {}
+            Cmd::Cancel => {
+                if let Some(game) = self.selected_game()
+                    && self.launching.contains(&game.app_id)
+                {
+                    return Action::SkipShaders(game.app_id);
+                }
+                if self.install_active {
+                    self.set_paused(false, Instant::now());
+                    self.cancel_requested = true;
+                    self.status =
+                        "Cancellation requested; waiting for a safe transaction boundary…".into();
+                    return Action::CancelInstall;
+                }
+                self.status = "Nothing to cancel for this game".into();
+            }
+            Cmd::Downloads => {
                 self.queue_view = true;
                 return Action::Queue;
             }
-            KeyCode::Char('P') => {
+            Cmd::Manage => {
                 if let Some(game) = self.selected_game().and_then(|g| g.installed.clone()) {
                     self.properties = Some(ContentProperties {
                         game,
@@ -1457,27 +1460,35 @@ impl Model {
                     });
                     return Action::ContentProperties;
                 }
+                self.status = "Install the game before managing its content".into();
             }
-            KeyCode::Char('O') => match self.selected_game() {
+            Cmd::LaunchOption => match self.selected_game() {
                 Some(game) if game.installed.is_some() => {
                     return Action::CycleLaunchOption(game.app_id);
                 }
                 _ => self.status = "Install the game before choosing a launch option".into(),
             },
-            KeyCode::Char('Z') => match self.selected_game() {
+            Cmd::Shaders => match self.selected_game() {
                 Some(game) if game.installed.is_some() => {
                     return Action::PrecacheShaders(game.app_id);
                 }
                 _ => self.status = "Install the game before pre-caching its shaders".into(),
             },
-            KeyCode::Char('b') => self.backend_view = true,
-            KeyCode::Char('C') => return self.request_cloud_sync(),
-            KeyCode::Char('v') => {
+            Cmd::Backend => self.backend_view = true,
+            Cmd::SyncSaves => return self.request_cloud_sync(),
+            Cmd::View => {
                 self.filter = self.filter.next();
                 self.reorder(preserve);
             }
-            KeyCode::Char('/') => self.searching = true,
-            KeyCode::Char('f') => {
+            Cmd::Filter => {
+                self.focus = Focus::Library;
+                self.searching = true;
+            }
+            Cmd::ClearFilter => {
+                self.search.clear();
+                self.reorder(preserve);
+            }
+            Cmd::Pin => {
                 if let Some(id) = self.selected_game().map(|game| game.app_id) {
                     if !self.pins.remove(&id) {
                         self.pins.insert(id);
@@ -1491,13 +1502,16 @@ impl Model {
                     self.reorder(preserve);
                 }
             }
-            KeyCode::Esc => {
-                self.search.clear();
+            Cmd::SortName => self.choose_sort(Sort::Name, preserve),
+            Cmd::SortSize => self.choose_sort(Sort::Size, preserve),
+            Cmd::SortLast => self.choose_sort(Sort::LastPlayed, preserve),
+            Cmd::SortPlayed => self.choose_sort(Sort::PlayTime, preserve),
+            Cmd::CycleSort => {
+                self.sort = self.sort.next();
                 self.reorder(preserve);
             }
-            KeyCode::Char('?') => self.help = true,
-            KeyCode::Tab | KeyCode::BackTab => {
-                self.focus = if key.code == KeyCode::Tab {
+            Cmd::NextPane | Cmd::PrevPane => {
+                self.focus = if cmd == Cmd::NextPane {
                     self.focus.next()
                 } else {
                     self.focus.previous()
@@ -1506,37 +1520,134 @@ impl Model {
                     self.notif_unseen = 0;
                 }
             }
-            KeyCode::Char('o') => {
+            Cmd::ToggleOffline => {
                 self.show_offline = !self.show_offline;
                 self.filter_friends();
             }
-            KeyCode::Char('j' | 'k') => {
-                let down = key.code == KeyCode::Char('j');
-                match self.focus {
-                    Focus::Library => self.move_library(down),
-                    Focus::Friends => self.page_friends(down, false),
-                    Focus::Notifications => self.page_notifications(down, false),
-                }
+            Cmd::ClearFeed => self.clear_notifications(),
+            Cmd::Help => self.help = true,
+            Cmd::Up | Cmd::Down | Cmd::PageUp | Cmd::PageDown | Cmd::Home | Cmd::End => {
+                return self.navigate(cmd);
             }
-            KeyCode::Char('x') => self.clear_notifications(),
-            KeyCode::Char('1' | '2' | '3' | '4' | 's' | 'S') => {
-                match key.code {
-                    KeyCode::Char('1') => self.sort = Sort::Name,
-                    KeyCode::Char('2') => self.sort = Sort::Size,
-                    KeyCode::Char('3') => self.sort = Sort::LastPlayed,
-                    KeyCode::Char('4') => self.sort = Sort::PlayTime,
-                    KeyCode::Char('s') => self.sort = self.sort.next(),
-                    KeyCode::Char('S') => self.reverse = !self.reverse,
-                    _ => unreachable!(),
-                }
-                self.reorder(preserve);
-            }
-            _ => {}
         }
         Action::None
     }
 
-    /// `C`: sync Steam Cloud saves of the selected installed game (download,
+    /// While a filter is typed every character is text; only the movement keys
+    /// and F1 keep their meaning.
+    fn filter_key(&mut self, key: KeyEvent, cmd: Option<Cmd>) -> Action {
+        let movement = matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+        );
+        if movement && let Some(cmd) = cmd {
+            return self.navigate(cmd);
+        }
+        if key.code == KeyCode::F(1) {
+            self.help = true;
+            return Action::None;
+        }
+        let preserve = self.selected_game().map(|game| game.app_id);
+        match key.code {
+            KeyCode::Esc => {
+                self.search.clear();
+                self.searching = false;
+            }
+            KeyCode::Enter => self.searching = false,
+            KeyCode::Backspace | KeyCode::Char('h')
+                if key.code == KeyCode::Backspace
+                    || key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.search.pop();
+            }
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && !ch.is_control() =>
+            {
+                self.search.push(ch)
+            }
+            _ => return Action::None,
+        }
+        self.reorder(preserve);
+        Action::None
+    }
+
+    /// A column key: the active sort reverses, any other becomes the sort.
+    fn choose_sort(&mut self, sort: Sort, preserve: Option<u32>) {
+        if self.sort == sort {
+            self.reverse = !self.reverse;
+        } else {
+            self.sort = sort;
+        }
+        self.reorder(preserve);
+    }
+
+    /// The checks every launch shares. `None` means the launch was refused and
+    /// the status says why; otherwise the backend that would run it.
+    fn launch_backend(&mut self, force_host: bool) -> Option<LaunchBackend> {
+        if self.pending_launch.is_some() {
+            self.status = "A launch is waiting for its dependency installation to finish".into();
+            return None;
+        }
+        let backend = if force_host
+            || self
+                .selected_game()
+                .is_some_and(|game| steam_core::launch::requires_valve_host(game.app_id))
+        {
+            LaunchBackend::ValveHost
+        } else {
+            LaunchBackend::BuiltIn
+        };
+        if let Some(game) = self.selected_game().filter(|game| game.installed.is_some())
+            && let Err(error) = steam_core::launch::validate_backend(game.app_id, backend)
+        {
+            self.status = error.to_string();
+            return None;
+        }
+        if let Some(game) = self
+            .selected_game()
+            .filter(|game| game.installed.is_some() && self.cloud_busy.contains(&game.app_id))
+        {
+            self.status = format!(
+                "Steam Cloud is syncing {}; wait for it to finish",
+                game.name
+            );
+            return None;
+        }
+        if self.selected_game().is_some_and(|game| {
+            game.installed.is_some()
+                && !self.active_shader
+                && self
+                    .active_install
+                    .as_ref()
+                    .is_some_and(|(app_id, _)| *app_id == game.app_id)
+        }) {
+            self.status =
+                "Cannot launch a game while its install/update transaction is active".into();
+            return None;
+        }
+        Some(backend)
+    }
+
+    fn page_library(&mut self, down: bool) {
+        self.selected = if down {
+            self.selected
+                .saturating_add(keys::PAGE)
+                .min(self.order.len().saturating_sub(1))
+        } else {
+            self.selected.saturating_sub(keys::PAGE)
+        };
+        self.keep_visible();
+    }
+
+    /// `y`: sync Steam Cloud saves of the selected installed game (download,
     /// then upload). The running-game check needs the OS and happens in the caller.
     fn request_cloud_sync(&mut self) -> Action {
         let Some(game) = self.selected_game() else {
@@ -1586,7 +1697,7 @@ impl Model {
             self.status = if update {
                 "Select an installed game to update"
             } else {
-                "Already installed; use u to update or Enter to launch"
+                "Already installed; u updates it, Enter launches it"
             }
             .into();
             return Action::None;
@@ -1788,6 +1899,166 @@ mod tests {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
     }
 
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn enter_installs_what_is_missing_and_launches_what_is_installed() {
+        let mut model = loaded();
+        assert_eq!(
+            model.key(press(KeyCode::Enter)),
+            Action::Launch(LaunchBackend::BuiltIn)
+        );
+        model.games[model.order[0]].installed = None;
+        assert_eq!(model.key(press(KeyCode::Enter)), Action::Install);
+        // `i` no longer installs; `l` refuses to launch what is not installed.
+        model.preparing_install = false;
+        assert_eq!(model.key(key('i')), Action::None);
+        assert_eq!(model.key(key('l')), Action::None);
+        assert_eq!(model.status, "Install the game before launching it");
+    }
+
+    #[test]
+    fn c_cancels_the_install_or_skips_shaders_of_a_launching_game() {
+        let mut model = loaded();
+        assert_eq!(model.key(key('c')), Action::None);
+        assert_eq!(model.status, "Nothing to cancel for this game");
+        model.install_active = true;
+        assert_eq!(model.key(key('c')), Action::CancelInstall);
+        model.install_active = false;
+        model.cancel_requested = false;
+        model.launching.insert(10);
+        assert_eq!(model.key(key('c')), Action::SkipShaders(10));
+        // Upper-case S is not a second skip key any more: it is nothing.
+        assert_eq!(model.key(key('S')), Action::None);
+    }
+
+    #[test]
+    fn game_actions_use_their_new_letters() {
+        let mut model = loaded();
+        assert_eq!(model.key(key('d')), Action::Queue);
+        assert!(model.queue_view);
+        model.queue_view = false;
+        assert_eq!(model.key(key('m')), Action::ContentProperties);
+        model.properties = None;
+        assert_eq!(model.key(key('o')), Action::CycleLaunchOption(10));
+        assert_eq!(model.key(key('z')), Action::PrecacheShaders(10));
+        assert_eq!(model.key(key('y')), Action::CloudSync);
+        for removed in ['J', 'P', 'O', 'Z', 'C', 'L', 'B'] {
+            assert_eq!(model.key(key(removed)), Action::None, "{removed}");
+        }
+    }
+
+    #[test]
+    fn number_keys_pick_a_sort_and_the_active_one_reverses_it() {
+        let mut model = loaded();
+        model.key(key('2'));
+        assert_eq!((model.sort, model.reverse), (Sort::Size, false));
+        model.key(key('2'));
+        assert_eq!((model.sort, model.reverse), (Sort::Size, true));
+        model.key(key('3'));
+        assert_eq!(model.sort, Sort::LastPlayed);
+        model.key(key('s'));
+        assert_eq!(model.sort, Sort::PlayTime);
+    }
+
+    #[test]
+    fn j_and_k_move_the_focused_pane_only() {
+        let mut model = loaded();
+        model.friend_rows = 1;
+        model.set_friends(
+            (0..4)
+                .map(|id| Friend {
+                    steam_id: id,
+                    name: id.to_string(),
+                    state: Presence::Online,
+                    game: None,
+                })
+                .collect(),
+        );
+        model.key(key('j'));
+        assert_eq!((model.selected, model.friend_offset), (1, 0));
+        model.focus = Focus::Friends;
+        model.key(key('j'));
+        assert_eq!((model.selected, model.friend_offset), (1, 1));
+        model.key(key('k'));
+        assert_eq!(model.friend_offset, 0);
+    }
+
+    #[test]
+    fn overlays_close_with_esc_q_or_their_own_key_and_q_no_longer_quits_them() {
+        let mut model = loaded();
+        for (open, close) in [
+            ('n', 'n'),
+            ('n', 'q'),
+            ('n', 'x'),
+            ('a', 'a'),
+            ('d', 'd'),
+            ('b', 'b'),
+            ('?', '?'),
+        ] {
+            model.key(key(open));
+            let overlay_open = |m: &Model| {
+                m.news.is_some()
+                    || m.achievements.is_some()
+                    || m.queue_view
+                    || m.backend_view
+                    || m.help
+            };
+            assert!(overlay_open(&model), "{open}");
+            let action = model.key(key(close));
+            if close == 'x' {
+                // Not a closing key: the overlay stays; Esc closes it.
+                assert!(overlay_open(&model));
+                model.key(press(KeyCode::Esc));
+            }
+            assert_eq!(action, Action::None, "{open}{close}");
+            assert!(!overlay_open(&model), "{open}{close}");
+        }
+        assert_eq!(model.key(key('q')), Action::Quit);
+    }
+
+    #[test]
+    fn help_and_queue_overlays_page_by_ten() {
+        let mut model = loaded();
+        model.key(key('?'));
+        model.key(press(KeyCode::PageDown));
+        assert_eq!(model.help_offset, 10);
+        model.key(key('j'));
+        assert_eq!(model.help_offset, 11);
+        model.key(press(KeyCode::Home));
+        assert_eq!(model.help_offset, 0);
+        model.key(key('?'));
+        assert!(!model.help);
+    }
+
+    #[test]
+    fn manage_overlay_changes_branch_with_h_and_l_as_well_as_arrows() {
+        let mut model = loaded();
+        assert_eq!(model.key(key('m')), Action::ContentProperties);
+        let props = model.properties.as_mut().unwrap();
+        props.busy = false;
+        props.data = Some(steam_core::content_options::Properties {
+            app_id: 10,
+            branches: ["public", "beta", "old"]
+                .map(|name| steam_core::content_options::Branch {
+                    name: name.into(),
+                    password_required: false,
+                })
+                .to_vec(),
+            languages: vec!["english".into()],
+            dlc: vec![],
+        });
+        model.key(key('l'));
+        assert_eq!(model.properties.as_ref().unwrap().branch, 1);
+        model.key(press(KeyCode::Right));
+        model.key(key('h'));
+        assert_eq!(model.properties.as_ref().unwrap().branch, 1);
+        model.key(key('m'));
+        assert!(model.properties.is_none());
+    }
+
     #[test]
     fn unknown_values_remain_last_in_both_directions() {
         for reverse in [false, true] {
@@ -1805,7 +2076,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [10, 30, 20]
         );
-        model.key(key('S'));
+        model.key(key('2'));
         assert_eq!(
             model
                 .order
@@ -1821,7 +2092,7 @@ mod tests {
         let mut model = loaded();
         model.selected = 1;
         model.key(key('2'));
-        model.key(key('S'));
+        model.key(key('2'));
         assert_eq!(model.selected_game().unwrap().app_id, 20);
         model.set_catalog(CatalogSnapshot {
             items: vec![game(20, "Beta", Some(999)), game(10, "Alpha", None)],
@@ -1849,7 +2120,9 @@ mod tests {
         model.key(key('f'));
         assert_eq!(model.selected_game().unwrap().app_id, 30);
         assert_eq!(model.games[model.order[0]].app_id, 30);
-        model.key(key('S'));
+        model.sort = Sort::Name;
+        model.key(key('1'));
+        assert!(model.reverse);
         assert_eq!(model.games[model.order[0]].app_id, 30);
         let text = model.settings_text();
         let mut fresh = loaded();
@@ -1901,7 +2174,7 @@ mod tests {
     }
 
     #[test]
-    fn arrows_and_friend_pages_ignore_focus_and_clamp() {
+    fn movement_keys_act_on_the_focused_pane_and_clamp() {
         let mut model = loaded();
         model.library_rows = 2;
         model.friend_rows = 3;
@@ -1917,17 +2190,26 @@ mod tests {
         );
         model.focus = Focus::Friends;
         model.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(model.selected, 1);
-        model.focus = Focus::Library;
+        assert_eq!((model.friend_offset, model.selected), (1, 0));
         for _ in 0..8 {
             model.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         }
-        assert_eq!(model.friend_offset, 5);
-        assert_eq!(model.selected, 1);
+        assert_eq!((model.friend_offset, model.selected), (5, 0));
         for _ in 0..8 {
             model.key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         }
         assert_eq!(model.friend_offset, 0);
+        model.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(model.friend_offset, 5);
+        model.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(model.friend_offset, 0);
+        model.focus = Focus::Library;
+        model.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!((model.selected, model.friend_offset), (1, 0));
+        model.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(model.selected, model.order.len() - 1);
+        model.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(model.selected, 0);
         model.friend_rows = 20;
         model.keep_visible();
         assert_eq!(model.friend_offset, 0);
@@ -1951,6 +2233,7 @@ mod tests {
                 game: None,
             },
         ]);
+        model.focus = Focus::Friends;
         model.key(key('o'));
         model.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         assert_eq!(model.friend_offset, 1);
@@ -2206,14 +2489,15 @@ mod tests {
     fn installed_version_is_explicit_and_private_password_typing_never_triggers_shortcuts() {
         let mut model = loaded();
         assert_eq!(
-            model.key(key('L')),
+            model.key(key('l')),
             Action::LaunchInstalled(LaunchBackend::BuiltIn)
         );
+        // Shift+Enter is no longer a second spelling of `l`.
         assert_eq!(
             model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
-            Action::LaunchInstalled(LaunchBackend::BuiltIn)
+            Action::Launch(LaunchBackend::BuiltIn)
         );
-        assert_eq!(model.key(key('P')), Action::ContentProperties);
+        assert_eq!(model.key(key('m')), Action::ContentProperties);
         let props = model.properties.as_mut().unwrap();
         props.busy = false;
         props.data = Some(steam_core::content_options::Properties {
@@ -2229,7 +2513,7 @@ mod tests {
             model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Action::None
         );
-        for c in ['q', 'J', 'P', 'r'] {
+        for c in ['q', 'd', 'm', 'r'] {
             assert_eq!(model.key(key(c)), Action::None);
         }
         assert_eq!(
@@ -2241,7 +2525,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .as_str(),
-            "qJPr"
+            "qdmr"
         );
         assert_eq!(
             model.key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
@@ -2662,6 +2946,10 @@ mod notification_tests {
         assert_eq!(model.notifications.len(), 1);
         model.key(code(KeyCode::Enter));
         model.key(code(KeyCode::Esc));
+        // `x` belongs to the notifications pane: nothing happens from the library.
+        model.key(key('x'));
+        assert_eq!(model.notifications.len(), 1);
+        model.focus = Focus::Notifications;
         model.key(key('x'));
         assert!(model.notifications.is_empty());
         assert_eq!(model.notif_unseen, 0);
@@ -2839,18 +3127,18 @@ mod cloud_tests {
         model
     }
 
-    fn shift_c() -> KeyEvent {
-        KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT)
+    fn sync_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)
     }
 
     #[test]
-    fn shift_c_starts_a_cloud_sync_of_the_selected_installed_game() {
+    fn y_starts_a_cloud_sync_of_the_selected_installed_game() {
         let mut model = model();
-        assert_eq!(model.key(shift_c()), Action::CloudSync);
+        assert_eq!(model.key(sync_key()), Action::CloudSync);
         assert!(model.cloud_busy.contains(&10));
         assert!(model.status.starts_with("Steam Cloud: syncing"));
         // Not twice at once, and launching waits for the sync.
-        assert_eq!(model.key(shift_c()), Action::None);
+        assert_eq!(model.key(sync_key()), Action::None);
         assert!(model.status.contains("already syncing"));
         assert_eq!(
             model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -2869,27 +3157,27 @@ mod cloud_tests {
         let mut model = model();
         model.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(model.selected_game().unwrap().app_id, 20);
-        assert_eq!(model.key(shift_c()), Action::None);
+        assert_eq!(model.key(sync_key()), Action::None);
         assert!(model.status.contains("needs an installed game"));
         model.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         model.launching.insert(10);
-        assert_eq!(model.key(shift_c()), Action::None);
+        assert_eq!(model.key(sync_key()), Action::None);
         model.launching.clear();
         model.install_active = true;
         model.active_install = Some((10, "/lib".into()));
-        assert_eq!(model.key(shift_c()), Action::None);
+        assert_eq!(model.key(sync_key()), Action::None);
         assert!(model.status.contains("install/update"));
         assert!(model.cloud_busy.is_empty());
-        assert_eq!(Model::new(true, None).key(shift_c()), Action::None);
+        assert_eq!(Model::new(true, None).key(sync_key()), Action::None);
     }
 
     #[test]
-    fn capital_c_is_filter_text_while_typing() {
+    fn the_sync_key_is_filter_text_while_typing() {
         let mut model = model();
         model.key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         assert!(model.searching);
-        assert_eq!(model.key(shift_c()), Action::None);
-        assert_eq!(model.search, "C");
+        assert_eq!(model.key(sync_key()), Action::None);
+        assert_eq!(model.search, "y");
         assert!(model.cloud_busy.is_empty());
     }
 }

@@ -383,7 +383,7 @@ impl SyncReport {
         }
         if self.pending_upload > 0 {
             parts.push(format!(
-                "{} not uploaded — press C",
+                "{} not uploaded — press y",
                 plural(self.pending_upload, "local save")
             ));
         }
