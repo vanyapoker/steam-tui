@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.3.3 - 2026-10-19
+
+### Fixed
+- Path of Exile 2 could not log in on the built-in backend: it requests an encrypted app ticket, which was answered with "not supported", so the login never completed. `RequestEncryptedAppTicket` and `GetEncryptedAppTicket` now go through the Steam connection: the request returns a call result immediately, the ticket is fetched in the background, and the game receives Steam's `EncryptedAppTicket` message serialized exactly like Valve's client does. A refusal keeps its `EResult` and carries no ticket.
+- Choosing a login server (or any text field) crashed games that ask for the gamepad text keyboard: `ShowGamepadTextInput`, `ShowFloatingGamepadTextInput`, `DismissFloatingGamepadTextInput` and the entered-text getters aborted the game. Without an overlay they now answer what Steam answers when it cannot show the keyboard (`false` / empty), so the game uses its own text entry.
+
+### Known issues
+- Steam Input is not implemented (no virtual gamepad, no remapping). Games see the physical pad through Wine's XInput, and Path of Exile 2 disconnected itself ("your controller device was disconnected") right after entering the game.
+
 ## 0.3.2 - 2026-10-19
 
 ### Fixed
