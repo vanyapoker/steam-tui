@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- Panels, modals and overlays use btop's rounded corners again, and the title and hint segments on their borders are drawn as rounded notches (`╭─╮Library╭─╮`, `╰─╯news╰─╯`). The update queue and content overlays now share the other panels' style, with their key hints on the bottom border.
 - Installs and updates no longer re-hash every file after the download. Like Valve's client, the check before commit is a quick scan: every chunk must have been verified and staged (downloaded and checked, validated from disk by the resume scan, or copied from a hash-verified old file) and each staged file must exist with exactly its manifest size. Per-file fsyncs are replaced by one filesystem barrier. Set `STEAM_TUI_FULL_VERIFY=1` for the previous whole-file SHA1 check, which then runs as each file completes while later files still download.
 
 ## 0.3.2 - 2026-10-19

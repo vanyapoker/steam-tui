@@ -269,9 +269,29 @@ fn group_width(group: &[Seg]) -> usize {
         .sum::<usize>()
 }
 
-/// btop-style border title: `─┤group├─┤group├─`. Groups that do not fit are dropped
-/// from the end, so list the most important first.
-fn title_groups(groups: Vec<Vec<Seg>>, border: Style, width: usize) -> Line<'static> {
+/// Which border a title or hint line sits on. btop draws each segment as a
+/// notch in the line; with rounded corners the notch uses the rounded corner
+/// glyphs, opening downward on the top border and upward on the bottom one.
+#[derive(Clone, Copy)]
+enum Edge {
+    Top,
+    Bottom,
+}
+
+impl Edge {
+    /// Glyphs before and after a segment, e.g. `─╮` and `╭` on the top border.
+    fn caps(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Top => ("─╮", "╭"),
+            Self::Bottom => ("─╯", "╰"),
+        }
+    }
+}
+
+/// btop-style border title: `─╮group╭─╮group╭─` (`╯ ╰` on the bottom edge). Groups that do
+/// not fit are dropped from the end, so list the most important first.
+fn title_groups(groups: Vec<Vec<Seg>>, border: Style, width: usize, edge: Edge) -> Line<'static> {
+    let (open, close) = edge.caps();
     let mut output = Vec::new();
     let mut used = 0;
     for group in groups {
@@ -280,11 +300,11 @@ fn title_groups(groups: Vec<Vec<Seg>>, border: Style, width: usize) -> Line<'sta
             break;
         }
         used += needed;
-        output.push(Span::styled("─┤", border));
+        output.push(Span::styled(open, border));
         output.extend(spans(
             group.into_iter().map(|(t, s)| (safe(&t), s)).collect(),
         ));
-        output.push(Span::styled("├", border));
+        output.push(Span::styled(close, border));
     }
     if used < width && !output.is_empty() {
         output.push(Span::styled("─", border));
@@ -292,7 +312,7 @@ fn title_groups(groups: Vec<Vec<Seg>>, border: Style, width: usize) -> Line<'sta
     Line::from(output)
 }
 
-/// Square-cornered panel (btop style) whose top border carries `left`/`right` title groups and whose
+/// Rounded panel (btop style) whose top border carries `left`/`right` title groups and whose
 /// bottom border carries `bottom` key hints.
 fn panel_block(
     border: Style,
@@ -302,14 +322,14 @@ fn panel_block(
     bottom: Vec<Vec<Seg>>,
 ) -> Block<'static> {
     let inner = width.saturating_sub(2) as usize;
-    let right = title_groups(right, border, inner);
+    let right = title_groups(right, border, inner, Edge::Top);
     let left_budget = inner.saturating_sub(right.width());
     Block::bordered()
-        .border_type(BorderType::Plain)
+        .border_type(BorderType::Rounded)
         .border_style(border)
-        .title_top(title_groups(left, border, left_budget))
+        .title_top(title_groups(left, border, left_budget, Edge::Top))
         .title_top(right.right_aligned())
-        .title_bottom(title_groups(bottom, border, inner))
+        .title_bottom(title_groups(bottom, border, inner, Edge::Bottom))
 }
 
 /// Centered modal rectangle of at most `width`×`height`.
@@ -2248,7 +2268,7 @@ fn cloud_conflicts(frame: &mut Frame<'_>, model: &Model) {
             dim()
         };
         let block = Block::bordered()
-            .border_type(BorderType::Plain)
+            .border_type(BorderType::Rounded)
             .border_style(border)
             .title_top(title_groups(
                 vec![vec![
@@ -2260,6 +2280,7 @@ fn cloud_conflicts(frame: &mut Frame<'_>, model: &Model) {
                 ]],
                 border,
                 rect.width.saturating_sub(2) as usize,
+                Edge::Top,
             ))
             .title_bottom(title_groups(
                 if chosen {
@@ -2269,6 +2290,7 @@ fn cloud_conflicts(frame: &mut Frame<'_>, model: &Model) {
                 },
                 border,
                 rect.width.saturating_sub(2) as usize,
+                Edge::Bottom,
             ));
         let content = block.inner(rect);
         frame.render_widget(block, rect);
@@ -2372,9 +2394,7 @@ fn help(frame: &mut Frame<'_>, model: &mut Model) {
 fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
     let area = frame.area();
     frame.render_widget(Clear, area);
-    let mut lines = vec![Line::from(
-        "↑/↓ select · p pause/resume · r retry · c cancel · +/- priority · a app policy · Esc close",
-    )];
+    let mut lines = Vec::new();
     if model.queue_jobs.is_empty() {
         lines.push(Line::from("No persistent update jobs"));
     }
@@ -2423,7 +2443,21 @@ fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
     }
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title(" Update queue "))
+            .block(panel_block(
+                theme::panel_border(Panel::Overlay, true),
+                area.width,
+                vec![vec![seg("Update queue", bold())]],
+                Vec::new(),
+                vec![
+                    hint("↑↓", "select"),
+                    hint("p", "pause/resume"),
+                    hint("r", "retry"),
+                    hint("c", "cancel"),
+                    hint("+/-", "priority"),
+                    hint("a", "app policy"),
+                    hint("Esc", "close"),
+                ],
+            ))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -2432,9 +2466,7 @@ fn content_overlay(frame: &mut Frame<'_>, model: &Model) {
     let Some(view) = &model.properties else {
         return;
     };
-    let mut lines = vec![Line::from(
-        "↑/↓ select · ←/→ choose branch/language · Enter apply · Space toggle DLC · Esc close",
-    )];
+    let mut lines = Vec::new();
     if let Some(data) = &view.data {
         let branch = data
             .branches
@@ -2507,7 +2539,22 @@ fn content_overlay(frame: &mut Frame<'_>, model: &Model) {
                     .saturating_sub(area.height.saturating_sub(6) as usize) as u16,
                 0,
             ))
-            .block(Block::bordered().title(format!(" Content — {} ", safe(&view.game.name))))
+            .block(panel_block(
+                theme::panel_border(Panel::Overlay, true),
+                area.width,
+                vec![vec![seg(
+                    format!("Content · {}", safe(&view.game.name)),
+                    bold(),
+                )]],
+                Vec::new(),
+                vec![
+                    hint("↑↓", "select"),
+                    hint("←→", "branch/language"),
+                    hint("Enter", "apply"),
+                    hint("Space", "toggle DLC"),
+                    hint("Esc", "close"),
+                ],
+            ))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -2958,6 +3005,21 @@ mod tests {
         }
     }
 
+    /// `cargo test -p steam-tui print_screens -- --ignored --nocapture` prints the
+    /// main layouts as text for eyeballing border and label changes.
+    #[test]
+    #[ignore]
+    fn print_screens() {
+        let mut model = model();
+        installing(&mut model);
+        with_feed(&mut model);
+        for (width, height) in [(110, 30), (70, 22)] {
+            println!("{width}x{height}\n{}", render(&mut model, width, height));
+        }
+        model.key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        println!("help\n{}", render(&mut model, 100, 30));
+    }
+
     #[test]
     fn renders_without_panicking_at_many_sizes() {
         for (width, height) in [
@@ -3012,7 +3074,7 @@ mod tests {
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
         }
-        assert!(screen.contains('┌') && screen.contains('┘'));
+        assert!(screen.contains('╭') && screen.contains('╯'));
         model.sort = Sort::Size;
         model.reverse = true;
         assert!(render(&mut model, 80, 24).contains("Size²▼"));
