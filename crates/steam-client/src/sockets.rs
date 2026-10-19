@@ -187,6 +187,55 @@ fn install_certificate(error: &mut [u8; 1024]) {
     }
 }
 /// Called before taking callback/pipe locks. Never perform IPC on the GNS service thread.
+/// Signals received from the backend, waiting for the game thread to hand them
+/// to the transport.
+static INBOX: Mutex<VecDeque<(u64, Vec<u8>)>> = Mutex::new(VecDeque::new());
+
+/// Every backend round trip costs the caller about two milliseconds, so the
+/// game thread never makes them: this thread sends queued signals and fetches
+/// incoming ones, and the per-frame pump only moves data between local queues.
+fn start_signaling() {
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("steam-p2p".into())
+            .spawn(|| {
+                while std::env::var_os("STEAM_TUI_BACKEND_SOCKET").is_some() {
+                    std::thread::sleep(Duration::from_millis(10));
+                    let outgoing: Vec<_> = {
+                        let mut queue = SIGNALS.lock().unwrap_or_else(|e| e.into_inner());
+                        let count = queue.len().min(8);
+                        queue.drain(..count).collect()
+                    };
+                    for (peer, rendezvous) in outgoing {
+                        let size = rendezvous.len();
+                        if matches!(
+                            bridge::request(
+                                current_app_id(),
+                                Operation::P2PSend { peer, rendezvous }
+                            ),
+                            Ok(Response::P2PSent)
+                        ) {
+                            trace(format_args!("P2P signal sent ({size} bytes)"));
+                        } else {
+                            trace("P2P signal send failed");
+                        }
+                    }
+                    if let Ok(Response::P2PSignals(signals)) =
+                        bridge::request(current_app_id(), Operation::P2PRecv)
+                    {
+                        let mut inbox = INBOX.lock().unwrap_or_else(|e| e.into_inner());
+                        for signal in signals {
+                            if inbox.len() < 256 {
+                                inbox.push_back(signal);
+                            }
+                        }
+                    }
+                }
+            });
+    });
+}
+
 #[unsafe(no_mangle)]
 pub(super) extern "C" fn steam_tui_networking_pump() {
     if OBJECT.get().copied().unwrap_or(0) == 0 {
@@ -204,29 +253,16 @@ pub(super) extern "C" fn steam_tui_networking_pump() {
     if std::env::var_os("STEAM_TUI_BACKEND_SOCKET").is_none() {
         return;
     }
-    let signals: Vec<_> = {
-        let mut queue = SIGNALS.lock().unwrap_or_else(|e| e.into_inner());
-        let count = queue.len().min(8);
-        queue.drain(..count).collect()
+    start_signaling();
+    let received: Vec<_> = {
+        let mut inbox = INBOX.lock().unwrap_or_else(|e| e.into_inner());
+        let count = inbox.len().min(8);
+        inbox.drain(..count).collect()
     };
-    for (peer, rendezvous) in signals {
-        let size = rendezvous.len();
-        if matches!(
-            bridge::request(current_app_id(), Operation::P2PSend { peer, rendezvous }),
-            Ok(Response::P2PSent)
-        ) {
-            trace(format_args!("P2P signal sent ({size} bytes)"));
-        } else {
-            trace("P2P signal send failed");
-        }
-    }
-    if let Ok(Response::P2PSignals(signals)) = bridge::request(current_app_id(), Operation::P2PRecv)
-    {
-        for (peer, data) in signals {
-            if data.len() <= 65536 {
-                trace(format_args!("P2P signal received ({} bytes)", data.len()));
-                unsafe { steam_tui_transport_recv(peer, data.as_ptr(), data.len() as i32) };
-            }
+    for (peer, data) in received {
+        if data.len() <= 65536 {
+            trace(format_args!("P2P signal received ({} bytes)", data.len()));
+            unsafe { steam_tui_transport_recv(peer, data.as_ptr(), data.len() as i32) };
         }
     }
 }
