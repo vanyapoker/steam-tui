@@ -1,6 +1,6 @@
 [package]
 name = "steam-client"
-version = "2.1.0"
+version = "0.2.2"
 edition.workspace = true
 rust-version.workspace = true
 publish = false

@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.1.0 - 2026-10-17
+## 0.2.1 - 2026-10-17
 
 ### Added
 - **Achievements viewer:** press `a` on a game for a modal listing its achievements with unlocked state and date, global rarity and descriptions. `s` cycles the sort (status, name, rarity, date), `S` reverses it, `f` filters all / unlocked / locked.
@@ -17,7 +17,7 @@
 - Publishing Workshop items is not supported (CreateItem, SubmitItemUpdate and the SetItem calls report failure).
 - Voted-on user lists are not supported; friend avatars are not provided.
 
-## 2.0.0 - 2026-10-16
+## 0.2.0 - 2026-10-16
 
 The built-in Steam API library (`libsteamclient.so`) is now far more complete, so many more games start without Valve's client.
 
