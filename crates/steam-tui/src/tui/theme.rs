@@ -118,10 +118,10 @@ impl PlatformMarker {
         }
     }
 
-    /// Exactly three cells: width-1 symbols (atom = Proton, lambda = native).
+    /// Exactly three cells: width-1 symbols (squared plus = Windows build via Proton, lambda = native).
     pub fn badge(self) -> &'static str {
         match self {
-            Self::Proton => " ⚛ ",
+            Self::Proton => " ⊞ ",
             Self::Native => " λ ",
             Self::Unknown => "   ",
         }
