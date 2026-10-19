@@ -225,24 +225,26 @@ pub(super) fn playtime_style() -> Style {
     Style::default().fg(Color::LightBlue)
 }
 
+/// Short state word for the library's State column. Games with an active install
+/// show live progress instead (`render::install_state`).
 pub(super) fn state_tag(game: &CatalogItem) -> (&'static str, Style) {
     if game.installed.is_none() {
         return if game.unavailable_reason.is_some() {
             ("blocked", Style::default().fg(Color::Red))
         } else {
-            ("not installed", dim())
+            ("new", dim())
         };
     }
     match &game.update {
         UpdateStatus::Available { .. } => (
-            "↑ update",
+            "update",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        UpdateStatus::UpToDate => ("✓ current", Style::default().fg(Color::Green)),
-        UpdateStatus::Unknown => ("? installed", Style::default().fg(Color::Magenta)),
-        UpdateStatus::Unavailable(_) => ("! unavailable", Style::default().fg(Color::Red)),
+        UpdateStatus::UpToDate => ("installed", Style::default().fg(Color::Green)),
+        UpdateStatus::Unknown => ("installed", dim()),
+        UpdateStatus::Unavailable(_) => ("blocked", Style::default().fg(Color::Red)),
     }
 }
 

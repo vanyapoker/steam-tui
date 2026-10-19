@@ -23,7 +23,7 @@ use super::theme::{
 /// One styled run of text; lines are built from these and truncated by display width.
 type Seg = (String, Style);
 
-const HELP: &str = "LIBRARY\nUp / Down     Select game (any focus)\nLMB           Select the clicked game; double-click launches; wheel moves selection\nn / RMB       Game changelog / developer updates (Esc closes)\na             Achievements of the selected game: unlocked state and date, rarity; s / S sort (status, name, rarity, date) and reverse, f filter all / unlocked / locked, r reload\nHome / End    First / last game\nEnter         Installed: launch (VAC: Valve host; others: built-in); not installed: choose destination\nShift+Enter / L  Explicitly launch installed version without updating\nCtrl+Enter    Launch installed game using Valve host (enhanced keyboard terminal)\ni / u         Install selected game / update installed game\nJ             Persistent update queue (p pause, r retry, c cancel, +/- priority, a policy)\nP             Content properties: branch, language, DLC\nO             Cycle the selected game’s launch option (e.g. DirectX 11 / 12); the choice is remembered and shown in the status bar\nZ             Download a Vulkan shader pre-cache for the selected game (off unless requested; refreshed hourly afterwards, processed before launch)\nS             Skip selected game’s shader processing while launching\nv             Cycle All / Installed / Not installed\n1 / 2 / 3 / 4 Sort by the column headings Name¹ Size² Last³ Played⁴\ns / S         Cycle sort / reverse direction (unknowns last; shown as sort: in the title)\n/             Filter library names in the table; type to filter\nf             Pin / unpin the selected game at the top (★)\n              Sort, filter, pins and offline-friends toggle are remembered\nEsc           Clear filter; Enter finishes filter editing\nC             Steam Cloud sync of the selected installed game: download newer saves, then upload local changes (blocked while it runs)\n              Launching always downloads cloud saves first (never uploads); conflicts keep the local file, backups go to ~/.local/state/steam-tui/cloud/backup\n              Conflict picker: l local / r cloud; Enter confirms this file; Esc keeps both\nb             Backend traffic: exactly what the built-in Steam backend sends to / receives from Steam (message ids, names, sizes, hex head, protobuf fields); x clears\nINSTALL DESTINATION\nUp / Down     Select library (available space shown)\nn             Enter custom library path (new installs only)\nEnter         Confirm destination / check custom path\nEsc           Cancel modal / stop editing custom path\nINSTALL PROGRESS\np             Pause / resume the download; the job stays alive, no new destination step\nc             Cancel safely (also while paused); retained staging resumes next install\n              Install panel: phase, bar, verified and downloaded bytes,\n              download speed, ETA and elapsed time (paused time excluded)\n              The game's State column shows ⬇ percent, or ⏸ percent while paused\n              One install/update job at a time; no Steam required\nFRIENDS\nPgUp / PgDn   Page friends (the notification feed when it has focus)\no             Show / hide offline friends\nNOTIFICATIONS\nTab           Focus the feed (Library → Friends → Notifications)\nj / k         Scroll the focused feed; PgUp / PgDn page it\nx             Clear the feed (the count badges are Steam's and stay)\n              Live: new items appear on top, ● marks those not yet seen\n              Badges show pending trade offers, messages, items, gifts, invites\n              Only pushes received while running are listed; history cannot be fetched\nNAVIGATION\nTab           Switch focused pane (Shift-Tab goes back)\nj / k         Move within focused pane\nr             Refresh library/update metadata and friend presence\n? / F1        Toggle this help\nq / Ctrl-C    Quit; safely wait for installer (q is filter/path text while typing)\nHELP\nUp / Down     Scroll this help on small terminals\nEsc / ? / F1  Close help\nMARKERS\nOrange names  Automatic Valve host: TF2, Dota 2, CS2, Deadlock\n⊞             Proton: Windows build run through Proton (needs Proton + prefix for direct launch)\nλ             Native Linux build\n(blank)       Platform not known yet\n↻             Library title: live owned library is still refreshing (rows are local or cached)\n☁             Steam Cloud column (installed games with cloud saves): dim ☁ never synced · green ☁ synced · cyan ↑ local saves not uploaded (press C) · yellow ◐◓◑◒ syncing · red ✗ last sync failed or had conflicts\nTags          ✓ current · ↑ update · blocked · not installed · ? unknown\nNOTES\nDates are UTC (feed times are local); ? means metadata is unavailable.\nBlocked games show their reason in the status bar when selected.\nUpdate status: update / current / unknown / unavailable.\nDirect launch cannot bypass DRM or guarantee Steam-free compatibility.\nUpdates stay in their existing library; close Steam before installing.\nOnly depot-verified Windows install scripts run, inside the game's Proton prefix; unsupported setup directives block launch.\nFriends login uses saved credentials; run `steam-tui login` to sign in.";
+const HELP: &str = "LIBRARY\nUp / Down     Select game (any focus)\nLMB           Select the clicked game; double-click launches; wheel moves selection\nn / RMB       Game changelog / developer updates (Esc closes)\na             Achievements of the selected game: unlocked state and date, rarity; s / S sort (status, name, rarity, date) and reverse, f filter all / unlocked / locked, r reload\nHome / End    First / last game\nEnter         Installed: launch (VAC: Valve host; others: built-in); not installed: choose destination\nShift+Enter / L  Explicitly launch installed version without updating\nCtrl+Enter    Launch installed game using Valve host (enhanced keyboard terminal)\ni / u         Install selected game / update installed game\nJ             Persistent update queue (p pause, r retry, c cancel, +/- priority, a policy)\nP             Content properties: branch, language, DLC\nO             Cycle the selected game’s launch option (e.g. DirectX 11 / 12); the choice is remembered and shown in the status bar\nZ             Download a Vulkan shader pre-cache for the selected game (off unless requested; refreshed hourly afterwards, processed before launch)\nS             Skip selected game’s shader processing while launching\nv             Cycle All / Installed / Not installed\n1 / 2 / 3 / 4 Sort by the column headings Name¹ Size² Last³ Played⁴\ns / S         Cycle sort / reverse direction (unknowns last; shown as sort: in the title)\n/             Filter library names in the table; type to filter\nf             Pin / unpin the selected game at the top (★)\n              Sort, filter, pins and offline-friends toggle are remembered\nEsc           Clear filter; Enter finishes filter editing\nC             Steam Cloud sync of the selected installed game: download newer saves, then upload local changes (blocked while it runs)\n              Launching always downloads cloud saves first (never uploads); conflicts keep the local file, backups go to ~/.local/state/steam-tui/cloud/backup\n              Conflict picker: l local / r cloud; Enter confirms this file; Esc keeps both\nb             Backend traffic: exactly what the built-in Steam backend sends to / receives from Steam (message ids, names, sizes, hex head, protobuf fields); x clears\nINSTALL DESTINATION\nUp / Down     Select library (available space shown)\nn             Enter custom library path (new installs only)\nEnter         Confirm destination / check custom path\nEsc           Cancel modal / stop editing custom path\nINSTALL PROGRESS\np             Pause / resume the download; the job stays alive, no new destination step\nc             Cancel safely (also while paused); retained staging resumes next install\n              Install panel: phase, bar, verified and downloaded bytes,\n              download speed, ETA and elapsed time (paused time excluded)\n              The game's State column shows download / verify / install and the percent, or paused and the percent\n              One install/update job at a time; no Steam required\nFRIENDS\nPgUp / PgDn   Page friends (the notification feed when it has focus)\no             Show / hide offline friends\nNOTIFICATIONS\nTab           Focus the feed (Library → Friends → Notifications)\nj / k         Scroll the focused feed; PgUp / PgDn page it\nx             Clear the feed (the count badges are Steam's and stay)\n              Live: new items appear on top, ● marks those not yet seen\n              Badges show pending trade offers, messages, items, gifts, invites\n              Only pushes received while running are listed; history cannot be fetched\nNAVIGATION\nTab           Switch focused pane (Shift-Tab goes back)\nj / k         Move within focused pane\nr             Refresh library/update metadata and friend presence\n? / F1        Toggle this help\nq / Ctrl-C    Quit; safely wait for installer (q is filter/path text while typing)\nHELP\nUp / Down     Scroll this help on small terminals\nEsc / ? / F1  Close help\nMARKERS\nOrange names  Automatic Valve host: TF2, Dota 2, CS2, Deadlock\n⊞             Proton: Windows build run through Proton (needs Proton + prefix for direct launch)\nλ             Native Linux build\n(blank)       Platform not known yet\n↻             Library title: live owned library is still refreshing (rows are local or cached)\n☁             Steam Cloud column (installed games with cloud saves): dim ☁ never synced · green ☁ synced · cyan ↑ local saves not uploaded (press C) · yellow ◐◓◑◒ syncing · red ✗ last sync failed or had conflicts\nState         new (not installed) · installed · update · blocked (reason in the status bar)\nNOTES\nDates are UTC (feed times are local); ? means metadata is unavailable.\nBlocked games show their reason in the status bar when selected.\nUpdate status: update available, installed (current or unknown), or blocked.\nDirect launch cannot bypass DRM or guarantee Steam-free compatibility.\nUpdates stay in their existing library; close Steam before installing.\nOnly depot-verified Windows install scripts run, inside the game's Proton prefix; unsupported setup directives block launch.\nFriends login uses saved credentials; run `steam-tui login` to sign in.";
 
 fn safe(value: &str) -> String {
     super::super::terminal_text(value).into_owned()
@@ -402,26 +402,28 @@ fn progress_ratio(progress: &InstallProgress) -> f64 {
 
 fn phase_label(phase: InstallPhase) -> &'static str {
     match phase {
-        InstallPhase::Preparing => "Preparing",
-        InstallPhase::Downloading => "Downloading",
-        InstallPhase::Verifying => "Verifying",
-        InstallPhase::Committing => "Committing",
-        InstallPhase::Finished => "Finished",
+        InstallPhase::Preparing => "Prepare",
+        InstallPhase::Downloading => "Download",
+        InstallPhase::Verifying => "Verify",
+        InstallPhase::Committing => "Install",
+        InstallPhase::Finished => "Done",
         InstallPhase::Cancelled => "Cancelled",
     }
 }
 
-/// Phase name for display; a pause replaces it while the download is held.
-fn phase_text(model: &Model, phase: InstallPhase) -> &'static str {
+/// Phase name for display. While the download is held the phase stays visible
+/// with a pause marker in front of it.
+fn phase_text(model: &Model, phase: InstallPhase) -> String {
     if model.paused {
-        "⏸ Paused"
+        format!("⏸ {}", phase_label(phase))
     } else {
-        phase_label(phase)
+        phase_label(phase).to_owned()
     }
 }
 
-/// State cell for the game being installed/updated: live percent (same figure as
-/// the Install panel), `⏸` while paused. Fits the 13-cell State column.
+/// State cell for the game being installed/updated: the phase word and the same
+/// percent as the Install panel (`download 42%`, `verify 97%`, `install 100%`,
+/// `paused 42%`). Fits the 13-cell State column.
 fn install_state(model: &Model, game: &CatalogItem) -> Option<(String, Style)> {
     let (app_id, _) = model.active_install.as_ref()?;
     if *app_id != game.app_id {
@@ -429,26 +431,29 @@ fn install_state(model: &Model, game: &CatalogItem) -> Option<(String, Style)> {
     }
     let bold_fg = |color| Style::default().fg(color).add_modifier(Modifier::BOLD);
     if model.cancel_requested {
-        return Some(("cancelling".into(), bold_fg(Color::Yellow)));
+        return Some(("cancel…".into(), bold_fg(Color::Yellow)));
     }
     let Some(progress) = model.progress.as_ref().filter(|p| p.app_id == *app_id) else {
         return Some(if model.paused {
-            ("⏸ paused".into(), bold_fg(Color::Yellow))
+            ("paused".into(), bold_fg(Color::Yellow))
         } else {
-            ("… preparing".into(), severity_style(Severity::Progress))
+            ("preparing".into(), severity_style(Severity::Progress))
         });
     };
     let percent = percent(progress);
     Some(if model.paused {
-        (format!("⏸ {percent}%"), bold_fg(Color::Yellow))
-    } else if matches!(
-        progress.phase,
-        InstallPhase::Verifying | InstallPhase::Committing
-    ) {
-        (format!("⟳ {percent}%"), bold_fg(Color::Cyan))
+        (format!("paused {percent}%"), bold_fg(Color::Yellow))
     } else {
+        let word = match progress.phase {
+            InstallPhase::Preparing => "prepare",
+            InstallPhase::Downloading => "download",
+            InstallPhase::Verifying => "verify",
+            InstallPhase::Committing => "install",
+            InstallPhase::Finished => "done",
+            InstallPhase::Cancelled => "cancelled",
+        };
         (
-            format!("⬇ {percent}%"),
+            format!("{word} {percent}%"),
             bold_fg(theme::phase_color(progress.phase, false)),
         )
     })
@@ -472,6 +477,16 @@ fn duration_text(duration: Duration) -> String {
 
 fn eta_text(eta: Option<Duration>) -> String {
     eta.map(duration_text).unwrap_or_else(|| "--".to_owned())
+}
+
+/// The install message is a progress note, not a free-form status: it is styled
+/// by phase instead of by words it happens to contain ("cancel", "verified").
+fn install_message_style(phase: InstallPhase) -> Style {
+    match phase {
+        InstallPhase::Finished => severity_style(Severity::Success),
+        InstallPhase::Cancelled => severity_style(Severity::Warning),
+        _ => dim(),
+    }
 }
 
 /// One-line progress for places without room for the Install panel.
@@ -1310,6 +1325,8 @@ fn draw_install(frame: &mut Frame<'_>, model: &Model, area: Rect, now: Instant) 
             "cancelling safely…",
             severity_style(Severity::Warning),
         )]]
+    } else if phase == InstallPhase::Committing {
+        vec![vec![seg("cancel waits for install", dim())]]
     } else if model.install_active {
         vec![
             hint("p", if model.paused { "resume" } else { "pause" }),
@@ -1448,7 +1465,7 @@ fn draw_install(frame: &mut Frame<'_>, model: &Model, area: Rect, now: Instant) 
             fit_line(
                 vec![seg(
                     progress.message.clone(),
-                    message_style(&progress.message),
+                    install_message_style(progress.phase),
                 )],
                 width,
             ),
@@ -2391,6 +2408,27 @@ fn help(frame: &mut Frame<'_>, model: &mut Model) {
     );
 }
 
+fn job_state_word(state: steam_core::updates::JobState) -> &'static str {
+    use steam_core::updates::JobState;
+    match state {
+        JobState::Pending => "queued",
+        JobState::Running => "running",
+        JobState::Paused => "paused",
+        JobState::Failed => "failed",
+        JobState::Complete => "done",
+        JobState::Cancelled => "cancelled",
+    }
+}
+
+fn policy_word(policy: steam_core::updates::UpdatePolicy) -> &'static str {
+    use steam_core::updates::UpdatePolicy;
+    match policy {
+        UpdatePolicy::Automatic => "auto",
+        UpdatePolicy::LaunchOnly => "on launch",
+        UpdatePolicy::Manual => "manual",
+    }
+}
+
 fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
     let area = frame.area();
     frame.render_widget(Clear, area);
@@ -2410,7 +2448,7 @@ fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
             .copied()
             .unwrap_or_default();
         let text = format!(
-            "{} #{}  app {}  {}  {:?}  priority {}  {:?}{}{}",
+            "{} #{}  app {}  {}  {}  priority {}  {}{}{}",
             if index == model.queue_selected {
                 "›"
             } else {
@@ -2423,9 +2461,9 @@ fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
             } else {
                 "content"
             },
-            job.state,
+            job_state_word(job.state),
             job.priority,
-            policy,
+            policy_word(policy),
             if job.foreground { " · foreground" } else { "" },
             job.error
                 .as_ref()
@@ -3121,7 +3159,7 @@ mod tests {
         let screen = render(&mut model, 80, 24);
         for expected in [
             "Install · Game number 0 [1]",
-            "Downloading",
+            "Download",
             "26%",
             "verified 8.0 GiB / 30.0 GiB",
             "downloaded 5.0 GiB / 16.0 GiB",
@@ -3135,7 +3173,7 @@ mod tests {
         }
         let bar_line = screen
             .lines()
-            .find(|line| line.contains("Downloading"))
+            .find(|line| line.contains("Download"))
             .unwrap();
         assert!(bar_line.contains('█') && bar_line.contains('░'));
         assert!(!bar_line.contains("verified"));
@@ -3456,14 +3494,14 @@ mod tests {
     fn library_state_column_shows_install_percent_and_pause() {
         let mut model = model();
         let idle = render(&mut model, 80, 24);
-        assert!(!idle.contains('⬇') && !idle.contains('⏸'));
+        assert!(!idle.contains("download 26%") && !idle.contains('⏸'));
         installing(&mut model);
         let running = render(&mut model, 80, 24);
         let row = running
             .lines()
             .find(|line| line.contains("Game number 0 "))
             .unwrap();
-        assert!(row.contains("⬇ 26%"), "{row}");
+        assert!(row.contains("download 26%"), "{row}");
         assert!(row.contains("5.0 GiB"), "{row}");
         assert!(running.contains("pause"));
 
@@ -3473,20 +3511,20 @@ mod tests {
             .lines()
             .find(|line| line.contains("Game number 0 "))
             .unwrap();
-        assert!(row.contains("⏸ 26%"), "{row}");
-        for expected in ["⏸ Paused", "resume", "↓ paused", "ETA --"] {
+        assert!(row.contains("paused 26%"), "{row}");
+        for expected in ["⏸ Download", "resume", "↓ paused", "ETA --"] {
             assert!(paused.contains(expected), "missing {expected:?}\n{paused}");
         }
-        assert!(!paused.contains("Downloading"));
 
         model.key(p());
-        assert!(render(&mut model, 80, 24).contains("Downloading"));
+        let resumed = render(&mut model, 80, 24);
+        assert!(resumed.contains("Download") && !resumed.contains("⏸ Download"));
 
         model.install_active = false;
         model.active_install = None;
         model.complete_install();
         let done = render(&mut model, 80, 24);
-        assert!(!done.contains("⬇ ") && done.contains("Finished"));
+        assert!(!done.contains("download 26%") && done.contains("Done"));
     }
 
     #[test]
@@ -3495,12 +3533,12 @@ mod tests {
         model.install_active = true;
         model.active_install = Some((1, PathBuf::from("/games")));
         model.begin_install();
-        assert!(render(&mut model, 80, 24).contains("… preparing"));
+        assert!(render(&mut model, 80, 24).contains("preparing"));
         model.key(p());
         let paused = render(&mut model, 80, 24);
-        assert!(paused.contains("⏸ paused") && paused.contains("Paused before the download"));
+        assert!(paused.contains("paused") && paused.contains("Paused before the download"));
         model.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-        assert!(render(&mut model, 80, 24).contains("cancelling"));
+        assert!(render(&mut model, 80, 24).contains("cancel…"));
     }
 
     fn verifying(model: &mut Model, done: u64) {
@@ -3513,8 +3551,72 @@ mod tests {
             total_download_bytes: 2 << 30,
             verify_bytes_done: done,
             verify_bytes_total: 30 << 30,
-            message: "Verifying files 3/9 · maps/big.bsp".into(),
+            message: "3/9 files".into(),
         });
+    }
+
+    #[test]
+    fn state_words_are_short_and_distinguish_update_status() {
+        let mut item = game(7, "Seven", false);
+        assert_eq!(theme::state_tag(&item).0, "new");
+        item.unavailable_reason = Some("region locked".into());
+        assert_eq!(theme::state_tag(&item).0, "blocked");
+        let mut item = game(7, "Seven", true);
+        for (update, word) in [
+            (UpdateStatus::UpToDate, "installed"),
+            (UpdateStatus::Unknown, "installed"),
+            (
+                UpdateStatus::Available {
+                    installed_build: 1,
+                    latest_build: 2,
+                },
+                "update",
+            ),
+            (UpdateStatus::Unavailable("gone".into()), "blocked"),
+        ] {
+            item.update = update;
+            let (label, _) = theme::state_tag(&item);
+            assert_eq!(label, word);
+            assert!(label.chars().count() <= 13);
+        }
+    }
+
+    #[test]
+    fn install_phase_shows_a_calm_message_and_says_cancel_waits() {
+        let mut model = model();
+        installing(&mut model);
+        model.apply_progress(InstallProgress {
+            app_id: 1,
+            phase: InstallPhase::Committing,
+            completed_bytes: 30 << 30,
+            total_bytes: 30 << 30,
+            downloaded_bytes: 16 << 30,
+            total_download_bytes: 16 << 30,
+            verify_bytes_done: 30 << 30,
+            verify_bytes_total: 30 << 30,
+            message: "Moving files into place 42%".into(),
+        });
+        let screen = render(&mut model, 100, 30);
+        for expected in [
+            "Install     100%",
+            "cancel waits for install",
+            "Moving files into place 42%",
+        ] {
+            assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
+        }
+        let row = screen
+            .lines()
+            .find(|line| line.contains("Game number 0 "))
+            .unwrap();
+        assert!(row.contains("install 100%"), "{row}");
+        let title = screen
+            .lines()
+            .find(|line| line.contains("Install · Game number 0"))
+            .unwrap();
+        assert!(
+            !title.contains("pause") && !title.contains("cancel╭"),
+            "{title}"
+        );
     }
 
     #[test]
@@ -3524,12 +3626,12 @@ mod tests {
         verifying(&mut model, 10 << 30);
         let screen = render(&mut model, 100, 30);
         for expected in [
-            "Verifying",
+            "Verify",
             "33%",
             "hashed 10.0 GiB / 30.0 GiB",
             "⟳ --",
             "ETA --",
-            "Verifying files 3/9 · maps/big.bsp",
+            "3/9 files",
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
         }
@@ -3537,10 +3639,10 @@ mod tests {
             .lines()
             .find(|line| line.contains("Game number 0 "))
             .unwrap();
-        assert!(row.contains("⟳ 33%"), "{row}");
+        assert!(row.contains("verify 33%"), "{row}");
         let bar = screen
             .lines()
-            .find(|line| line.contains("Verifying") && line.contains("33%") && line.contains('█'))
+            .find(|line| line.contains("Verify") && line.contains("33%") && line.contains('█'))
             .unwrap();
         assert!(bar.contains('█') && bar.contains('░'), "{bar}");
         // Pause stays refused outside the download.

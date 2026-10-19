@@ -273,7 +273,7 @@ async fn download_group(
         }
     }
     if last_report.elapsed() >= REUSE_REPORT_INTERVAL || missing.is_empty() {
-        status.message = "Verified/reused staged data".into();
+        status.message = "Checked staged data".into();
         report(progress, status);
         *last_report = std::time::Instant::now();
     }
@@ -1159,9 +1159,9 @@ async fn run_inner(
     status.phase = InstallPhase::Verifying;
     status.verify_bytes_total = layout.verify_bytes();
     let verify_files = layout.verify_files();
-    let (bytes, files, current) = verify.snapshot();
+    let (bytes, files, _) = verify.snapshot();
     status.verify_bytes_done = bytes.min(status.verify_bytes_total);
-    status.message = format!("Verifying files {files}/{verify_files} · {current}");
+    status.message = format!("{files}/{verify_files} files");
     report(progress, status);
     // Files hashed during the download are not hashed again.
     let verified = match early.as_mut() {
@@ -1185,7 +1185,7 @@ async fn run_inner(
     status.verify_bytes_done = status.verify_bytes_total;
     check_cancel(cancel)?;
     status.phase = InstallPhase::Committing;
-    status.message = "Committing verified files; cancellation waits for commit/rollback".into();
+    status.message = "Moving files into place".into();
     report(progress, status);
     let commit = Arc::new(CommitProgress::default());
     let (s, l, c) = (
@@ -1205,10 +1205,8 @@ async fn run_inner(
             }
             _ = tick.tick() => {
                 let (done, total) = commit.snapshot();
-                if total != 0 {
-                    status.message = format!(
-                        "Committing verified files {done}/{total}; cancellation waits for commit/rollback"
-                    );
+                if let Some(percent) = (done * 100).checked_div(total) {
+                    status.message = format!("Moving files into place {percent}%");
                     report(progress, status);
                 }
             }
@@ -1216,7 +1214,7 @@ async fn run_inner(
     };
     status.phase = InstallPhase::Finished;
     status.completed_bytes = layout.bytes;
-    status.message = "Installed and verified".into();
+    status.message = "Installed".into();
     if let Some(path) = preserved {
         status.message.push_str(&format!(
             "; modified originals preserved in {}",
@@ -1247,9 +1245,9 @@ async fn poll_verify<T>(
         tokio::select! {
             result = &mut job => return result,
             _ = tick.tick() => {
-                let (bytes, files, current) = verify.snapshot();
+                let (bytes, files, _) = verify.snapshot();
                 status.verify_bytes_done = bytes.min(status.verify_bytes_total);
-                status.message = format!("Verifying files {files}/{verify_files} · {current}");
+                status.message = format!("{files}/{verify_files} files");
                 report(progress, status);
             }
         }
