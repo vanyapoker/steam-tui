@@ -460,14 +460,27 @@ fn native_scripts_preserve_filename_case_and_apply_only_verified_file_operations
     );
 }
 #[test]
-fn installed_fourteen_series_runtime_is_recognised_from_registry_output() {
-    let present = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64\r\n    Bld    REG_DWORD    0x8681\r\n    Installed    REG_DWORD    0x1\r\n    Major    REG_DWORD    0xe\r\n    Minor    REG_DWORD    0x2a\r\n    Version    REG_SZ    14.42.34433.0\r\n";
-    assert!(runner::runtime_installed(present));
+fn installed_fourteen_series_runtime_is_recognised_from_registry_file() {
+    let section = "Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes\\\\x64";
+    let present = format!(
+        "[Other] 1\n\"Installed\"=dword:00000001\n\n[{section}] 1791989089\n#time=1dd5\n\"Bld\"=dword:00008681\n\"Installed\"=dword:00000001\n\"Major\"=dword:0000000e\n\"Version\"=\"14.42.34433.0\"\n\n[Next] 2\n"
+    );
+    assert!(runner::runtime_installed(&present, section));
     assert!(!runner::runtime_installed(
-        &present.replace("0x1\r", "0x0\r")
+        &present.replace("0000000e", "0000000c"),
+        section
     ));
     assert!(!runner::runtime_installed(
-        &present.replace("0xe\r", "0xc\r")
+        &present.replace(
+            "\"Installed\"=dword:00000001\n\"Major",
+            "\"Installed\"=dword:00000000\n\"Major"
+        ),
+        section
     ));
-    assert!(!runner::runtime_installed(""));
+    // Values from a neighbouring section never count.
+    assert!(!runner::runtime_installed(
+        "[Other] 1\n\"Installed\"=dword:00000001\n\"Major\"=dword:0000000e\n",
+        section
+    ));
+    assert!(!runner::runtime_installed("", section));
 }

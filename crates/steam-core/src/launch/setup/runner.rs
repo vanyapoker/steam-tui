@@ -235,8 +235,15 @@ impl Runner {
     /// Microsoft's 2015-2022 Visual C++ redistributables share one binary-compatible
     /// 14.x runtime. Proton prefixes already carry one, and the installer bundle is
     /// unreliable under Wine, so an installed 14.x runtime of the same architecture
-    /// satisfies the Valve prerequisite.
-    fn runtime_satisfied(&mut self, process: &Process, root: &Path) -> Result<bool> {
+    /// satisfies the Valve prerequisite. The prefix's registry file is read
+    /// directly; it needs no Wine process.
+    fn runtime_satisfied(
+        &mut self,
+        prefix: &Path,
+        win64: bool,
+        process: &Process,
+        root: &Path,
+    ) -> Result<bool> {
         let Some(key) = &process.has_run_key else {
             return Ok(false);
         };
@@ -251,27 +258,37 @@ impl Runner {
             return Ok(false);
         }
         let mut fields = process.name.split_whitespace();
-        let (arch, view) = match fields.next() {
-            Some(a) if a.eq_ignore_ascii_case("x64") => ("x64", "/reg:64"),
-            Some(a) if a.eq_ignore_ascii_case("x86") => ("x86", "/reg:32"),
+        let arch = match fields.next() {
+            Some(a) if a.eq_ignore_ascii_case("x64") => "x64",
+            Some(a) if a.eq_ignore_ascii_case("x86") => "x86",
             _ => return Ok(false),
         };
         if fields.next().and_then(|v| v.split('.').next()) != Some("14") {
             return Ok(false);
         }
-        let (code, text) = self.invoke(&[
-            "C:\\windows\\system32\\reg.exe".into(),
-            "query".into(),
-            format!("HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\{arch}"),
-            view.into(),
-        ])?;
-        if code == 1 {
-            return Ok(false);
+        let section = match (arch, win64) {
+            ("x64", true) => {
+                "Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes\\\\x64"
+            }
+            ("x86", true) => {
+                "Software\\\\Wow6432Node\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes\\\\x86"
+            }
+            ("x86", false) => {
+                "Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes\\\\x86"
+            }
+            _ => return Ok(false),
+        };
+        let mut text = String::new();
+        match fs::File::open(prefix.join("pfx/system.reg")) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                file.take(64 * 1024 * 1024).read_to_end(&mut bytes)?;
+                text = String::from_utf8_lossy(&bytes).into_owned();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
-        if code != 0 {
-            return Err(failure(format!("Runtime query exited with code {code}")));
-        }
-        Ok(runtime_installed(&text))
+        Ok(runtime_installed(&text, section))
     }
 
     fn recipes(&mut self, prefix: &Path, recipes: &[Recipe]) -> Result<()> {
@@ -341,7 +358,7 @@ impl Runner {
                 {
                     continue;
                 }
-                if self.runtime_satisfied(process, &recipe.root)? {
+                if self.runtime_satisfied(prefix, win64, process, &recipe.root)? {
                     writeln!(
                         self.log,
                         "[steam-tui] {} satisfied by the prefix's installed 14.x runtime",
@@ -374,19 +391,26 @@ impl Runner {
     }
 }
 
-pub(super) fn runtime_installed(text: &str) -> bool {
-    let dword = |name: &str| {
-        let fields: Vec<_> = text.split_whitespace().collect();
-        fields.windows(3).find_map(|w| {
-            (w[0].eq_ignore_ascii_case(name) && w[1].eq_ignore_ascii_case("REG_DWORD"))
-                .then(|| {
-                    w[2].strip_prefix("0x")
-                        .and_then(|n| u32::from_str_radix(n, 16).ok())
-                })
-                .flatten()
-        })
+/// Reads one section of a Wine registry file. `section` uses the file's own
+/// doubled-backslash spelling, without brackets.
+pub(super) fn runtime_installed(registry: &str, section: &str) -> bool {
+    let header = format!("[{section}]");
+    let Some(start) = registry.lines().position(|line| line.starts_with(&header)) else {
+        return false;
     };
-    dword("Installed") == Some(1) && dword("Major") == Some(14)
+    let mut installed = false;
+    let mut major = false;
+    for line in registry.lines().skip(start + 1) {
+        if line.starts_with('[') || line.is_empty() {
+            break;
+        }
+        match line.to_ascii_lowercase().as_str() {
+            "\"installed\"=dword:00000001" => installed = true,
+            "\"major\"=dword:0000000e" => major = true,
+            _ => {}
+        }
+    }
+    installed && major
 }
 
 fn applies(process: &Process, win64: bool, os: Option<&str>) -> bool {
