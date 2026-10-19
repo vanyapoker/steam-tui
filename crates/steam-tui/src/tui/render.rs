@@ -292,7 +292,7 @@ fn title_groups(groups: Vec<Vec<Seg>>, border: Style, width: usize) -> Line<'sta
     Line::from(output)
 }
 
-/// Rounded panel whose top border carries `left`/`right` title groups and whose
+/// Square-cornered panel (btop style) whose top border carries `left`/`right` title groups and whose
 /// bottom border carries `bottom` key hints.
 fn panel_block(
     border: Style,
@@ -305,7 +305,7 @@ fn panel_block(
     let right = title_groups(right, border, inner);
     let left_budget = inner.saturating_sub(right.width());
     Block::bordered()
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Plain)
         .border_style(border)
         .title_top(title_groups(left, border, left_budget))
         .title_top(right.right_aligned())
@@ -2248,7 +2248,7 @@ fn cloud_conflicts(frame: &mut Frame<'_>, model: &Model) {
             dim()
         };
         let block = Block::bordered()
-            .border_type(BorderType::Rounded)
+            .border_type(BorderType::Plain)
             .border_style(border)
             .title_top(title_groups(
                 vec![vec![
@@ -3012,7 +3012,7 @@ mod tests {
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
         }
-        assert!(screen.contains('╭') && screen.contains('╯'));
+        assert!(screen.contains('┌') && screen.contains('┘'));
         model.sort = Sort::Size;
         model.reverse = true;
         assert!(render(&mut model, 80, 24).contains("Size²▼"));
