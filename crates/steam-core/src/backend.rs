@@ -1,5 +1,6 @@
 //! Experimental Steamworks bridge, scoped to one app and one CM session.
 //! Credentials remain in the parent process. Normal launches do not use this.
+pub(crate) mod apps;
 mod events;
 mod gc;
 pub mod images;
@@ -38,6 +39,7 @@ pub struct Endpoint {
     listener: UnixListener,
     /// The game's library `steamapps` directory, where Workshop items are installed.
     workshop_dir: Option<PathBuf>,
+    apps: Option<std::sync::Arc<apps::Context>>,
 }
 
 impl Endpoint {
@@ -61,6 +63,7 @@ impl Endpoint {
                         directory,
                         listener,
                         workshop_dir: None,
+                        apps: None,
                     };
                     fs::set_permissions(endpoint.path(), fs::Permissions::from_mode(0o600))?;
                     return Ok(endpoint);
@@ -83,6 +86,11 @@ impl Endpoint {
     /// Installs Workshop items below `steamapps/workshop` of this library `steamapps` directory.
     pub fn with_workshop(mut self, steamapps: PathBuf) -> Self {
         self.workshop_dir = Some(steamapps);
+        self
+    }
+
+    pub(crate) fn with_apps(mut self, context: apps::Context) -> Self {
+        self.apps = Some(std::sync::Arc::new(context));
         self
     }
 
@@ -152,6 +160,7 @@ impl Endpoint {
             app_id,
             alive: None,
             ownership: ownership::Service::default(),
+            apps: apps::Service::new(connection, self.apps.clone(), events.clone()),
             networking: networking::Networking::start(connection, app_id, events.clone()),
             tickets: tickets::Service::start(connection, app_id, events.clone())?,
             gc: gc::Gc::start(connection, app_id, events.clone()).await?,
@@ -258,6 +267,7 @@ struct Session<'a> {
     app_id: u32,
     alive: Option<(Instant, bool)>,
     ownership: ownership::Service,
+    apps: apps::Service,
     networking: networking::Networking,
     tickets: tickets::Service,
     gc: gc::Gc,
@@ -333,6 +343,7 @@ impl Session<'_> {
             | Operation::P2PRecv
             | Operation::Ownership
             | Operation::AppOwnership { .. }
+            | Operation::Apps(_)
             | Operation::Persona
             | Operation::AuthSessionTicket { .. }
             | Operation::WebAuthTicket { .. }
@@ -364,6 +375,21 @@ impl Session<'_> {
                 self.ownership
                     .query(self.connection, self.app_id, app_id, &self.events)
                     .await
+            }
+            Operation::Apps(op) => {
+                if let steam_ipc::AppsOp::InstallDlc { app_id } = &op
+                    && !matches!(
+                        self.ownership
+                            .query(self.connection, self.app_id, *app_id, &self.events)
+                            .await,
+                        Response::Ownership { owned: true }
+                    )
+                {
+                    return Response::Error {
+                        message: "DLC ownership could not be confirmed".into(),
+                    };
+                }
+                self.apps.handle(op).await
             }
             Operation::Persona => {
                 let steam_id = self.connection.steam_id().steam64();
@@ -450,6 +476,7 @@ impl Session<'_> {
                 let mut callbacks = self.lobbies.poll();
                 callbacks.extend(self.tickets.poll());
                 callbacks.extend(self.workshop.poll());
+                callbacks.extend(self.apps.poll());
                 Response::Callbacks(
                     callbacks
                         .into_iter()

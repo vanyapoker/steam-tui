@@ -7,7 +7,9 @@
 //! and `finish_stage` verifies each file end to end in parallel and fsyncs it
 //! before anything is committed.
 //! Changed local managed files are retained under `.steam-tui/preserved`; files
-//! absent from the new depot remain untouched, including mods and saves.
+//! absent from new ordinary depots remain untouched, including mods and saves.
+//! Removed DLC files are deleted only when their old manifest proves that they
+//! are unchanged and not supplied by any remaining depot.
 //!
 //! Safety boundary: Linux filesystems with working rename, flock, fsync and
 //! symlinks are required. Existing updates stay in their original library.
@@ -18,13 +20,18 @@
 //! tree, directory/file collisions require explicit user action, and obsolete
 //! depot files are retained rather than guessing which files are saves/mods.
 //! UserConfig defaults are verified but never replace existing configuration.
+//! Live DLC requests use a separate, validated same-build scope: unrelated depot
+//! manifests stay fixed and only DLC-owned/overlaid paths may change. Normal
+//! updates still require the game to be closed; Valve clients always prohibit
+//! library mutation. Cached manifest receipts are bound to installed metadata
+//! and contain file/chunk hashes, never keys or account credentials.
 //! Depot install scripts are downloaded as data, never executed by the installer.
 //! Verified script receipts are processed by launch-time setup in the game's
 //! Proton prefix; Steam-dependent DRM remains a launch limitation.
 mod download;
 pub(crate) mod filesystem;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod transaction;
 pub mod workshop;
 
@@ -342,20 +349,83 @@ struct Layout {
     bytes: u64,
     download_bytes: u64,
     install_scripts: bool,
+    active: Option<std::collections::BTreeSet<PathBuf>>,
+    removed: Vec<PathBuf>,
+    old_depots: BTreeMap<PathBuf, u32>,
 }
 
 impl Layout {
+    fn active_files(&self) -> impl Iterator<Item = &PlannedFile> {
+        self.files.iter().filter(|p| {
+            self.active
+                .as_ref()
+                .is_none_or(|paths| paths.contains(&p.file.path))
+        })
+    }
+
+    /// A live DLC transaction may change only paths supplied by its depots,
+    /// including restoring a base file previously overlaid by that DLC.
+    fn restrict_to_dlc(&mut self, allowed: &std::collections::BTreeSet<u32>) -> Result<()> {
+        let mut active = std::collections::BTreeSet::new();
+        for planned in &self.files {
+            let file = &planned.file;
+            let same = self.old_files.get(&file.path).is_some_and(|old| {
+                old.size == file.size
+                    && old.sha1 == file.sha1
+                    && old.flags == file.flags
+                    && old.link_target == file.link_target
+            });
+            if same {
+                continue;
+            }
+            if !allowed.contains(&planned.depot.depot_id)
+                && !self
+                    .old_depots
+                    .get(&file.path)
+                    .is_some_and(|id| allowed.contains(id))
+            {
+                return Err(failure(
+                    "DLC job would change unrelated base-game content; update the game while closed",
+                ));
+            }
+            active.insert(file.path.clone());
+        }
+        self.reconcile_removals(allowed);
+        self.active = Some(active);
+        self.download_bytes = self
+            .active_files()
+            .flat_map(|p| &p.file.chunks)
+            .map(|c| u64::from(c.compressed_size))
+            .sum();
+        Ok(())
+    }
+
+    fn reconcile_removals(&mut self, allowed: &std::collections::BTreeSet<u32>) {
+        let remaining: std::collections::BTreeSet<_> =
+            self.files.iter().map(|p| &p.file.path).collect();
+        self.removed = self
+            .old_files
+            .iter()
+            .filter(|(path, file)| {
+                !remaining.contains(path)
+                    && file.flags & (64 | 3) == 0
+                    && self
+                        .old_depots
+                        .get(*path)
+                        .is_some_and(|id| allowed.contains(id))
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+    }
     /// Regular files that `finish_stage` hashes, and their total size.
     fn verify_files(&self) -> u64 {
-        self.files
-            .iter()
+        self.active_files()
             .filter(|planned| planned.file.flags & (64 | 512) == 0)
             .count() as u64
     }
 
     fn verify_bytes(&self) -> u64 {
-        self.files
-            .iter()
+        self.active_files()
             .filter(|planned| planned.file.flags & (64 | 512) == 0)
             .map(|planned| planned.file.size)
             .sum()
@@ -390,6 +460,7 @@ impl Layout {
             }
         }
         let mut old_files = BTreeMap::new();
+        let mut old_depots = BTreeMap::new();
         let mut reuse = HashMap::new();
         for manifest in old {
             for file in manifest.files {
@@ -403,6 +474,7 @@ impl Layout {
                         });
                     }
                 }
+                old_depots.insert(file.path.clone(), manifest.depot_id);
                 old_files.insert(file.path.clone(), file);
             }
         }
@@ -469,6 +541,9 @@ impl Layout {
             bytes,
             download_bytes,
             install_scripts,
+            active: None,
+            removed: Vec::new(),
+            old_depots,
         })
     }
 
@@ -553,6 +628,35 @@ pub async fn run(
     cancel: CancellationToken,
     pause: PauseGate,
 ) -> Result<InstalledGame> {
+    run_scoped(connection, request, progress, cancel, pause, None).await
+}
+
+pub(crate) async fn run_dlc(
+    connection: Connection,
+    request: InstallRequest,
+    progress: mpsc::Sender<InstallProgress>,
+    cancel: CancellationToken,
+    scope: std::collections::BTreeSet<u32>,
+) -> Result<InstalledGame> {
+    run_scoped(
+        connection,
+        request,
+        progress,
+        cancel,
+        PauseGate::default(),
+        Some(scope),
+    )
+    .await
+}
+
+async fn run_scoped(
+    connection: Connection,
+    request: InstallRequest,
+    progress: mpsc::Sender<InstallProgress>,
+    cancel: CancellationToken,
+    pause: PauseGate,
+    scope: Option<std::collections::BTreeSet<u32>>,
+) -> Result<InstalledGame> {
     let mut status = InstallProgress {
         app_id: request.plan.app_id,
         phase: InstallPhase::Preparing,
@@ -565,7 +669,16 @@ pub async fn run(
         message: "Checking library, running processes and interrupted transactions".into(),
     };
     report(&progress, &status);
-    let result = run_inner(connection, request, &progress, &cancel, &pause, &mut status).await;
+    let result = run_inner(
+        connection,
+        request,
+        &progress,
+        &cancel,
+        &pause,
+        &mut status,
+        scope,
+    )
+    .await;
     if result.is_err() && cancel.is_cancelled() && status.phase != InstallPhase::Committing {
         status.phase = InstallPhase::Cancelled;
         status.message =
@@ -576,6 +689,27 @@ pub async fn run(
     result
 }
 
+async fn install_manifest(
+    client: &ContentClient,
+    session: &Arc<transaction::Session>,
+    spec: &DepotSpec,
+    cancel: &CancellationToken,
+) -> Result<DepotManifest> {
+    let (s, requested) = (session.clone(), spec.clone());
+    if let Some(manifest) = blocking(move || s.cached_manifest(&requested)).await? {
+        client.register_manifest(spec, &manifest).await?;
+        return Ok(manifest);
+    }
+    let manifest = client.manifest(spec, cancel).await?;
+    let (s, requested) = (session.clone(), spec.clone());
+    blocking(move || {
+        s.remember_manifest(&requested, &manifest)?;
+        Ok(manifest)
+    })
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_inner(
     connection: Connection,
     request: InstallRequest,
@@ -583,12 +717,15 @@ async fn run_inner(
     cancel: &CancellationToken,
     pause: &PauseGate,
     status: &mut InstallProgress,
+    dlc_scope: Option<std::collections::BTreeSet<u32>>,
 ) -> Result<InstalledGame> {
     check_cancel(cancel)?;
     let owner = connection.steam_id().steam64();
     let request_copy = request.clone();
-    let session =
-        Arc::new(blocking(move || transaction::Session::prepare(request_copy, owner)).await?);
+    let session = Arc::new(
+        blocking(move || transaction::Session::prepare_scoped(request_copy, owner, dlc_scope))
+            .await?,
+    );
     check_cancel(cancel)?;
     let client = ContentClient::new(connection)
         .await?
@@ -601,10 +738,40 @@ async fn run_inner(
             depot.depot_id, depot.manifest_id
         );
         report(progress, status);
-        manifests.push((depot.clone(), client.manifest(depot, cancel).await?));
+        manifests.push((
+            depot.clone(),
+            install_manifest(&client, &session, depot, cancel).await?,
+        ));
     }
     let mut old = Vec::new();
+    let mut removed_dlc = std::collections::BTreeSet::new();
     if let Some(existing) = &request.existing {
+        let recorded = crate::installed::read_vdf(
+            &existing
+                .library_root
+                .join(format!("steamapps/appmanifest_{}.acf", existing.app_id)),
+        )?;
+        let app = crate::launch::app_document(existing).ok();
+        for id in existing
+            .installed_depots
+            .keys()
+            .filter(|id| !request.plan.depots.iter().any(|d| d.depot_id == **id))
+        {
+            let recorded_dlc = recorded
+                .at(&["appstate", "steamtuidlcdepots"])
+                .and_then(|n| n.text(&id.to_string()))
+                .and_then(|s| s.parse::<u32>().ok())
+                .is_some_and(|id| id != 0);
+            let declared_dlc = app
+                .as_ref()
+                .and_then(|doc| doc.at(&["depots", &id.to_string()]))
+                .and_then(|d| d.text("dlcappid"))
+                .and_then(|s| s.parse::<u32>().ok())
+                .is_some_and(|id| id != 0);
+            if recorded_dlc || declared_dlc {
+                removed_dlc.insert(*id);
+            }
+        }
         for (&depot_id, &manifest_id) in &existing.installed_depots {
             check_cancel(cancel)?;
             if let Some((_, same)) = manifests
@@ -618,29 +785,47 @@ async fn run_inner(
                     .depots
                     .iter()
                     .find(|d| d.depot_id == depot_id)
-                    .map_or(request.plan.app_id, |d| d.source_app_id);
+                    .map(|d| d.source_app_id)
+                    .or_else(|| {
+                        recorded
+                            .at(&["appstate", "installeddepots", &depot_id.to_string()])
+                            .and_then(|d| d.text("dlcappid"))
+                            .and_then(|s| s.parse::<u32>().ok())
+                    })
+                    .unwrap_or(request.plan.app_id);
                 old.push(
-                    client
-                        .manifest(
-                            &DepotSpec {
-                                depot_id,
-                                manifest_id,
-                                source_app_id,
-                            },
-                            cancel,
-                        )
-                        .await
-                        .map_err(|e| {
-                            failure(format!(
-                                "Cannot safely classify existing depot {depot_id} files: {e}"
-                            ))
-                        })?,
+                    install_manifest(
+                        &client,
+                        &session,
+                        &DepotSpec {
+                            depot_id,
+                            manifest_id,
+                            source_app_id,
+                        },
+                        cancel,
+                    )
+                    .await
+                    .map_err(|e| {
+                        failure(format!(
+                            "Cannot safely classify existing depot {depot_id} files: {e}"
+                        ))
+                    })?,
                 );
             }
         }
     }
-    let layout = Arc::new(Layout::new(manifests, old)?);
-    status.total_bytes = layout.bytes;
+    let mut layout = Layout::new(manifests, old)?;
+    if let Some(scope) = session.dlc_scope() {
+        layout.restrict_to_dlc(scope)?;
+    } else {
+        layout.reconcile_removals(&removed_dlc);
+    }
+    let layout = Arc::new(layout);
+    status.total_bytes = if session.dlc_scope().is_some() {
+        layout.verify_bytes()
+    } else {
+        layout.bytes
+    };
     status.total_download_bytes = layout.download_bytes;
     status.message = "Checking verified staging data, collisions and required disk space".into();
     report(progress, status);
@@ -657,6 +842,13 @@ async fn run_inner(
     for (file_index, planned) in layout.files.iter().enumerate() {
         check_cancel(cancel)?;
         let file = &planned.file;
+        if layout
+            .active
+            .as_ref()
+            .is_some_and(|paths| !paths.contains(&file.path))
+        {
+            continue;
+        }
         if file.flags & (64 | 512) != 0 {
             continue;
         }

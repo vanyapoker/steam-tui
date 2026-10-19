@@ -89,7 +89,7 @@ pub(super) fn select(
 }
 
 /// Platforms to try, in preference order.
-fn platforms(
+pub(crate) fn platforms(
     existing: Option<&InstalledGame>,
     doc: &Node,
     depots: &Node,
@@ -303,6 +303,15 @@ fn for_platform(target: &Target<'_>, platform: InstallPlatform) -> Result<Outcom
         branch: branch.to_owned(),
         language: language.to_owned(),
         depots: selected,
+        dlc_depots: depots
+            .children
+            .iter()
+            .filter_map(|(key, d)| {
+                let id = key.parse::<u32>().ok()?;
+                let dlc = number(d, "dlcappid").and_then(|v| u32::try_from(v).ok())?;
+                Some((id, dlc))
+            })
+            .collect(),
         shared_depots: super::shared::requirements(doc, platform, language)
             .map_err(|e| failure(e.to_string()))?
             .into_iter()
@@ -323,7 +332,7 @@ fn for_platform(target: &Target<'_>, platform: InstallPlatform) -> Result<Outcom
 /// Redistributable depots (`sharedinstall`), e.g. Steamworks Common Redistributables,
 /// are shared between games and installed by Steam into `steamapps/common/Steamworks
 /// Shared`; game plans record these separately for launch-time installation.
-pub(super) fn shared_install(depot: &Node) -> bool {
+pub(crate) fn shared_install(depot: &Node) -> bool {
     depot
         .text("sharedinstall")
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))

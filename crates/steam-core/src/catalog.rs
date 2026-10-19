@@ -14,7 +14,7 @@
 //! `MAX_GRAPH_APPS` apps is reported blocked. A source app Steam will not describe
 //! (token denied) blocks only the games whose selected depots need it.
 mod cache;
-mod metadata;
+pub(crate) mod metadata;
 pub(crate) mod shared;
 #[cfg(test)]
 mod tests;
@@ -58,6 +58,9 @@ pub struct InstallPlan {
     /// Shared depot -> source app, stored independently of game content.
     #[serde(default)]
     pub shared_depots: BTreeMap<u32, u32>,
+    /// Depot -> owning DLC, independent of the app supplying its encryption key.
+    #[serde(default)]
+    pub dlc_depots: BTreeMap<u32, u32>,
     pub download_bytes: u64,
     pub installed_bytes: u64,
 }
@@ -267,12 +270,13 @@ pub async fn load(
                 Some("Steam app metadata is currently unavailable".to_owned()),
             )
         } else {
-            match resolve(
+            match resolve_account(
                 app.app_id,
                 existing.as_ref(),
                 &owned,
                 &library.owned_depots,
                 &docs,
+                connection.steam_id().steam64(),
             ) {
                 Ok(plan) => {
                     let update = existing
@@ -426,7 +430,125 @@ pub async fn plan(
     let mut docs = BTreeMap::from([(app_id, document)]);
     // Source-fetch failures only matter if a selected depot needs the source.
     fetch_sources(connection, &[app_id], &owned, &depots, &mut docs).await;
-    resolve(app_id, existing, &owned, &depots, &docs)
+    resolve_account(
+        app_id,
+        existing,
+        &owned,
+        &depots,
+        &docs,
+        connection.steam_id().steam64(),
+    )
+}
+
+/// A DLC request uses the installed build's metadata, never a silent update of
+/// the running parent. The scoped installer additionally compares every depot.
+pub(crate) async fn plan_dlc(
+    connection: &Connection,
+    game: &InstalledGame,
+    document: Node,
+    selection: &crate::dlc::Selection,
+    target: u32,
+) -> Result<InstallPlan> {
+    let library = library::load(connection).await?;
+    let owned: BTreeSet<_> = library.apps.iter().map(|a| a.app_id).collect();
+    if !owned.contains(&game.app_id) {
+        return Err(failure("Parent app license is unavailable"));
+    }
+    let scope = crate::dlc::depot_scope(&document, target);
+    let mut document = document;
+    crate::dlc::filter(&mut document, selection);
+    let mut docs = BTreeMap::from([(game.app_id, document)]);
+    fetch_sources(
+        connection,
+        &[game.app_id],
+        &owned,
+        &library.owned_depots,
+        &mut docs,
+    )
+    .await;
+    let mut plan = resolve(
+        game.app_id,
+        Some(game),
+        &owned,
+        &library.owned_depots,
+        &docs,
+    )?;
+    plan.depots.retain(|d| scope.contains(&d.depot_id));
+    let recorded = installed::read_vdf(
+        &game
+            .library_root
+            .join(format!("steamapps/appmanifest_{}.acf", game.app_id)),
+    )
+    .map_err(|e| failure(e.to_string()))?;
+    for (&depot_id, &manifest_id) in &game.installed_depots {
+        if scope.contains(&depot_id) {
+            continue;
+        }
+        let source_app_id = recorded
+            .at(&["appstate", "installeddepots", &depot_id.to_string()])
+            .and_then(|d| d.text("dlcappid"))
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(game.app_id);
+        plan.depots.push(DepotSpec {
+            depot_id,
+            manifest_id,
+            source_app_id,
+        });
+        if let Some(dlc) = recorded
+            .at(&["appstate", "steamtuidlcdepots"])
+            .and_then(|n| n.text(&depot_id.to_string()))
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            plan.dlc_depots.insert(depot_id, dlc);
+        }
+    }
+    plan.dlc_depots
+        .retain(|id, _| plan.depots.iter().any(|d| d.depot_id == *id));
+    plan.depots.sort_by_key(|d| d.depot_id);
+    Ok(plan)
+}
+
+fn resolve_account(
+    app_id: u32,
+    existing: Option<&InstalledGame>,
+    owned: &BTreeSet<u32>,
+    licensed: &BTreeSet<u32>,
+    docs: &BTreeMap<u32, Node>,
+    account: u64,
+) -> Result<InstallPlan> {
+    let selection = existing
+        .map(|game| crate::dlc::Selection::read(&game.library_root, account, app_id))
+        .transpose()
+        .map_err(|e| failure(e.to_string()))?
+        .unwrap_or_default();
+    if selection.disabled.is_empty() {
+        return resolve(app_id, existing, owned, licensed, docs);
+    }
+    // Clone only this app's bounded source graph, not the entire account catalog.
+    let mut selected = BTreeMap::new();
+    let mut queue = vec![app_id];
+    while let Some(id) = queue.pop() {
+        if selected.contains_key(&id) {
+            continue;
+        }
+        let Some(doc) = docs.get(&id) else {
+            continue;
+        };
+        if selected.len() >= MAX_GRAPH_APPS {
+            return Err(failure("DLC source graph is too large"));
+        }
+        let mut doc = doc.clone();
+        if id == app_id {
+            crate::dlc::filter(&mut doc, &selection);
+        }
+        selected.insert(id, doc);
+        queue.extend(
+            references(&selected, id, owned, licensed)
+                .into_iter()
+                .filter(|id| !selected.contains_key(id)),
+        );
+    }
+    resolve(app_id, existing, owned, licensed, &selected)
 }
 
 /// Shared-depot source apps named by `source`'s selectable depots. Redistributable
@@ -554,9 +676,8 @@ fn resolve(
 }
 
 /// Compares the installed build and the manifests of the depots the plan names.
-/// Installed depots the plan does not name (shared redistributables Steam recorded
-/// in the manifest, depots no longer offered, unowned DLC) are not update triggers:
-/// this installer cannot change them.
+/// Extra depots known to belong to DLC trigger safe removal. Unclassified extra
+/// depots (including legacy shared redistributables) remain untouched.
 fn compare(installed: &InstalledGame, plan: &InstallPlan) -> UpdateStatus {
     let Some(build) = installed.build_id else {
         return UpdateStatus::Unknown;
@@ -581,7 +702,30 @@ fn compare(installed: &InstalledGame, plan: &InstallPlan) -> UpdateStatus {
         .filter(|(id, _)| desired.contains_key(id))
         .map(|(id, manifest)| (*id, *manifest))
         .collect();
-    if desired != present {
+    let extra: BTreeSet<_> = installed
+        .installed_depots
+        .keys()
+        .filter(|id| !desired.contains_key(id))
+        .copied()
+        .collect();
+    let removed_dlc = extra.iter().any(|id| plan.dlc_depots.contains_key(id))
+        || (!extra.is_empty()
+            && installed::read_vdf(
+                &installed
+                    .library_root
+                    .join(format!("steamapps/appmanifest_{}.acf", installed.app_id)),
+            )
+            .ok()
+            .and_then(|doc| doc.at(&["appstate", "steamtuidlcdepots"]).cloned())
+            .is_some_and(|owners| {
+                extra.iter().any(|id| {
+                    owners
+                        .text(&id.to_string())
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .is_some_and(|id| id != 0)
+                })
+            }));
+    if desired != present || removed_dlc {
         UpdateStatus::Available {
             installed_build: build,
             latest_build: plan.build_id,

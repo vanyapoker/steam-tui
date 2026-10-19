@@ -7,6 +7,7 @@ pub mod backend;
 pub mod catalog;
 pub mod cloud;
 pub mod content;
+mod dlc;
 pub mod friends;
 pub mod install;
 pub mod installed;

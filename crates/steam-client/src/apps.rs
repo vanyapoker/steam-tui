@@ -1,5 +1,37 @@
 // SteamApps008 slot order from Valve public headers.
 use super::*;
+use steam_ipc::{AppsOp, AppsSnapshot, Operation, Response};
+
+type SnapshotCache = Option<(
+    std::time::Instant,
+    u32,
+    std::ffi::OsString,
+    Option<std::sync::Arc<AppsSnapshot>>,
+)>;
+static SNAPSHOT: Mutex<SnapshotCache> = Mutex::new(None);
+
+fn invalidate_snapshot() {
+    *SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn snapshot() -> Option<std::sync::Arc<AppsSnapshot>> {
+    let app = current_app_id();
+    let socket = std::env::var_os("STEAM_TUI_BACKEND_SOCKET").unwrap_or_default();
+    let mut cached = SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, id, path, snapshot)) = &*cached
+        && *id == app
+        && *path == socket
+        && at.elapsed() < std::time::Duration::from_millis(100)
+    {
+        return snapshot.clone();
+    }
+    let snapshot = match bridge::request(app, Operation::Apps(AppsOp::Snapshot)) {
+        Ok(Response::Apps(snapshot)) => Some(std::sync::Arc::new(snapshot)),
+        _ => None,
+    };
+    *cached = Some((std::time::Instant::now(), app, socket, snapshot.clone()));
+    snapshot
+}
 
 unsafe extern "C" fn subscribed(_this: *mut c_void) -> bool {
     trace("apps.BIsSubscribed");
@@ -39,9 +71,9 @@ unsafe extern "C" fn subscribed_app(_this: *mut c_void, app_id: u32) -> bool {
 unsafe extern "C" fn slot_3() -> ! {
     unsupported("apps.BIsVACBanned")
 }
-unsafe extern "C" fn slot_7(_this: *mut c_void, _app_id: u32) -> bool {
-    trace("apps.BIsDlcInstalled = false");
-    false
+unsafe extern "C" fn slot_7(_this: *mut c_void, app_id: u32) -> bool {
+    snapshot().is_some_and(|s| s.dlc.iter().any(|d| d.app_id == app_id && d.installed))
+        && bridge::subscribed_app(current_app_id(), app_id)
 }
 unsafe extern "C" fn slot_8(_this: *mut c_void, _app_id: u32) -> u32 {
     trace("apps.GetEarliestPurchaseUnixTime = 0 (unknown)");
@@ -52,39 +84,114 @@ unsafe extern "C" fn slot_9(_this: *mut c_void) -> bool {
     false
 }
 unsafe extern "C" fn slot_10(_this: *mut c_void) -> i32 {
-    trace("apps.GetDLCCount = 0");
-    0
+    snapshot().map_or(0, |s| s.dlc.len().min(i32::MAX as usize) as i32)
 }
-unsafe extern "C" fn slot_11(_this: *mut c_void) -> bool {
-    trace("apps.BGetDLCDataByIndex = false");
-    false
+unsafe extern "C" fn slot_11(
+    _this: *mut c_void,
+    index: i32,
+    app: *mut u32,
+    available: *mut bool,
+    name: *mut c_char,
+    capacity: i32,
+) -> bool {
+    if app.is_null() || available.is_null() || name.is_null() || capacity <= 0 {
+        return false;
+    }
+    unsafe {
+        app.write(0);
+        available.write(false);
+        name.write(0);
+    }
+    let Some(s) = snapshot() else {
+        return false;
+    };
+    let Some(dlc) = usize::try_from(index).ok().and_then(|i| s.dlc.get(i)) else {
+        return false;
+    };
+    if dlc.name.is_empty() || dlc.name.contains('\0') {
+        return false;
+    }
+    let mut count = dlc.name.len().min(capacity as usize - 1);
+    while !dlc.name.is_char_boundary(count) {
+        count -= 1;
+    }
+    unsafe {
+        app.write(dlc.app_id);
+        available.write(dlc.available);
+        ptr::copy_nonoverlapping(dlc.name.as_ptr(), name.cast::<u8>(), count);
+        name.add(count).write(0);
+    }
+    true
 }
-unsafe extern "C" fn slot_12(_this: *mut c_void, _app_id: u32) {
-    trace("apps.InstallDLC (ignored)");
+unsafe extern "C" fn slot_12(_this: *mut c_void, app_id: u32) {
+    invalidate_snapshot();
+    if let Err(error) = bridge::request(
+        current_app_id(),
+        Operation::Apps(AppsOp::InstallDlc { app_id }),
+    ) {
+        trace(format_args!("apps.InstallDLC({app_id}) failed: {error}"));
+    }
+    invalidate_snapshot();
 }
-unsafe extern "C" fn slot_13(_this: *mut c_void, _app_id: u32) {
-    trace("apps.UninstallDLC (ignored)");
+unsafe extern "C" fn slot_13(_this: *mut c_void, app_id: u32) {
+    invalidate_snapshot();
+    if let Err(error) = bridge::request(
+        current_app_id(),
+        Operation::Apps(AppsOp::UninstallDlc { app_id }),
+    ) {
+        trace(format_args!("apps.UninstallDLC({app_id}) failed: {error}"));
+    }
+    invalidate_snapshot();
 }
 unsafe extern "C" fn slot_14(_this: *mut c_void, _app_id: u32) {
     trace("apps.RequestAppProofOfPurchaseKey (ignored)");
 }
-// Direct launches always run the public branch.
-unsafe extern "C" fn slot_15(_this: *mut c_void, _buffer: *mut u8, _capacity: i32) -> bool {
-    trace("apps.GetCurrentBetaName = false (public branch)");
-    false
+unsafe extern "C" fn slot_15(_this: *mut c_void, buffer: *mut u8, capacity: i32) -> bool {
+    if buffer.is_null() || capacity <= 0 {
+        return false;
+    }
+    unsafe {
+        buffer.write(0);
+    }
+    let Some(s) = snapshot() else {
+        return false;
+    };
+    if s.branch.eq_ignore_ascii_case("public")
+        || s.branch.len() >= capacity as usize
+        || s.branch.contains('\0')
+    {
+        return false;
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(s.branch.as_ptr(), buffer, s.branch.len());
+        buffer.add(s.branch.len()).write(0);
+    }
+    true
 }
 unsafe extern "C" fn slot_16(_this: *mut c_void, _missing_only: bool) -> bool {
     trace("apps.MarkContentCorrupt = false");
     false
 }
-unsafe extern "C" fn slot_17(
-    _this: *mut c_void,
-    _app_id: u32,
-    _depots: *mut u32,
-    _max: u32,
-) -> u32 {
-    trace("apps.GetInstalledDepots = 0");
-    0
+unsafe extern "C" fn slot_17(_this: *mut c_void, app_id: u32, depots: *mut u32, max: u32) -> u32 {
+    if depots.is_null() || max == 0 {
+        return 0;
+    }
+    let Some(s) = snapshot() else {
+        return 0;
+    };
+    let ids = if app_id == current_app_id() {
+        &s.depots
+    } else {
+        let Some(dlc) = s.dlc.iter().find(|d| d.app_id == app_id && d.installed) else {
+            return 0;
+        };
+        &dlc.depots
+    };
+    let count = ids.len().min(max as usize);
+    unsafe {
+        ptr::copy_nonoverlapping(ids.as_ptr(), depots, count);
+    }
+    count as u32
 }
 // Known only for the running app (STEAM_COMPAT_INSTALL_PATH set by the launcher).
 unsafe extern "C" fn slot_18(
@@ -128,13 +235,33 @@ unsafe extern "C" fn slot_21(_this: *mut c_void, _key: *const c_char) -> *const 
     trace("apps.GetLaunchQueryParam = \"\"");
     c"".as_ptr()
 }
-unsafe extern "C" fn slot_22(_this: *mut c_void) -> bool {
-    trace("apps.GetDlcDownloadProgress = false");
-    false
+unsafe extern "C" fn slot_22(
+    _this: *mut c_void,
+    app_id: u32,
+    downloaded: *mut u64,
+    total: *mut u64,
+) -> bool {
+    if downloaded.is_null() || total.is_null() {
+        return false;
+    }
+    unsafe {
+        downloaded.write(0);
+        total.write(0);
+    }
+    let Some(s) = snapshot() else {
+        return false;
+    };
+    let Some(dlc) = s.dlc.iter().find(|d| d.app_id == app_id && d.downloading) else {
+        return false;
+    };
+    unsafe {
+        downloaded.write(dlc.downloaded);
+        total.write(dlc.total);
+    }
+    true
 }
 unsafe extern "C" fn slot_23(_this: *mut c_void) -> i32 {
-    trace("apps.GetAppBuildId = 0 (unknown)");
-    0
+    snapshot().map_or(0, |s| s.build_id as i32)
 }
 unsafe extern "C" fn slot_24(_this: *mut c_void, _app_id: u32) {
     trace("apps.RequestAllProofOfPurchaseKeys (ignored)");
@@ -162,9 +289,12 @@ unsafe extern "C" fn slot_28(_this: *mut c_void, _allowed: *mut u32, _played: *m
     false
 }
 unsafe extern "C" fn slot_29(_this: *mut c_void, _app_id: u32) -> bool {
-    trace("apps.SetDlcContext = true");
-    true
+    trace("apps.SetDlcContext is unavailable");
+    false
 }
+
+#[cfg(test)]
+mod tests;
 
 unsafe extern "C" fn slot_30(_this: *mut c_void, available: *mut i32, private: *mut i32) -> i32 {
     trace("apps.GetNumBetas = 0");

@@ -16,6 +16,7 @@ fn request(root: &Path) -> InstallRequest {
             branch: "public".into(),
             language: "english".into(),
             shared_depots: Default::default(),
+            dlc_depots: Default::default(),
             depots: vec![depot()],
             download_bytes: 3,
             installed_bytes: 3,
@@ -28,6 +29,7 @@ fn request(root: &Path) -> InstallRequest {
 }
 
 fn session(root: &Path) -> Session {
+    fs::create_dir_all(root.join("proc-fixture")).unwrap();
     fs::create_dir_all(root.join("steamapps/common/game")).unwrap();
     let state = state_directory(root).unwrap();
     let stage = state.join("30");
@@ -43,6 +45,9 @@ fn session(root: &Path) -> Session {
         stage,
         owner: 123,
         old_manifest_hash: None,
+        dlc_scope: None,
+        receipts: Mutex::new(BTreeMap::new()),
+        process_fixture: Some(root.join("proc-fixture")),
         _library_lock: Lock::acquire(&state.join("library.lock")).unwrap(),
         _root_lock: Lock::acquire(&root.join("root.lock")).unwrap(),
         _app_lock: Lock::acquire(&root.join("app.lock")).unwrap(),
@@ -61,11 +66,273 @@ fn journal(root: &Path) -> Journal {
             source: "content/binary".into(),
             existed: true,
             preserve: false,
+            remove: false,
         }],
         created_dirs: Vec::new(),
         registry: None,
         preserved_name: "40-isolated".into(),
     }
+}
+
+#[test]
+fn removal_journal_recovers_each_crash_window_without_deleting_a_reappeared_file() {
+    for moved in [false, true] {
+        let temp = Temp::new();
+        let s = session(temp.path());
+        let original = s.install.join("binary");
+        fs::write(&original, b"DLC").unwrap();
+        let mut j = journal(temp.path());
+        j.operations[0].remove = true;
+        save_journal(&s.stage, &j).unwrap();
+        if moved {
+            fs::rename(&original, s.stage.join("backup/0")).unwrap();
+        }
+        rollback(temp.path(), &s.stage, &j).unwrap();
+        assert_eq!(fs::read(&original).unwrap(), b"DLC");
+        save_journal(&s.stage, &j).unwrap();
+        rollback(temp.path(), &s.stage, &j).unwrap();
+        assert_eq!(fs::read(&original).unwrap(), b"DLC");
+        fs::rename(&original, s.stage.join("backup/0")).unwrap();
+        fs::write(&original, b"user replacement").unwrap();
+        assert!(rollback(temp.path(), &s.stage, &j).is_err());
+        assert_eq!(fs::read(&original).unwrap(), b"user replacement");
+    }
+}
+
+fn staged(s: &Session, layout: &Layout, contents: &[(&str, &[u8])]) {
+    for (name, bytes) in contents {
+        let path = s.stage.join("content").join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    s.preflight(layout, &CancellationToken::new()).unwrap();
+    s.finish_stage(
+        layout,
+        &CancellationToken::new(),
+        &VerifyProgress::default(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn dlc_install_and_remove_restore_overlays_preserve_mods_and_leave_base_inode_untouched() {
+    let temp = Temp::new();
+    fs::create_dir(temp.path().join("steamapps")).unwrap();
+    let base = DepotManifest {
+        depot_id: 10,
+        manifest_id: 20,
+        files: vec![
+            file("base.bin", b"base"),
+            file("shared.bin", b"base shared"),
+        ],
+    };
+    let mut config = file("config.ini", b"default");
+    config.flags = 1;
+    let addon = DepotManifest {
+        depot_id: 11,
+        manifest_id: 21,
+        files: vec![
+            file("shared.bin", b"DLC shared"),
+            file("addon.bin", b"DLC"),
+            file("mod.bin", b"original"),
+            config,
+        ],
+    };
+    let addon_spec = crate::catalog::DepotSpec {
+        depot_id: 11,
+        manifest_id: 21,
+        source_app_id: 30,
+    };
+    let initial = request(temp.path());
+    let s = session(temp.path());
+    let layout = Layout::new(vec![(depot(), base.clone())], vec![]).unwrap();
+    s.remember_manifest(&depot(), &base).unwrap();
+    staged(
+        &s,
+        &layout,
+        &[("base.bin", b"base"), ("shared.bin", b"base shared")],
+    );
+    let (game, _) = s.commit(&layout).unwrap();
+    let base_inode = fs::metadata(game.install_dir.join("base.bin"))
+        .unwrap()
+        .ino();
+    drop(s);
+    let mut add = initial.clone();
+    add.plan.depots.push(addon_spec.clone());
+    add.plan.dlc_depots.insert(11, 200);
+    add.existing = Some(game.clone());
+    let mut s = session(temp.path());
+    validate_dlc_plan(&add, &std::collections::BTreeSet::from([11])).unwrap();
+    s.request = add;
+    s.dlc_scope = Some(std::collections::BTreeSet::from([11]));
+    s.old_manifest_hash = Some(hash_bytes(
+        &fs::read(s.steamapps.join("appmanifest_30.acf")).unwrap(),
+    ));
+    assert!(s.cached_manifest(&depot()).unwrap().is_some());
+    s.remember_manifest(&addon_spec, &addon).unwrap();
+    let mut layout = Layout::new(
+        vec![(depot(), base.clone()), (addon_spec.clone(), addon.clone())],
+        vec![base.clone()],
+    )
+    .unwrap();
+    layout
+        .restrict_to_dlc(&std::collections::BTreeSet::from([11]))
+        .unwrap();
+    assert!(
+        !layout
+            .active
+            .as_ref()
+            .unwrap()
+            .contains(Path::new("base.bin"))
+    );
+    staged(
+        &s,
+        &layout,
+        &[
+            ("shared.bin", b"DLC shared"),
+            ("addon.bin", b"DLC"),
+            ("mod.bin", b"original"),
+            ("config.ini", b"default"),
+        ],
+    );
+    let (game, _) = s.commit(&layout).unwrap();
+    assert_eq!(
+        fs::metadata(game.install_dir.join("base.bin"))
+            .unwrap()
+            .ino(),
+        base_inode
+    );
+    assert_eq!(
+        fs::read(game.install_dir.join("shared.bin")).unwrap(),
+        b"DLC shared"
+    );
+    fs::write(game.install_dir.join("mod.bin"), b"user mod").unwrap();
+    fs::write(game.install_dir.join("config.ini"), b"user setting").unwrap();
+    fs::write(game.install_dir.join("save.dat"), b"user save").unwrap();
+    drop(s);
+    let mut remove = initial;
+    remove.existing = Some(game.clone());
+    let mut s = session(temp.path());
+    validate_dlc_plan(&remove, &std::collections::BTreeSet::from([11])).unwrap();
+    s.request = remove;
+    s.dlc_scope = Some(std::collections::BTreeSet::from([11]));
+    s.old_manifest_hash = Some(hash_bytes(
+        &fs::read(s.steamapps.join("appmanifest_30.acf")).unwrap(),
+    ));
+    assert!(s.cached_manifest(&depot()).unwrap().is_some());
+    assert!(s.cached_manifest(&addon_spec).unwrap().is_some());
+    let mut layout = Layout::new(vec![(depot(), base.clone())], vec![base, addon]).unwrap();
+    layout
+        .restrict_to_dlc(&std::collections::BTreeSet::from([11]))
+        .unwrap();
+    staged(&s, &layout, &[("shared.bin", b"base shared")]);
+    let (game, _) = s.commit(&layout).unwrap();
+    assert_eq!(
+        fs::read(game.install_dir.join("shared.bin")).unwrap(),
+        b"base shared"
+    );
+    assert!(!game.install_dir.join("addon.bin").exists());
+    for (name, expected) in [
+        ("mod.bin", b"user mod".as_slice()),
+        ("config.ini", b"user setting"),
+        ("save.dat", b"user save"),
+    ] {
+        assert_eq!(fs::read(game.install_dir.join(name)).unwrap(), expected);
+    }
+    assert_eq!(
+        fs::metadata(game.install_dir.join("base.bin"))
+            .unwrap()
+            .ino(),
+        base_inode
+    );
+    assert_eq!(game.installed_depots, BTreeMap::from([(10, 20)]));
+}
+
+#[test]
+fn cached_manifests_are_bound_to_installed_identity_and_hash_and_reject_tampering() {
+    let temp = Temp::new();
+    let mut s = session(temp.path());
+    let manifest = DepotManifest {
+        depot_id: 10,
+        manifest_id: 20,
+        files: vec![file("base", b"data")],
+    };
+    s.remember_manifest(&depot(), &manifest).unwrap();
+    let layout = Layout::new(vec![(depot(), manifest)], vec![]).unwrap();
+    let bytes = encode_vdf(&s.build_manifest(&layout).unwrap()).unwrap();
+    fs::write(s.steamapps.join("appmanifest_30.acf"), &bytes).unwrap();
+    s.old_manifest_hash = Some(hash_bytes(&bytes));
+    assert!(s.cached_manifest(&depot()).unwrap().is_some());
+    let mut different = depot();
+    different.manifest_id += 1;
+    assert!(s.cached_manifest(&different).unwrap().is_none());
+    fs::write(s.receipt_path(&depot()).unwrap(), b"{}").unwrap();
+    assert!(s.cached_manifest(&depot()).is_err());
+    fs::write(s.steamapps.join("appmanifest_30.acf"), b"changed").unwrap();
+    assert!(s.cached_manifest(&depot()).is_err());
+}
+
+#[test]
+fn dlc_plan_and_layout_reject_unrelated_changes_before_mutating_files() {
+    let temp = Temp::new();
+    let s = session(temp.path());
+    let layout = Layout::new(
+        vec![(
+            depot(),
+            DepotManifest {
+                depot_id: 10,
+                manifest_id: 20,
+                files: vec![file("base", b"old")],
+            },
+        )],
+        vec![],
+    )
+    .unwrap();
+    let mut request = s.request.clone();
+    let mut game = InstalledGame {
+        app_id: 30,
+        name: "game".into(),
+        size_bytes: None,
+        last_played: None,
+        playtime_minutes: None,
+        install_dir: s.install.clone(),
+        library_root: s.library.clone(),
+        steam_root: s.library.clone(),
+        launch_options: None,
+        build_id: Some(40),
+        branch: "public".into(),
+        language: "english".into(),
+        platform: Some(InstallPlatform::Linux),
+        installed_depots: BTreeMap::from([(10, 20)]),
+    };
+    request.existing = Some(game.clone());
+    let scope = std::collections::BTreeSet::from([11]);
+    assert!(validate_dlc_plan(&request, &scope).is_ok());
+    request.plan.depots[0].manifest_id += 1;
+    assert!(validate_dlc_plan(&request, &scope).is_err());
+    request.plan.depots[0].manifest_id -= 1;
+    game.build_id = Some(41);
+    request.existing = Some(game);
+    assert!(validate_dlc_plan(&request, &scope).is_err());
+    let mut bad = Layout::new(
+        vec![(
+            depot(),
+            DepotManifest {
+                depot_id: 10,
+                manifest_id: 20,
+                files: vec![file("base", b"new")],
+            },
+        )],
+        vec![DepotManifest {
+            depot_id: 10,
+            manifest_id: 20,
+            files: vec![file("base", b"old")],
+        }],
+    )
+    .unwrap();
+    assert!(bad.restrict_to_dlc(&scope).is_err());
+    assert_eq!(layout.files.len(), 1);
+    assert!(!s.install.join("base").exists());
 }
 
 #[test]
@@ -326,6 +593,9 @@ fn user_config_and_unknown_manifest_keys_survive_manifest_rewrite() {
         bytes: 3,
         download_bytes: 3,
         install_scripts: false,
+        active: None,
+        removed: Vec::new(),
+        old_depots: BTreeMap::new(),
     };
     let rewritten = s.build_manifest(&layout).unwrap();
     let app = rewritten.child("AppState").unwrap();

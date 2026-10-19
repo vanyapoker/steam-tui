@@ -36,6 +36,7 @@ pub enum Operation {
     AppOwnership {
         app_id: u32,
     },
+    Apps(AppsOp),
     Persona,
     Country,
     AuthSessionTicket {
@@ -66,6 +67,36 @@ pub enum Operation {
     Ugc(UgcOp),
     /// Fetch and decode one image from Valve's CDN (achievement icons, avatars).
     Image(ImageOp),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AppsOp {
+    Snapshot,
+    InstallDlc { app_id: u32 },
+    UninstallDlc { app_id: u32 },
+}
+
+/// Public metadata and local content state. `installed` does not confer an
+/// account license; BIsDlcInstalled also checks authenticated ownership.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DlcInfo {
+    pub app_id: u32,
+    pub name: String,
+    pub available: bool,
+    pub enabled: bool,
+    pub installed: bool,
+    pub depots: Vec<u32>,
+    pub downloading: bool,
+    pub downloaded: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppsSnapshot {
+    pub build_id: u32,
+    pub branch: String,
+    pub depots: Vec<u32>,
+    pub dlc: Vec<DlcInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -418,6 +449,8 @@ pub struct SdrConfig {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Response {
+    Apps(AppsSnapshot),
+    AppsAccepted,
     NetworkingCertificate {
         signed: Vec<u8>,
     },

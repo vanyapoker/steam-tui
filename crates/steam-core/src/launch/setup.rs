@@ -42,7 +42,30 @@ pub(super) async fn prepare(
     } else {
         InstallPlatform::Linux
     };
-    let app = app_document(game)?;
+    let mut app = app_document(game)?;
+    let mut excluded = BTreeSet::new();
+    let mut disabled = BTreeSet::new();
+    if let Some(connection) = connection {
+        let selection = crate::dlc::Selection::read(
+            &game.library_root,
+            connection.steam_id().steam64(),
+            game.app_id,
+        )?;
+        disabled = selection.disabled.clone();
+        excluded.extend(
+            app.child("depots")
+                .into_iter()
+                .flat_map(|d| &d.children)
+                .filter(|(_, depot)| {
+                    depot
+                        .text("dlcappid")
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .is_some_and(|id| disabled.contains(&id))
+                })
+                .filter_map(|(key, _)| key.parse::<u32>().ok()),
+        );
+        crate::dlc::filter(&mut app, &selection);
+    }
     let mut requirements = shared::requirements(&app, platform, &game.language)?;
     let (owned, licensed) = connection
         .and_then(crate::library::cached_ownership)
@@ -63,6 +86,21 @@ pub(super) async fn prepare(
             .library_root
             .join(format!("steamapps/appmanifest_{}.acf", game.app_id)),
     )?;
+    if let Some(owners) = acf.at(&["appstate", "steamtuidlcdepots"]) {
+        excluded.extend(
+            owners
+                .children
+                .iter()
+                .filter(|(_, owner)| {
+                    owner
+                        .value
+                        .as_deref()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .is_some_and(|id| disabled.contains(&id))
+                })
+                .filter_map(|(key, _)| key.parse::<u32>().ok()),
+        );
+    }
     if let Some(shared) = acf.at(&["appstate", "shareddepots"]) {
         for (id, source) in &shared.children {
             let id = id
@@ -70,6 +108,9 @@ pub(super) async fn prepare(
                 .ok()
                 .filter(|id| *id != 0)
                 .ok_or_else(|| failure("Invalid recorded shared depot"))?;
+            if excluded.contains(&id) {
+                continue;
+            }
             let source = source
                 .value
                 .as_deref()
@@ -129,6 +170,9 @@ pub(super) async fn prepare(
     for (source, selected) in sources {
         let scripts = discover(&source, connection, &directory).await?;
         for receipt in scripts {
+            if source.app_id == game.app_id && excluded.contains(&receipt.depot) {
+                continue;
+            }
             if selected
                 .as_ref()
                 .is_some_and(|ids| !ids.contains(&receipt.depot))

@@ -23,6 +23,8 @@ struct Operation {
     source: PathBuf,
     existed: bool,
     preserve: bool,
+    #[serde(default)]
+    remove: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,6 +60,10 @@ pub(super) struct Session {
     install: PathBuf,
     owner: u64,
     old_manifest_hash: Option<[u8; 20]>,
+    dlc_scope: Option<std::collections::BTreeSet<u32>>,
+    receipts: Mutex<BTreeMap<(u32, u64, u32), String>>,
+    #[cfg(test)]
+    process_fixture: Option<PathBuf>,
     _library_lock: Lock,
     _root_lock: Lock,
     _app_lock: Lock,
@@ -183,7 +189,37 @@ fn recover_locked(library: &Path, state: &Path) -> Result<()> {
 }
 
 impl Session {
-    pub(super) fn prepare(mut request: InstallRequest, owner: u64) -> Result<Self> {
+    pub(super) fn dlc_scope(&self) -> Option<&std::collections::BTreeSet<u32>> {
+        self.dlc_scope.as_ref()
+    }
+
+    fn check_processes(&self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(processes) = &self.process_fixture {
+            return fsafe::check_processes_in(
+                &self.request.steam_root,
+                self.request.plan.app_id,
+                &self.install,
+                self.dlc_scope.is_some(),
+                processes,
+            );
+        }
+        fsafe::check_processes(
+            &self.request.steam_root,
+            self.request.plan.app_id,
+            &self.install,
+            self.dlc_scope.is_some(),
+        )
+    }
+
+    pub(super) fn prepare_scoped(
+        mut request: InstallRequest,
+        owner: u64,
+        dlc_scope: Option<std::collections::BTreeSet<u32>>,
+    ) -> Result<Self> {
+        if let Some(scope) = &dlc_scope {
+            validate_dlc_plan(&request, scope)?;
+        }
         if request.plan.app_id == 0 || request.plan.depots.is_empty() {
             return Err(failure("Install plan has no app/depot content"));
         }
@@ -228,7 +264,12 @@ impl Session {
             &Path::new("common").join(&request.plan.install_dir_name),
             true,
         )?;
-        fsafe::refuse_running(&request.steam_root, request.plan.app_id, &install)?;
+        fsafe::check_processes(
+            &request.steam_root,
+            request.plan.app_id,
+            &install,
+            dlc_scope.is_some(),
+        )?;
         let manifest = steamapps.join(format!("appmanifest_{}.acf", request.plan.app_id));
         fsafe::checked(
             &steamapps,
@@ -334,16 +375,113 @@ impl Session {
             install,
             owner,
             old_manifest_hash,
+            dlc_scope,
+            receipts: Mutex::new(BTreeMap::new()),
+            #[cfg(test)]
+            process_fixture: None,
             _library_lock: library_lock,
             _root_lock: root_lock,
             _app_lock: app_lock,
         })
     }
 
+    /// The old appmanifest binds the receipt's exact depot, source, GID and hash.
+    /// Private cached manifests contain filenames/hashes, never decryption keys.
+    pub(super) fn cached_manifest(
+        &self,
+        spec: &crate::catalog::DepotSpec,
+    ) -> Result<Option<crate::content::DepotManifest>> {
+        let Some(expected_acf) = self.old_manifest_hash else {
+            return Ok(None);
+        };
+        let acf = bounded_read(
+            &self
+                .steamapps
+                .join(format!("appmanifest_{}.acf", self.request.plan.app_id)),
+            16 * 1024 * 1024,
+        )?;
+        if hash_bytes(&acf) != expected_acf {
+            return Err(failure("Appmanifest changed while reading depot receipts"));
+        }
+        let acf = crate::installed::text(std::str::from_utf8(&acf)?)?;
+        let Some(record) = acf.at(&[
+            "appstate",
+            "steamtuidepotreceipts",
+            &spec.depot_id.to_string(),
+        ]) else {
+            return Ok(None);
+        };
+        if record.text("manifest").and_then(|s| s.parse().ok()) != Some(spec.manifest_id)
+            || record.text("source").and_then(|s| s.parse().ok()) != Some(spec.source_app_id)
+        {
+            return Ok(None);
+        }
+        let hash = record
+            .text("sha1")
+            .ok_or_else(|| failure("Invalid depot receipt"))?;
+        let bytes = bounded_read(&self.receipt_path(spec)?, 256 * 1024 * 1024)?;
+        if hex_hash(&bytes) != hash {
+            return Err(failure(
+                "Cached depot manifest does not match its installed receipt",
+            ));
+        }
+        let manifest: crate::content::DepotManifest = serde_json::from_slice(&bytes)?;
+        if manifest.depot_id != spec.depot_id || manifest.manifest_id != spec.manifest_id {
+            return Err(failure("Cached depot manifest identity mismatch"));
+        }
+        self.receipts.lock().insert(
+            (spec.depot_id, spec.manifest_id, spec.source_app_id),
+            hash.to_owned(),
+        );
+        Ok(Some(manifest))
+    }
+
+    fn receipt_path(&self, spec: &crate::catalog::DepotSpec) -> Result<PathBuf> {
+        fsafe::checked(
+            &self.library,
+            &PathBuf::from(format!(
+                "steamapps/.steam-tui/depot-manifests/{}-{}-{}.json",
+                spec.depot_id, spec.manifest_id, spec.source_app_id
+            )),
+            true,
+        )
+    }
+
+    pub(super) fn remember_manifest(
+        &self,
+        spec: &crate::catalog::DepotSpec,
+        manifest: &crate::content::DepotManifest,
+    ) -> Result<()> {
+        if manifest.depot_id != spec.depot_id || manifest.manifest_id != spec.manifest_id {
+            return Err(failure("Depot manifest identity mismatch"));
+        }
+        let bytes = serde_json::to_vec(manifest)?;
+        if bytes.len() > 256 * 1024 * 1024 {
+            return Err(failure("Depot receipt exceeds size limit"));
+        }
+        let hash = hex_hash(&bytes);
+        let path = self.receipt_path(spec)?;
+        fsafe::private_directory(
+            path.parent()
+                .ok_or_else(|| failure("Receipt has no directory"))?,
+        )?;
+        if fsafe::exists(&path)? {
+            if hex_hash(&bounded_read(&path, 256 * 1024 * 1024)?) != hash {
+                return Err(failure("Conflicting cached depot manifest"));
+            }
+        } else {
+            fsafe::atomic_write(&path, &bytes)?;
+        }
+        self.receipts
+            .lock()
+            .insert((spec.depot_id, spec.manifest_id, spec.source_app_id), hash);
+        Ok(())
+    }
+
     pub(super) fn preflight(&self, layout: &Layout, cancel: &CancellationToken) -> Result<()> {
         let mut needed = 0u64;
         let (_, block_size) = fsafe::space_info(&self.library)?;
-        for planned in &layout.files {
+        for planned in layout.active_files() {
             super::check_cancel(cancel)?;
             let file = &planned.file;
             let target = fsafe::checked(&self.install, &file.path, false)?;
@@ -395,7 +533,7 @@ impl Session {
         // Account for block rounding, directory entries, two journal versions,
         // manifest/registry backups and filesystem metadata. Existing content
         // stays allocated until commit, and is not counted as free space.
-        let overhead = (layout.files.len() as u64)
+        let overhead = ((layout.active_files().count() + layout.removed.len()) as u64)
             .checked_mul(block_size)
             .and_then(|v| v.checked_mul(2))
             .and_then(|v| v.checked_add(2 * 1024 * 1024))
@@ -592,8 +730,7 @@ impl Session {
     ) -> Result<()> {
         // Largest first keeps the workers balanced when a few files dominate.
         let mut regular: Vec<&DepotFile> = layout
-            .files
-            .iter()
+            .active_files()
             .map(|planned| &planned.file)
             .filter(|file| file.flags & (64 | 512) == 0)
             .collect();
@@ -602,7 +739,7 @@ impl Session {
             super::check_cancel(cancel)?;
             self.verify_file(regular[index], cancel, progress)
         })?;
-        for planned in &layout.files {
+        for planned in layout.active_files() {
             super::check_cancel(cancel)?;
             let file = &planned.file;
             if file.flags & 512 != 0 {
@@ -701,6 +838,28 @@ impl Session {
             }
         }
         app.children.insert("installeddepots".into(), installed);
+        let mut dlc = Node::default();
+        for (id, owner) in &self.request.plan.dlc_depots {
+            if self.request.plan.depots.iter().any(|d| d.depot_id == *id) {
+                put(&mut dlc, &id.to_string(), owner.to_string());
+            }
+        }
+        app.children.insert("steamtuidlcdepots".into(), dlc);
+        let mut receipts = Node::default();
+        let known = self.receipts.lock();
+        for spec in &self.request.plan.depots {
+            if let Some(hash) = known.get(&(spec.depot_id, spec.manifest_id, spec.source_app_id)) {
+                let entry = receipts
+                    .children
+                    .entry(spec.depot_id.to_string())
+                    .or_default();
+                put(entry, "manifest", spec.manifest_id.to_string());
+                put(entry, "source", spec.source_app_id.to_string());
+                put(entry, "sha1", hash.clone());
+            }
+        }
+        app.children
+            .insert("steamtuidepotreceipts".into(), receipts);
         let mut shared = Node::default();
         for (depot, source) in &self.request.plan.shared_depots {
             put(&mut shared, &depot.to_string(), source.to_string());
@@ -749,11 +908,7 @@ impl Session {
     }
 
     pub(super) fn commit(&self, layout: &Layout) -> Result<(InstalledGame, Option<PathBuf>)> {
-        fsafe::refuse_running(
-            &self.request.steam_root,
-            self.request.plan.app_id,
-            &self.install,
-        )?;
+        self.check_processes()?;
         let manifest_path = self
             .steamapps
             .join(format!("appmanifest_{}.acf", self.request.plan.app_id));
@@ -784,7 +939,7 @@ impl Session {
                 std::process::id()
             ),
         };
-        for planned in &layout.files {
+        for planned in layout.active_files() {
             let file = &planned.file;
             let target = fsafe::checked(&self.steamapps, &prefix.join(&file.path), false)?;
             if file.flags & 64 != 0 {
@@ -850,6 +1005,36 @@ impl Session {
                 source: Path::new("content").join(&file.path),
                 existed,
                 preserve,
+                remove: false,
+            });
+        }
+        for path in &layout.removed {
+            let target = fsafe::checked(&self.steamapps, &prefix.join(path), false)?;
+            if !fsafe::exists(&target)? {
+                continue;
+            }
+            let old = &layout.old_files[path];
+            let meta = fs::symlink_metadata(&target)?;
+            let unchanged = if meta.file_type().is_symlink() {
+                old.link_target
+                    .as_ref()
+                    .is_some_and(|link| fs::read_link(&target).ok().as_ref() == Some(link))
+            } else if meta.is_file() && old.flags & 512 == 0 {
+                old.sha1.is_some() && fsafe::hash_file(&target, old.size)? == old.sha1
+            } else {
+                false
+            };
+            // Modified files and user configuration remain in place. Only an
+            // unchanged file owned exclusively by removed DLC is removed.
+            if !unchanged {
+                continue;
+            }
+            journal.operations.push(Operation {
+                target: prefix.join(path),
+                source: Path::new("content").join(path),
+                existed: true,
+                preserve: false,
+                remove: true,
             });
         }
         journal.operations.push(Operation {
@@ -857,11 +1042,12 @@ impl Session {
             source: PathBuf::from("metadata/appmanifest.acf"),
             existed: self.old_manifest_hash.is_some(),
             preserve: false,
+            remove: false,
         });
         // Journal all new directories before creating any of them.
         let mut dirs = std::collections::BTreeSet::new();
         dirs.insert(prefix.clone());
-        for planned in &layout.files {
+        for planned in layout.active_files() {
             let target = prefix.join(&planned.file.path);
             let parent = if planned.file.flags & 64 != 0 {
                 target.as_path()
@@ -902,12 +1088,16 @@ impl Session {
                     )?;
                     fsafe::sync_dir(&self.stage.join("backup"))?;
                 }
-                fs::rename(&source, &target).map_err(|e| fsafe::disk_error(&target, e))?;
-                fsafe::sync_dir(
-                    source
-                        .parent()
-                        .ok_or_else(|| failure("Source has no parent"))?,
-                )?;
+                if !operation.remove {
+                    fs::rename(&source, &target).map_err(|e| fsafe::disk_error(&target, e))?;
+                }
+                if !operation.remove {
+                    fsafe::sync_dir(
+                        source
+                            .parent()
+                            .ok_or_else(|| failure("Source has no parent"))?,
+                    )?;
+                }
                 fsafe::sync_dir(
                     target
                         .parent()
@@ -958,11 +1148,58 @@ impl Session {
     }
 }
 
+fn hex_hash(bytes: &[u8]) -> String {
+    hash_bytes(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 fn timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn validate_dlc_plan(
+    request: &InstallRequest,
+    scope: &std::collections::BTreeSet<u32>,
+) -> Result<()> {
+    let existing = request
+        .existing
+        .as_ref()
+        .ok_or_else(|| failure("DLC jobs require an installed parent"))?;
+    if existing.app_id != request.plan.app_id
+        || existing.build_id != Some(request.plan.build_id)
+        || existing.branch != request.plan.branch
+        || existing.language != request.plan.language
+        || existing.platform != Some(request.plan.platform)
+    {
+        return Err(failure(
+            "DLC job cannot change the parent build, branch, platform or language",
+        ));
+    }
+    let next: BTreeMap<_, _> = request
+        .plan
+        .depots
+        .iter()
+        .map(|d| (d.depot_id, d.manifest_id))
+        .collect();
+    if next.len() != request.plan.depots.len()
+        || existing
+            .installed_depots
+            .iter()
+            .any(|(id, gid)| !scope.contains(id) && next.get(id) != Some(gid))
+        || next
+            .iter()
+            .any(|(id, gid)| !scope.contains(id) && existing.installed_depots.get(id) != Some(gid))
+    {
+        return Err(failure(
+            "DLC job would change an unrelated depot; update the game while closed",
+        ));
+    }
+    Ok(())
 }
 
 fn bounded_read(path: &Path, maximum: u64) -> Result<Vec<u8>> {
@@ -1014,6 +1251,11 @@ fn validate_journal(journal: &Journal, app_id: u32) -> Result<()> {
         {
             return Err(failure("Recovery journal refers outside this app"));
         }
+        if operation.remove
+            && (!operation.existed || operation.preserve || !operation.target.starts_with(&prefix))
+        {
+            return Err(failure("Invalid removal journal operation"));
+        }
     }
     for dir in &journal.created_dirs {
         fsafe::relative(dir)?;
@@ -1045,6 +1287,25 @@ fn rollback(library: &Path, stage: &Path, journal: &Journal) -> Result<()> {
         let source = fsafe::checked(stage, &operation.source, false)?;
         let backup = stage.join("backup").join(index.to_string());
         let has_backup = fsafe::exists(&backup)?;
+        if operation.remove {
+            if has_backup {
+                if fsafe::exists(&target)? {
+                    return Err(failure(
+                        "Removed file reappeared; refusing destructive recovery",
+                    ));
+                }
+                fs::rename(&backup, &target)?;
+                fsafe::sync_dir(&stage.join("backup"))?;
+                fsafe::sync_dir(
+                    target
+                        .parent()
+                        .ok_or_else(|| failure("Target has no parent"))?,
+                )?;
+            } else if !fsafe::exists(&target)? {
+                return Err(failure("Removed original and backup are both missing"));
+            }
+            continue;
+        }
         if has_backup || !operation.existed {
             if fsafe::exists(&target)? && !fsafe::exists(&source)? {
                 fs::rename(&target, &source)?;

@@ -572,7 +572,11 @@ async fn token_chunk(
 pub(crate) fn prune(document: &mut Node) {
     const KEPT: &[(&str, &[&str])] = &[
         ("appid", &[]),
-        ("common", &["name", "oslist"]),
+        ("common", &["name", "oslist", "type", "parent"]),
+        (
+            "extended",
+            &["listofdlc", "dlcavailableonstore", "dlcforappid"],
+        ),
         ("config", &["installdir"]),
         ("depots", &[]),
     ];
@@ -1027,7 +1031,7 @@ mod tests {
         ]);
         prune(&mut document);
         let keys: Vec<_> = document.children.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["Common", "appid", "config", "depots"]);
+        assert_eq!(keys, ["Common", "appid", "config", "depots", "extended"]);
         assert_eq!(document.at(&["common"]).unwrap().children.len(), 2);
         assert_eq!(
             document.at(&["common"]).unwrap().text("oslist"),

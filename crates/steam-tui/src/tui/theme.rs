@@ -329,6 +329,7 @@ mod tests {
                 branch: "public".into(),
                 language: "english".into(),
                 shared_depots: Default::default(),
+                dlc_depots: Default::default(),
                 depots: vec![],
                 download_bytes: 0,
                 installed_bytes: 0,

@@ -192,6 +192,50 @@ fn rollback_and_same_build_depot_changes_are_updates_not_greater_than() {
 }
 
 #[test]
+fn disabled_dlc_is_excluded_from_granted_depots_and_removed_receipts_trigger_updates() {
+    let scratch = Scratch::new("disabled-dlc");
+    std::fs::create_dir(scratch.0.join("steamapps")).unwrap();
+    crate::dlc::Selection::update(&scratch.0, 123, 10, |s| {
+        s.disabled.insert(50);
+    })
+    .unwrap();
+    let doc = document(
+        r#"
+        "101" { "manifests" { "public" { "gid" "1001" } } }
+        "105" { "dlcappid" "50" "depotfromapp" "999" }
+    "#,
+        "linux",
+    );
+    let mut existing = game();
+    existing.library_root = scratch.0.clone();
+    existing.installed_depots.insert(105, 1005);
+    let owned = BTreeSet::from([10, 50]);
+    let granted = BTreeSet::from([101, 105]);
+    let docs = BTreeMap::from([(10, doc)]);
+    let plan = resolve_account(10, Some(&existing), &owned, &granted, &docs, 123).unwrap();
+    assert_eq!(
+        plan.depots.iter().map(|d| d.depot_id).collect::<Vec<_>>(),
+        [101]
+    );
+    assert!(resolve_account(10, Some(&existing), &owned, &granted, &docs, 124).is_err());
+    std::fs::write(
+        scratch.0.join("steamapps/appmanifest_10.acf"),
+        r#""AppState" { "SteamTuiDlcDepots" { "105" "50" } }"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        compare(&existing, &plan),
+        UpdateStatus::Available { .. }
+    ));
+    std::fs::write(
+        scratch.0.join("steamapps/appmanifest_10.acf"),
+        r#""AppState" {}"#,
+    )
+    .unwrap();
+    assert!(matches!(compare(&existing, &plan), UpdateStatus::UpToDate)); // Unknown extras are retained.
+}
+
+#[test]
 fn partial_online_rows_and_uninstalled_account_history_are_retained() {
     let app = library::LibraryApp {
         app_id: 10,
@@ -473,6 +517,7 @@ fn plan_for(app_id: u32, platform: InstallPlatform, manifest: u64) -> InstallPla
         branch: "public".into(),
         language: "english".into(),
         shared_depots: Default::default(),
+        dlc_depots: Default::default(),
         depots: vec![DepotSpec {
             depot_id: 101,
             manifest_id: manifest,

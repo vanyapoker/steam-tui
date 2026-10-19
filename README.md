@@ -10,6 +10,7 @@ Early state: some games won't work without original steam client.
 - Install and update games (native and Proton), with pause and resume.
 - Missing Proton and runtime dependencies install automatically before launch.
 - Shared redistributables install per library; verified first-run setup runs in each game's Proton prefix.
+- DLC enumeration, ownership, installed state, downloads, and optional removal through the game's Steamworks APIs.
 - Friends, live notifications, game changelogs.
 - Steam Cloud saves, with a side-by-side local/cloud conflict picker.
 - Games run on our own Steam backend, so no Steam process is needed.
@@ -77,7 +78,7 @@ Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK h
 
 - VAC-secured games run through Valve's Steam client without its web helpers. It must be signed in to the same account, and costs about 200 MB extra. Enter picks this automatically.
 - Online matchmaking and relay networking are unfinished.
-- DLC ownership checks use the account backend. DLC enumeration, installed-state queries, and in-game install/uninstall are not implemented yet.
+- In-game DLC changes preserve the parent build; a parent update or ambiguous metadata requires closing/updating the game. Removal retains modified files and user configuration. Windows setup scripts run at the next launch. `SetDlcContext` usage reporting is unavailable.
 - Linux only.
 
 ## Not implemented yet

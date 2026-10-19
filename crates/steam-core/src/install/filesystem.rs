@@ -287,7 +287,7 @@ pub(super) fn sync_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| failure("Atomic write has no parent"))?;
@@ -351,10 +351,31 @@ impl Drop for Lock {
 }
 
 pub(super) fn refuse_running(steam_root: &Path, app_id: u32, install: &Path) -> Result<()> {
+    check_processes(steam_root, app_id, install, false)
+}
+
+/// Used exclusively by a validated, same-build DLC transaction. Valve clients
+/// and PID markers still prohibit concurrent mutation of their metadata.
+pub(super) fn check_processes(
+    steam_root: &Path,
+    app_id: u32,
+    install: &Path,
+    dlc: bool,
+) -> Result<()> {
+    check_processes_in(steam_root, app_id, install, dlc, Path::new("/proc"))
+}
+
+pub(super) fn check_processes_in(
+    steam_root: &Path,
+    app_id: u32,
+    install: &Path,
+    dlc: bool,
+    processes: &Path,
+) -> Result<()> {
     let app = app_id.to_string();
     let app_env = format!("SteamAppId={app}");
     let game_env = format!("SteamGameId={app}");
-    for entry in fs::read_dir("/proc")? {
+    for entry in fs::read_dir(processes)? {
         let entry = entry?;
         if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
             continue;
@@ -374,7 +395,7 @@ pub(super) fn refuse_running(steam_root: &Path, app_id: u32, install: &Path) -> 
                     "Close Steam completely before installing/updating a shared library",
                 ));
             }
-            if exe.starts_with(install) {
+            if !dlc && exe.starts_with(install) {
                 return Err(failure(format!(
                     "App {app_id} is running; close it before installation"
                 )));
@@ -385,9 +406,10 @@ pub(super) fn refuse_running(steam_root: &Path, app_id: u32, install: &Path) -> 
             if file.take(1024 * 1024).read_to_end(&mut bytes).is_err() {
                 continue;
             }
-            if bytes
-                .split(|b| *b == 0)
-                .any(|part| part == app_env.as_bytes() || part == game_env.as_bytes())
+            if !dlc
+                && bytes
+                    .split(|b| *b == 0)
+                    .any(|part| part == app_env.as_bytes() || part == game_env.as_bytes())
             {
                 return Err(failure(format!(
                     "App {app_id} has an active SteamAppId/SteamGameId process; close it first"

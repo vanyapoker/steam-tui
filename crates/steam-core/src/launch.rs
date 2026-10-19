@@ -1022,8 +1022,20 @@ pub async fn run_with_backend(
                 }
             }
         }
-        let endpoint =
-            crate::backend::Endpoint::create()?.with_workshop(owned.library_root.join("steamapps"));
+        let apps = crate::backend::apps::Context::prepare(
+            connection,
+            owned.clone(),
+            metadata.clone(),
+            if plan.environment.contains_key("STEAM_COMPAT_DATA_PATH") {
+                crate::catalog::InstallPlatform::Windows
+            } else {
+                crate::catalog::InstallPlatform::Linux
+            },
+        )
+        .await?;
+        let endpoint = crate::backend::Endpoint::create()?
+            .with_workshop(owned.library_root.join("steamapps"))
+            .with_apps(apps);
         let home = (!plan.environment.contains_key("STEAM_COMPAT_DATA_PATH"))
             .then(|| native_home(owned.app_id, connection.steam_id().account_id()))
             .transpose()?;

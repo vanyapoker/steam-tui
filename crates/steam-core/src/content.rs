@@ -39,13 +39,13 @@ const MAX_WINDOW: u64 = 64 * 1024 * 1024;
 const MAX_SERVERS: usize = 8;
 const DEADLINE: Duration = Duration::from_secs(60);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DepotManifest {
     pub depot_id: u32,
     pub manifest_id: u64,
     pub files: Vec<DepotFile>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DepotFile {
     pub path: PathBuf,
     pub size: u64,
@@ -54,7 +54,7 @@ pub struct DepotFile {
     pub chunks: Vec<DepotChunk>,
     pub link_target: Option<PathBuf>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct DepotChunk {
     pub id: [u8; 20],
     pub offset: u64,
@@ -427,6 +427,19 @@ impl ContentClient {
         })
         .await
         .map_err(|_| failure("manifest decoding worker failed"))??;
+        self.register_manifest(spec, &manifest).await?;
+        Ok(manifest)
+    }
+
+    pub(crate) async fn register_manifest(
+        &self,
+        spec: &DepotSpec,
+        manifest: &DepotManifest,
+    ) -> Result<()> {
+        validate_spec(spec)?;
+        if spec.depot_id != manifest.depot_id || spec.manifest_id != manifest.manifest_id {
+            return Err(failure("Manifest identity mismatch"));
+        }
         self.cache.lock().await.chunks.insert(
             (spec.depot_id, spec.manifest_id, spec.source_app_id),
             manifest
@@ -435,7 +448,7 @@ impl ContentClient {
                 .flat_map(|f| f.chunks.iter().cloned())
                 .collect(),
         );
-        Ok(manifest)
+        Ok(())
     }
     pub async fn chunk(
         &self,

@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
-pub(super) struct Temp(PathBuf);
+pub(crate) struct Temp(PathBuf);
 impl Temp {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
             "steam-tui-install-unit-{}-{}",
             std::process::id(),
@@ -17,7 +17,7 @@ impl Temp {
         fs::create_dir(&path).unwrap();
         Self(path)
     }
-    pub(super) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.0
     }
 }
@@ -71,6 +71,33 @@ fn destination_inspects_new_paths_without_creating_them() {
     assert!(info.available);
     assert!(info.free_bytes.is_some());
     assert!(!new.exists());
+}
+
+#[test]
+fn live_dlc_permission_keeps_valve_client_guards_and_normal_updates_reject_games() {
+    let temp = Temp::new();
+    let processes = temp.path().join("proc");
+    let process = processes.join("100");
+    fs::create_dir_all(&process).unwrap();
+    fs::write(process.join("comm"), "game\n").unwrap();
+    fs::write(process.join("environ"), b"SteamAppId=30\0").unwrap();
+    let install = temp.path().join("game");
+    symlink(install.join("game.exe"), process.join("exe")).unwrap();
+    assert!(filesystem::check_processes_in(temp.path(), 30, &install, false, &processes).is_err());
+    assert!(filesystem::check_processes_in(temp.path(), 30, &install, true, &processes).is_ok());
+    for name in ["steam", "steamwebhelper", "steam.exe"] {
+        fs::write(process.join("comm"), name).unwrap();
+        assert!(
+            filesystem::check_processes_in(temp.path(), 30, &install, true, &processes).is_err()
+        );
+    }
+    fs::write(process.join("comm"), "game").unwrap();
+    fs::write(
+        temp.path().join("steam.pid"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    assert!(filesystem::check_processes_in(temp.path(), 30, &install, true, &processes).is_err());
 }
 
 #[test]
