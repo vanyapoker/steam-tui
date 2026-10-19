@@ -11,6 +11,7 @@ pub mod content;
 pub mod content_options;
 mod dlc;
 pub mod friends;
+mod gamepad;
 pub mod install;
 pub mod installed;
 pub mod launch;

@@ -1,4 +1,5 @@
-//! SteamInput006 with no devices. Struct-by-value returns abort instead of returning garbage.
+//! SteamInput006: unavailable (Init fails) unless a virtual gamepad exists (see `pad`),
+//! in which case that one device is reported. Action and motion data are always inactive.
 use super::*;
 
 macro_rules! stubs {
@@ -10,14 +11,10 @@ macro_rules! stubs {
     };
 }
 stubs! {
-    f0 => "Init";
-    f1 => "Shutdown";
     f2 => "SetInputActionManifestFilePath";
     f3 => "RunFrame";
     f4 => "BWaitForData";
     f5 => "BNewDataAvailable";
-    f6 => "GetConnectedControllers";
-    f7 => "EnableDeviceCallbacks";
     f8 => "EnableActionEventCallbacks";
     f9 => "GetActionSetHandle";
     f10 => "ActivateActionSet";
@@ -45,9 +42,6 @@ stubs! {
     f34 => "Legacy_TriggerHapticPulse";
     f35 => "Legacy_TriggerRepeatedHapticPulse";
     f36 => "ShowBindingPanel";
-    f37 => "GetInputTypeForHandle";
-    f38 => "GetControllerForGamepadIndex";
-    f39 => "GetGamepadIndexForController";
     f40 => "GetStringForXboxOrigin";
     f41 => "GetGlyphForXboxOrigin";
     f42 => "GetActionOriginFromXboxOrigin";
@@ -57,14 +51,43 @@ stubs! {
     f46 => "GetSessionInputConfigurationSettings";
     f47 => "SetDualSenseTriggerEffect";
 }
-macro_rules! unsupported_slots {
-    ($($name:ident => $label:literal;)*) => {
-        $(unsafe extern "C" fn $name() -> ! { unsupported(concat!("input.", $label)) })*
-    };
+// With a virtual gamepad the one pad is reported (slot 0); without one Steam Input stays
+// unavailable so games keep using their plain gamepad path. Action data is never served.
+unsafe extern "C" fn f0(_this: *mut c_void, _explicit_run_frame: bool) -> bool {
+    trace("input.Init");
+    pad::present()
 }
-unsupported_slots! {
-    f21 => "GetAnalogActionData";
-    f29 => "GetMotionData";
+unsafe extern "C" fn f1(_this: *mut c_void) -> bool {
+    trace("input.Shutdown");
+    pad::present()
+}
+unsafe extern "C" fn f6(_this: *mut c_void, handles: *mut u64) -> i32 {
+    trace("input.GetConnectedControllers");
+    unsafe { pad::connected(handles) }
+}
+unsafe extern "C" fn f7(_this: *mut c_void) {
+    trace("input.EnableDeviceCallbacks");
+    pad::announce();
+}
+unsafe extern "C" fn f37(_this: *mut c_void, handle: u64) -> i32 {
+    trace("input.GetInputTypeForHandle");
+    pad::type_for(handle)
+}
+unsafe extern "C" fn f38(_this: *mut c_void, index: i32) -> u64 {
+    trace("input.GetControllerForGamepadIndex");
+    pad::handle_for_index(index)
+}
+unsafe extern "C" fn f39(_this: *mut c_void, handle: u64) -> i32 {
+    trace("input.GetGamepadIndexForController");
+    pad::index_for_handle(handle)
+}
+unsafe extern "C" fn f21(_this: *mut c_void, _handle: u64, _action: u64) -> pad::AnalogActionData {
+    trace("input.GetAnalogActionData (inactive)");
+    pad::analog_action_data()
+}
+unsafe extern "C" fn f29(_this: *mut c_void, _handle: u64) -> pad::MotionData {
+    trace("input.GetMotionData (no motion data)");
+    pad::motion_data()
 }
 pub(super) static TABLE: VTable<48> = VTable([
     f0 as *const (),

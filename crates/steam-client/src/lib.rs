@@ -38,6 +38,7 @@ mod matchmaking;
 mod music;
 mod musicremote;
 mod networking;
+mod pad;
 mod parental;
 mod parties;
 mod remoteplay;

@@ -1202,6 +1202,31 @@ pub async fn run_with_backend(
     let token = reaper::new_token();
     plan.environment
         .insert(reaper::TOKEN_VAR.into(), token.clone());
+    // Built-in launches mirror a connected Xbox-compatible pad onto one stable virtual
+    // pad, like Valve's client; the service ends with the game.
+    let gamepad = (backend_kind == LaunchBackend::BuiltIn)
+        .then(|| {
+            let notes = events.clone();
+            let app_id = owned.app_id;
+            crate::gamepad::start(
+                &mut plan.environment,
+                &owned.steam_root,
+                app_id,
+                move |text| {
+                    if let Some(events) = &notes {
+                        let _ = events.send(crate::backend::Event {
+                            at: SystemTime::now(),
+                            app_id,
+                            direction: crate::backend::Direction::Local,
+                            channel: "Gamepad",
+                            title: text.to_owned(),
+                            detail: String::new(),
+                        });
+                    }
+                },
+            )
+        })
+        .flatten();
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
     if let Some((endpoint, sandbox, connection)) = backend {
         let app_id = owned.app_id;
@@ -1334,6 +1359,7 @@ pub async fn run_with_backend(
                 .name(format!("game-{pid}"))
                 .spawn(move || {
                     let _save_lease = save_lease;
+                    let _gamepad = gamepad;
                     let waited = child.wait();
                     finished.store(true, Ordering::SeqCst);
                     drop(host_lease);

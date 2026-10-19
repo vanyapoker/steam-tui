@@ -1,6 +1,6 @@
-//! SteamController008 with no controllers: Init/Shutdown succeed, nothing is
-//! connected, handles are 0 and strings are empty. Methods returning large
-//! structs by value abort rather than return uninitialised memory.
+//! SteamController008: Init/Shutdown succeed, handles are 0 and strings are empty. The
+//! only device ever reported is the virtual gamepad (see `pad`); action and motion data
+//! are always inactive.
 use super::*;
 
 macro_rules! stubs {
@@ -11,17 +11,10 @@ macro_rules! stubs {
         })*
     };
 }
-macro_rules! unsupported_slots {
-    ($($name:ident => $label:literal;)*) => {
-        $(unsafe extern "C" fn $name() -> ! { unsupported(concat!("controller.", $label)) })*
-    };
-}
-
 stubs! {
     f0 => "Init", 1;
     f1 => "Shutdown", 1;
     f2 => "RunFrame", 0;
-    f3 => "GetConnectedControllers", 0;
     f4 => "GetActionSetHandle", 0;
     f5 => "ActivateActionSet", 0;
     f6 => "GetCurrentActionSet", 0;
@@ -42,18 +35,36 @@ stubs! {
     f23 => "TriggerVibration", 0;
     f24 => "SetLEDColor", 0;
     f25 => "ShowBindingPanel", 0;
-    f26 => "GetInputTypeForHandle", 0;
-    f27 => "GetControllerForGamepadIndex", 0;
-    f28 => "GetGamepadIndexForController", 0;
     f29 => "GetStringForXboxOrigin", c"".as_ptr() as usize;
     f30 => "GetGlyphForXboxOrigin", c"".as_ptr() as usize;
     f31 => "GetActionOriginFromXboxOrigin", 0;
     f32 => "TranslateActionOrigin", 0;
     f33 => "GetControllerBindingRevision", 0;
 }
-unsupported_slots! {
-    f15 => "GetAnalogActionData";
-    f20 => "GetMotionData";
+// With a virtual gamepad the one pad is reported (slot 0); action data stays unavailable.
+unsafe extern "C" fn f3(_this: *mut c_void, handles: *mut u64) -> i32 {
+    trace("controller.GetConnectedControllers");
+    unsafe { pad::connected(handles) }
+}
+unsafe extern "C" fn f26(_this: *mut c_void, handle: u64) -> i32 {
+    trace("controller.GetInputTypeForHandle");
+    pad::type_for(handle)
+}
+unsafe extern "C" fn f27(_this: *mut c_void, index: i32) -> u64 {
+    trace("controller.GetControllerForGamepadIndex");
+    pad::handle_for_index(index)
+}
+unsafe extern "C" fn f28(_this: *mut c_void, handle: u64) -> i32 {
+    trace("controller.GetGamepadIndexForController");
+    pad::index_for_handle(handle)
+}
+unsafe extern "C" fn f15(_this: *mut c_void, _handle: u64, _action: u64) -> pad::AnalogActionData {
+    trace("controller.GetAnalogActionData (inactive)");
+    pad::analog_action_data()
+}
+unsafe extern "C" fn f20(_this: *mut c_void, _handle: u64) -> pad::MotionData {
+    trace("controller.GetMotionData (no motion data)");
+    pad::motion_data()
 }
 pub(super) static TABLE: VTable<34> = VTable([
     f0 as *const (),
