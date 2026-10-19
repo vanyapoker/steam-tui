@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use steam_ipc::{MAX_FRAME, Operation, Reply, Request, Response, UgcOp, VERSION};
 use steam_vent::{Connection, ConnectionTrait};
 use steam_vent_proto_steam::steammessages_clientserver::{
@@ -31,6 +32,7 @@ use steam_vent_proto_steam::steammessages_clientserver_login::CMsgClientLoggedOf
 use steam_vent_proto_steam::steammessages_player_steamclient::CPlayer_GetPlayerLinkDetails_Request;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Mutex;
 use tokio::time::{Instant, timeout};
 
 /// Owns a mode-0700 directory and its socket. Never unlinks an existing socket.
@@ -155,14 +157,22 @@ impl Endpoint {
                 }
             });
         }
-        let mut session = Session {
+        let session = Session {
             connection,
             app_id,
-            alive: None,
-            ownership: ownership::Service::default(),
-            apps: apps::Service::new(connection, self.apps.clone(), events.clone()),
-            networking: networking::Networking::start(connection, app_id, events.clone()),
-            tickets: tickets::Service::start(connection, app_id, events.clone())?,
+            alive: Mutex::new(None),
+            ownership: Mutex::new(ownership::Service::default()),
+            apps: Mutex::new(apps::Service::new(
+                connection,
+                self.apps.clone(),
+                events.clone(),
+            )),
+            networking: Mutex::new(networking::Networking::start(
+                connection,
+                app_id,
+                events.clone(),
+            )),
+            tickets: Mutex::new(tickets::Service::start(connection, app_id, events.clone())?),
             gc: gc::Gc::start(connection, app_id, events.clone()).await?,
             pops: pops.clone(),
             lobbies: lobby::Lobbies::start(
@@ -171,7 +181,7 @@ impl Endpoint {
                 persona_name(connection).await,
                 events.clone(),
             ),
-            stats: stats::Stats::new(app_id, events.clone()),
+            stats: Mutex::new(stats::Stats::new(app_id, events.clone())),
             workshop: workshop::Service::new(
                 connection,
                 app_id,
@@ -180,37 +190,49 @@ impl Endpoint {
             ),
             events: events.clone(),
         };
+        // Requests are served concurrently: a slow CM-backed call (stats, ownership)
+        // must never hold up the per-frame polls the game makes. Each service keeps
+        // its own lock, and the number of in-flight requests is bounded.
+        let session = &session;
+        let mut in_flight = FuturesUnordered::new();
         loop {
-            let (mut stream, _) = tokio::select! {
-                biased;
-                _ = logged_off.next() => return Err("CM account session ended; restart the backend".into()),
-                accepted = self.listener.accept() => accepted?,
-            };
-            // SAFETY: geteuid has no preconditions.
-            if stream.peer_cred()?.uid() != unsafe { libc::geteuid() } {
-                continue;
-            }
-            // No unbounded task spawning, allocations, client reads or CM waits.
-            let handle_request = timeout(Duration::from_secs(12), async {
-                let request = read_request(&mut stream).await?;
-                let response = session.respond(request).await;
-                write_reply(
-                    &mut stream,
-                    &Reply {
-                        version: VERSION,
-                        app_id,
-                        response,
-                    },
-                )
-                .await
-            });
             tokio::select! {
                 biased;
                 _ = logged_off.next() => return Err("CM account session ended; restart the backend".into()),
-                _ = handle_request => {},
+                Some(()) = in_flight.next(), if !in_flight.is_empty() => {},
+                accepted = self.listener.accept() => {
+                    let (stream, _) = accepted?;
+                    // SAFETY: geteuid has no preconditions.
+                    if stream.peer_cred()?.uid() != unsafe { libc::geteuid() } {
+                        continue;
+                    }
+                    if in_flight.len() >= MAX_IN_FLIGHT {
+                        continue;
+                    }
+                    in_flight.push(serve(stream, session, app_id));
+                }
             }
         }
     }
+}
+
+const MAX_IN_FLIGHT: usize = 64;
+
+async fn serve(mut stream: UnixStream, session: &Session<'_>, app_id: u32) {
+    let handle = timeout(Duration::from_secs(12), async {
+        let request = read_request(&mut stream).await?;
+        let response = session.respond(request).await;
+        write_reply(
+            &mut stream,
+            &Reply {
+                version: VERSION,
+                app_id,
+                response,
+            },
+        )
+        .await
+    });
+    let _ = handle.await;
 }
 
 impl Drop for Endpoint {
@@ -265,15 +287,15 @@ async fn persona_name(connection: &Connection) -> String {
 struct Session<'a> {
     connection: &'a Connection,
     app_id: u32,
-    alive: Option<(Instant, bool)>,
-    ownership: ownership::Service,
-    apps: apps::Service,
-    networking: networking::Networking,
-    tickets: tickets::Service,
+    alive: Mutex<Option<(Instant, bool)>>,
+    ownership: Mutex<ownership::Service>,
+    apps: Mutex<apps::Service>,
+    networking: Mutex<networking::Networking>,
+    tickets: Mutex<tickets::Service>,
     gc: gc::Gc,
     pops: std::sync::Arc<std::sync::Mutex<Option<Vec<(String, i32)>>>>,
     lobbies: lobby::Lobbies,
-    stats: stats::Stats,
+    stats: Mutex<stats::Stats>,
     workshop: workshop::Service,
     events: Option<EventSender>,
 }
@@ -313,21 +335,40 @@ impl Session<'_> {
         events::emit(&self.events, self.app_id, direction, channel, title, detail);
     }
 
-    async fn respond(&mut self, request: Request) -> Response {
+    /// Whether the CM session answers. Probed at most every two seconds, and only
+    /// by operations that need the account connection.
+    async fn alive(&self) -> bool {
+        let mut cached = self.alive.lock().await;
+        if let Some((at, alive)) = *cached
+            && at.elapsed() < Duration::from_secs(2)
+        {
+            return alive;
+        }
+        let alive = crate::liveness::probe(self.connection, Duration::from_secs(3)).await;
+        *cached = Some((Instant::now(), alive));
+        if !alive {
+            self.ownership.lock().await.clear();
+        }
+        alive
+    }
+
+    async fn respond(&self, request: Request) -> Response {
         if let Some(error) = request_error(&request, self.app_id) {
             return error;
         }
-        let alive = if let Some((at, alive)) = self.alive
-            && at.elapsed() < Duration::from_secs(2)
-        {
-            alive
+        // Local, queue-only operations answer without touching the CM session.
+        let alive = if matches!(
+            request.operation,
+            Operation::PollCallbacks
+                | Operation::GcRecv
+                | Operation::PopPings
+                | Operation::Country
+                | Operation::Image(_)
+                | Operation::CancelAuthTicket { .. }
+        ) {
+            true
         } else {
-            let alive = crate::liveness::probe(self.connection, Duration::from_secs(3)).await;
-            self.alive = Some((Instant::now(), alive));
-            if !alive {
-                self.ownership.clear();
-            }
-            alive
+            self.alive().await
         };
         match request.operation {
             Operation::Identity => Response::Identity {
@@ -363,16 +404,22 @@ impl Session<'_> {
             | Operation::P2PSend { .. }
             | Operation::P2PRecv) => {
                 self.networking
+                    .lock()
+                    .await
                     .respond(self.connection, self.app_id, operation)
                     .await
             }
             Operation::Ownership => {
                 self.ownership
+                    .lock()
+                    .await
                     .query(self.connection, self.app_id, self.app_id, &self.events)
                     .await
             }
             Operation::AppOwnership { app_id } => {
                 self.ownership
+                    .lock()
+                    .await
                     .query(self.connection, self.app_id, app_id, &self.events)
                     .await
             }
@@ -380,6 +427,8 @@ impl Session<'_> {
                 if let steam_ipc::AppsOp::InstallDlc { app_id } = &op
                     && !matches!(
                         self.ownership
+                            .lock()
+                            .await
                             .query(self.connection, self.app_id, *app_id, &self.events)
                             .await,
                         Response::Ownership { owned: true }
@@ -389,7 +438,7 @@ impl Session<'_> {
                         message: "DLC ownership could not be confirmed".into(),
                     };
                 }
-                self.apps.handle(op).await
+                self.apps.lock().await.handle(op).await
             }
             Operation::Persona => {
                 let steam_id = self.connection.steam_id().steam64();
@@ -422,9 +471,10 @@ impl Session<'_> {
                     message: "CM did not return this account's persona".into(),
                 }
             }
-            Operation::AuthSessionTicket { capacity } => match self.tickets.issue(capacity).await {
-                Ok((handle, ticket)) => {
-                    self.note(
+            Operation::AuthSessionTicket { capacity } => {
+                match self.tickets.lock().await.issue(capacity).await {
+                    Ok((handle, ticket)) => {
+                        self.note(
                             Direction::ToSteam,
                             "CM",
                             "ClientAuthList (auth session ticket)",
@@ -433,12 +483,13 @@ impl Session<'_> {
                                 ticket.len()
                             ),
                         );
-                    Response::AuthTicket { handle, ticket }
+                        Response::AuthTicket { handle, ticket }
+                    }
+                    Err(message) => Response::Error {
+                        message: message.into(),
+                    },
                 }
-                Err(message) => Response::Error {
-                    message: message.into(),
-                },
-            },
+            }
             Operation::GcSend { msg_type, payload } => {
                 let Some(payload) = steam_ipc::hex_decode(&payload) else {
                     return Response::Error {
@@ -457,7 +508,7 @@ impl Session<'_> {
                 }
             }
             Operation::Lobby(op) => self.lobbies.handle(self.connection, op).await,
-            Operation::Stats(op) => self.stats.handle(self.connection, op).await,
+            Operation::Stats(op) => self.stats.lock().await.handle(self.connection, op).await,
             Operation::Ugc(
                 op @ (UgcOp::Snapshot
                 | UgcOp::Download { .. }
@@ -466,17 +517,24 @@ impl Session<'_> {
             ) => self.workshop.handle(op).await,
             Operation::Ugc(op) => ugc::handle(self.connection, self.app_id, op).await,
             Operation::Image(op) => images::handle(op).await,
-            Operation::WebAuthTicket { identity } => match self.tickets.web(identity) {
-                Ok(handle) => Response::AuthTicketPending { handle },
-                Err(message) => Response::Error {
-                    message: message.into(),
-                },
-            },
+            Operation::WebAuthTicket { identity } => {
+                match self.tickets.lock().await.web(identity) {
+                    Ok(handle) => Response::AuthTicketPending { handle },
+                    Err(message) => Response::Error {
+                        message: message.into(),
+                    },
+                }
+            }
             Operation::PollCallbacks => {
                 let mut callbacks = self.lobbies.poll();
-                callbacks.extend(self.tickets.poll());
+                // A busy service is simply polled again next round.
+                if let Ok(tickets) = self.tickets.try_lock() {
+                    callbacks.extend(tickets.poll());
+                }
                 callbacks.extend(self.workshop.poll());
-                callbacks.extend(self.apps.poll());
+                if let Ok(apps) = self.apps.try_lock() {
+                    callbacks.extend(apps.poll());
+                }
                 Response::Callbacks(
                     callbacks
                         .into_iter()
@@ -504,20 +562,22 @@ impl Session<'_> {
                 },
                 None => Response::GcNone,
             },
-            Operation::CancelAuthTicket { handle } => match self.tickets.cancel(handle) {
-                Ok(()) => {
-                    self.note(
-                        Direction::ToSteam,
-                        "CM",
-                        "ClientAuthList (queue cancellation)",
-                        &format!("ticket handle {handle} cancellation queued"),
-                    );
-                    Response::Cancelled
+            Operation::CancelAuthTicket { handle } => {
+                match self.tickets.lock().await.cancel(handle) {
+                    Ok(()) => {
+                        self.note(
+                            Direction::ToSteam,
+                            "CM",
+                            "ClientAuthList (queue cancellation)",
+                            &format!("ticket handle {handle} cancellation queued"),
+                        );
+                        Response::Cancelled
+                    }
+                    Err(message) => Response::Error {
+                        message: message.into(),
+                    },
                 }
-                Err(message) => Response::Error {
-                    message: message.into(),
-                },
-            },
+            }
         }
     }
 }
