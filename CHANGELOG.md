@@ -5,6 +5,9 @@
 ### Added
 - **Launch options:** apps that offer selectable launch entries (e.g. Moonlighter 2's DirectX 11 / DirectX 12) can be switched with `O` in the library or `steam-tui content launch-option APPID [INDEX|default]`. The choice is remembered per game.
 
+### Fixed (Proton media)
+- Proton games now get Valve's per-app transcoded video and audio databases (`transcoded_video.foz`, `transcoded_audio.foz`), downloaded and verified at launch into `steamapps/shadercache/<app>/fozmediav1` and passed to Proton through `STEAM_COMPAT_TRANSCODED_MEDIA_PATH`. Without them Proton cannot decode a game's videos, which showed up as lag in Moonlighter 2.
+
 ### Changed
 - Panels use square corners like btop.
 - Launches get persistent per-game GPU caches in `steamapps/shadercache/<app>` (DXVK state cache, Mesa and NVIDIA shader caches, NVIDIA cleanup disabled), the layout Valve's client uses, so pipelines stop being recompiled on every launch. Variables you already export are kept.

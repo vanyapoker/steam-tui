@@ -12,6 +12,7 @@ Early state: some games won't work without original steam client.
 - Select branches, languages and optional DLC; protected branch keys stay in the keyring.
 - Optional Vulkan shader pre-caches, requested per game with `Z`, processed before launch with progress and skip.
 - Missing Proton and runtime dependencies install automatically before launch.
+- Proton games get Valve's transcoded video/audio databases (when the app has them) and persistent per-game GPU caches.
 - Shared redistributables install per library; verified Windows prerequisites run in the Proton prefix and supported Linux setup actions run in the game tree.
 - DLC enumeration, ownership, installed state, downloads, and optional removal through the game's Steamworks APIs.
 - Friends, live notifications, game changelogs.

@@ -42,13 +42,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tokio::time::timeout(Duration::from_secs(30), Connection::anonymous(&servers)).await??
     };
     // Observed in the original shader manager and its persistent bucket list.
-    // GPU-independent Fossilize Vulkan pipeline archive, version 6.
+    // GPU-independent Fossilize Vulkan pipeline archive, version 6. Other bucket
+    // kinds (G7:CompatVideoTCMediaV1, G7:CompatAudioTCMediaV1) can be probed with
+    // SHADER_DRIVER_DESC.
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         connection.service_method(CShader_GetBucketManifest_Request {
             appid: Some(app),
             gpu_desc: Some("SteamSwarm".into()),
-            driver_desc: Some("G7:VulkanPipelinesV6".into()),
+            driver_desc: Some(
+                std::env::var("SHADER_DRIVER_DESC")
+                    .unwrap_or_else(|_| "G7:VulkanPipelinesV6".into()),
+            ),
             ..Default::default()
         }),
     )

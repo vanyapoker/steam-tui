@@ -1797,7 +1797,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                             }
                         },
                         JobEvent::Backend(event) => {
-                            if matches!(event.channel, "Setup" | "Shaders") && model.launching.contains(&event.app_id) {
+                            if matches!(event.channel, "Setup" | "Shaders" | "Media") && model.launching.contains(&event.app_id) {
                                 model.status = format!("Launch [{}]: {}", event.app_id, event.title);
                             }
                             model.push_backend(event);

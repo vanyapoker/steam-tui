@@ -1090,6 +1090,12 @@ pub async fn run_with_backend(
             }
         }
     }
+    if backend_kind == LaunchBackend::BuiltIn
+        && plan.environment.contains_key("STEAM_COMPAT_DATA_PATH")
+        && let Some(connection) = connection
+    {
+        crate::media::prepare(connection, &owned, &mut plan, events.as_ref()).await;
+    }
     let host_account = if backend_kind == LaunchBackend::ValveHost {
         client_env::prepare_hosted(&mut plan)?;
         let connection = connection.ok_or_else(|| failure("Valve-host launches require the selected account identity; reconnect steam-tui first"))?;

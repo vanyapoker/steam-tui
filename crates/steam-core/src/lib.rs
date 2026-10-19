@@ -16,6 +16,7 @@ pub mod installed;
 pub mod launch;
 pub mod library;
 pub mod liveness;
+pub mod media;
 pub mod news;
 pub mod notifications;
 pub mod presence;
