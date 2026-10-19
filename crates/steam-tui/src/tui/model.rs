@@ -252,6 +252,16 @@ pub(super) enum Action {
     Quit,
     Refresh,
     Launch(LaunchBackend),
+    LaunchInstalled(LaunchBackend),
+    SkipShaders(u32),
+    Queue,
+    QueueControl(u64, steam_core::updates::JobState),
+    QueuePriority(u32, i16),
+    QueuePolicy(u32),
+    ContentProperties,
+    ApplyContent,
+    UnlockBranch,
+    ToggleDlc(u32, bool),
     Install,
     /// Manual Steam Cloud sync (download, then upload) of the selected game.
     CloudSync,
@@ -263,6 +273,18 @@ pub(super) enum Action {
     CheckDestination,
     CancelInstall,
     TogglePause,
+}
+
+pub(super) struct ContentProperties {
+    pub game: InstalledGame,
+    pub password: Option<zeroize::Zeroizing<String>>,
+    pub remember_key: bool,
+    pub data: Option<steam_core::content_options::Properties>,
+    pub branch: usize,
+    pub language: usize,
+    pub selected: usize,
+    pub busy: bool,
+    pub error: Option<String>,
 }
 
 /// One line of the backend traffic log: an event and how many identical ones followed it.
@@ -354,12 +376,18 @@ pub(super) struct Model {
     /// Traffic of the per-launch Steam backend, oldest first (capped).
     pub backend_log: std::collections::VecDeque<BackendEntry>,
     pub backend_view: bool,
+    pub queue_view: bool,
+    pub queue_jobs: Vec<steam_core::updates::Job>,
+    pub queue_selected: usize,
+    pub queue_settings: steam_core::updates::Settings,
+    pub properties: Option<ContentProperties>,
     /// Lines scrolled up from the newest entry; 0 follows the tail.
     pub backend_offset: usize,
     pub filter: LibraryFilter,
     pub modal: Option<InstallModal>,
     pub preparing_install: bool,
     pub install_active: bool,
+    pub active_shader: bool,
     pub active_install: Option<(u32, PathBuf)>,
     pub cancel_requested: bool,
     pub paused: bool,
@@ -420,6 +448,11 @@ impl Model {
             help_offset: 0,
             backend_log: std::collections::VecDeque::new(),
             backend_view: false,
+            queue_view: false,
+            queue_jobs: Vec::new(),
+            queue_selected: 0,
+            queue_settings: Default::default(),
+            properties: None,
             backend_offset: 0,
             friends_status,
             notifications: Vec::new(),
@@ -442,6 +475,7 @@ impl Model {
             modal: None,
             preparing_install: false,
             install_active: false,
+            active_shader: false,
             active_install: None,
             cancel_requested: false,
             progress: None,
@@ -486,7 +520,7 @@ impl Model {
         Action::TogglePause
     }
 
-    fn set_paused(&mut self, paused: bool, now: Instant) {
+    pub(super) fn set_paused(&mut self, paused: bool, now: Instant) {
         if self.paused == paused {
             return;
         }
@@ -965,7 +999,12 @@ impl Model {
         } else {
             None
         };
-        if self.modal.is_some() || self.help || self.backend_view || self.cloud_conflicts.is_some()
+        if self.modal.is_some()
+            || self.help
+            || self.backend_view
+            || self.queue_view
+            || self.properties.is_some()
+            || self.cloud_conflicts.is_some()
         {
             return Action::None;
         }
@@ -1099,6 +1138,125 @@ impl Model {
             }
             return Action::None;
         }
+        if self.queue_view {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('J') => self.queue_view = false,
+                KeyCode::Char('q') => return Action::Quit,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.queue_selected =
+                        (self.queue_selected + 1).min(self.queue_jobs.len().saturating_sub(1))
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.queue_selected = self.queue_selected.saturating_sub(1)
+                }
+                KeyCode::Char('p' | 'r' | 'c' | '+' | '-' | 'a') => {
+                    if let Some(job) = self.queue_jobs.get(self.queue_selected) {
+                        return match key.code {
+                            KeyCode::Char('p') => Action::QueueControl(
+                                job.id,
+                                if job.state == steam_core::updates::JobState::Paused {
+                                    steam_core::updates::JobState::Pending
+                                } else {
+                                    steam_core::updates::JobState::Paused
+                                },
+                            ),
+                            KeyCode::Char('r') => {
+                                Action::QueueControl(job.id, steam_core::updates::JobState::Pending)
+                            }
+                            KeyCode::Char('c') => Action::QueueControl(
+                                job.id,
+                                steam_core::updates::JobState::Cancelled,
+                            ),
+                            KeyCode::Char('+') => Action::QueuePriority(job.intent.app_id, 1),
+                            KeyCode::Char('-') => Action::QueuePriority(job.intent.app_id, -1),
+                            _ => Action::QueuePolicy(job.intent.app_id),
+                        };
+                    }
+                }
+                _ => {}
+            }
+            return Action::None;
+        }
+        if let Some(props) = &mut self.properties {
+            if let Some(password) = &mut props.password {
+                match key.code {
+                    KeyCode::Esc => props.password = None,
+                    KeyCode::Enter => {
+                        props.busy = true;
+                        return Action::UnlockBranch;
+                    }
+                    KeyCode::Backspace => {
+                        password.pop();
+                    }
+                    KeyCode::F(2) => props.remember_key = !props.remember_key,
+                    KeyCode::Char(c)
+                        if !c.is_control() && password.len() + c.len_utf8() <= 4096 =>
+                    {
+                        password.push(c)
+                    }
+                    _ => {}
+                }
+                return Action::None;
+            }
+            if key.code == KeyCode::Char('q') {
+                return Action::Quit;
+            }
+            if key.code == KeyCode::Esc {
+                self.properties = None;
+                return Action::None;
+            }
+            if props.busy {
+                return Action::None;
+            }
+            if let Some(data) = &props.data {
+                match key.code {
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        props.selected = (props.selected + 1).min(data.dlc.len() + 1)
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        props.selected = props.selected.saturating_sub(1)
+                    }
+                    KeyCode::Left | KeyCode::Right if props.selected < 2 => {
+                        let (index, count) = if props.selected == 0 {
+                            (&mut props.branch, data.branches.len())
+                        } else {
+                            (&mut props.language, data.languages.len())
+                        };
+                        if count > 0 {
+                            *index = if key.code == KeyCode::Right {
+                                (*index + 1) % count
+                            } else {
+                                (*index + count - 1) % count
+                            };
+                        }
+                    }
+                    KeyCode::Enter if props.selected < 2 => {
+                        if props.selected == 0
+                            && data
+                                .branches
+                                .get(props.branch)
+                                .is_some_and(|b| b.password_required)
+                        {
+                            props.password =
+                                Some(zeroize::Zeroizing::new(String::with_capacity(4096)));
+                        } else {
+                            props.busy = true;
+                            return Action::ApplyContent;
+                        }
+                    }
+                    KeyCode::Char(' ') | KeyCode::Enter => {
+                        if let Some(dlc) =
+                            props.selected.checked_sub(2).and_then(|i| data.dlc.get(i))
+                        {
+                            props.busy = true;
+                            return Action::ToggleDlc(dlc.app_id, !dlc.enabled);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return Action::None;
+        }
         if self.backend_view {
             match key.code {
                 KeyCode::Char('q') => return Action::Quit,
@@ -1199,10 +1357,17 @@ impl Model {
         let preserve = self.selected_game().map(|game| game.app_id);
         match key.code {
             KeyCode::Char('q') => return Action::Quit,
+            KeyCode::Char('S')
+                if self
+                    .selected_game()
+                    .is_some_and(|g| self.launching.contains(&g.app_id)) =>
+            {
+                return Action::SkipShaders(self.selected_game().unwrap().app_id);
+            }
             KeyCode::Char('r') => return Action::Refresh,
             KeyCode::Char('n') => return self.open_news(),
             KeyCode::Char('a') => return self.open_achievements(),
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char('L') => {
                 if self.pending_launch.is_some() {
                     self.status =
                         "A launch is waiting for its dependency installation to finish".into();
@@ -1217,11 +1382,11 @@ impl Model {
                 } else {
                     LaunchBackend::BuiltIn
                 };
-                if let Some(game) = self.selected_game().filter(|game| game.installed.is_some()) {
-                    if let Err(error) = steam_core::launch::validate_backend(game.app_id, backend) {
-                        self.status = error.to_string();
-                        return Action::None;
-                    }
+                if let Some(game) = self.selected_game().filter(|game| game.installed.is_some())
+                    && let Err(error) = steam_core::launch::validate_backend(game.app_id, backend)
+                {
+                    self.status = error.to_string();
+                    return Action::None;
                 }
                 if let Some(game) = self.selected_game().filter(|game| {
                     game.installed.is_some() && self.cloud_busy.contains(&game.app_id)
@@ -1234,6 +1399,7 @@ impl Model {
                 }
                 if self.selected_game().is_some_and(|game| {
                     game.installed.is_some()
+                        && !self.active_shader
                         && self
                             .active_install
                             .as_ref()
@@ -1248,7 +1414,12 @@ impl Model {
                     .selected_game()
                     .is_some_and(|game| game.installed.is_some())
                 {
-                    Action::Launch(backend)
+                    if key.code == KeyCode::Char('L') || key.modifiers.contains(KeyModifiers::SHIFT)
+                    {
+                        Action::LaunchInstalled(backend)
+                    } else {
+                        Action::Launch(backend)
+                    }
                 } else {
                     self.request_install(false)
                 };
@@ -1264,6 +1435,26 @@ impl Model {
             }
             KeyCode::Char('p') if self.install_active => {
                 return self.toggle_pause_at(Instant::now());
+            }
+            KeyCode::Char('J') => {
+                self.queue_view = true;
+                return Action::Queue;
+            }
+            KeyCode::Char('P') => {
+                if let Some(game) = self.selected_game().and_then(|g| g.installed.clone()) {
+                    self.properties = Some(ContentProperties {
+                        game,
+                        password: None,
+                        remember_key: true,
+                        data: None,
+                        branch: 0,
+                        language: 0,
+                        selected: 0,
+                        busy: true,
+                        error: None,
+                    });
+                    return Action::ContentProperties;
+                }
             }
             KeyCode::Char('b') => self.backend_view = true,
             KeyCode::Char('C') => return self.request_cloud_sync(),
@@ -1958,6 +2149,9 @@ mod tests {
         model.active_install = Some((10, "/library".into()));
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(model.key(enter), Action::None);
+        model.active_shader = true;
+        assert_eq!(model.key(enter), Action::Launch(LaunchBackend::BuiltIn));
+        model.active_shader = false;
         model.selected = 1;
         assert_eq!(model.key(enter), Action::Launch(LaunchBackend::BuiltIn));
     }
@@ -1992,6 +2186,57 @@ mod tests {
         assert_eq!(
             model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Action::Launch(LaunchBackend::BuiltIn)
+        );
+    }
+    #[test]
+    fn installed_version_is_explicit_and_private_password_typing_never_triggers_shortcuts() {
+        let mut model = loaded();
+        assert_eq!(
+            model.key(key('L')),
+            Action::LaunchInstalled(LaunchBackend::BuiltIn)
+        );
+        assert_eq!(
+            model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+            Action::LaunchInstalled(LaunchBackend::BuiltIn)
+        );
+        assert_eq!(model.key(key('P')), Action::ContentProperties);
+        let props = model.properties.as_mut().unwrap();
+        props.busy = false;
+        props.data = Some(steam_core::content_options::Properties {
+            app_id: props.game.app_id,
+            branches: vec![steam_core::content_options::Branch {
+                name: "secret".into(),
+                password_required: true,
+            }],
+            languages: vec!["english".into()],
+            dlc: vec![],
+        });
+        assert_eq!(
+            model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::None
+        );
+        for c in ['q', 'J', 'P', 'r'] {
+            assert_eq!(model.key(key(c)), Action::None);
+        }
+        assert_eq!(
+            model
+                .properties
+                .as_ref()
+                .unwrap()
+                .password
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "qJPr"
+        );
+        assert_eq!(
+            model.key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+            Action::None
+        );
+        assert!(!model.properties.as_ref().unwrap().remember_key);
+        assert_eq!(
+            model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::UnlockBranch
         );
     }
 }

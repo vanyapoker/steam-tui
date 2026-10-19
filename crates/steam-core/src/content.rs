@@ -12,6 +12,7 @@
 //! checked, not cryptographically authenticated; trust comes from CM-authorized
 //! manifest IDs, normal CDN TLS, filename/payload checks and chunk/file hashes.
 
+pub(crate) mod delta;
 mod formats;
 #[cfg(test)]
 mod tests;
@@ -126,6 +127,7 @@ pub struct ContentClient {
     http: reqwest::Client,
     servers: Vec<Server>,
     cache: Mutex<Cache>,
+    patches: Mutex<delta::Cache>,
     branch: String,
 }
 impl ContentClient {
@@ -187,6 +189,7 @@ impl ContentClient {
             http,
             servers,
             cache: Mutex::new(Cache::default()),
+            patches: Mutex::new(delta::Cache::default()),
             branch: "public".into(),
         })
     }
@@ -386,6 +389,16 @@ impl ContentClient {
         spec: &DepotSpec,
         cancel: &CancellationToken,
     ) -> Result<DepotManifest> {
+        self.manifest_on_branch(spec, &self.branch, cancel).await
+    }
+    /// Old manifests used for verified cleanup belong to the installed branch,
+    /// which can differ from the desired branch of this transaction.
+    pub(crate) async fn manifest_on_branch(
+        &self,
+        spec: &DepotSpec,
+        branch: &str,
+        cancel: &CancellationToken,
+    ) -> Result<DepotManifest> {
         validate_spec(spec)?;
         let key = self.key(spec, cancel).await?;
         let code = bounded(cancel, async {
@@ -394,7 +407,7 @@ impl ContentClient {
                     app_id: Some(spec.source_app_id),
                     depot_id: Some(spec.depot_id),
                     manifest_id: Some(spec.manifest_id),
-                    app_branch: (self.branch != "public").then(|| self.branch.clone()),
+                    app_branch: (branch != "public").then(|| branch.to_owned()),
                     ..Default::default()
                 })
                 .await

@@ -1,6 +1,7 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("steam-tui supports Linux only");
 
+mod content_jobs;
 mod preferences;
 mod tui;
 
@@ -12,18 +13,35 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "Usage: steam-tui [--account NAME] [command]\n\nWith no command, open the TUI using the latest successful account.\nCommands:\n  tui [--offline]          Friends and installed games (default)\n  discover                 Query Steam's server directory (no account)\n  inspect-app <appid>       Fetch public app metadata (anonymous session)\n  login [--ephemeral]       Sign in; reuse/store a Secret Service refresh token\n  library [--ephemeral]     Sign in and resolve licensed packages to apps\n  backend <appid> [--ephemeral]  Experimental client backend (explicit --account required)\n  launch <appid> [--valve-host]  Launch built-in, or explicitly use Valve host (explicit --account required)\n  logout                   Delete this account's local refresh token\n\n--login is an alias for the login command.\n--account NAME works before or after tui/login/library/backend/logout. A successful\nlogin or TUI resume remembers the account name; credentials stay in Secret Service.\nIf no account has been remembered, prompt once before entering the TUI.\nPasswords and Guard codes are hidden. --ephemeral bypasses token persistence.\nlogout does not revoke tokens on Steam. Enter/double-click automatically selects Valve host for VAC games and built-in for others; Ctrl+Enter forces Valve host.";
+const USAGE: &str = "Usage: steam-tui [--account NAME] [command]\n\nWith no command, open the TUI using the latest successful account.\nCommands:\n  tui [--offline]          Friends and installed games (default)\n  discover                 Query Steam's server directory (no account)\n  inspect-app <appid>       Fetch public app metadata (anonymous session)\n  login [--ephemeral]       Sign in; reuse/store a Secret Service refresh token\n  library [--ephemeral]     Sign in and resolve licensed packages to apps\n  backend <appid> [--ephemeral]  Experimental client backend (explicit --account required)\n  launch <appid> [--valve-host] [--installed]  Launch built-in, or explicitly use Valve host (explicit --account required)\n  content show|branch|language|dlc  Inspect or select game content\n  jobs list|add|run|pause|resume|cancel  Persistent update jobs\n  updates show|policy|priority|window|during-games  Update settings\n  shaders show|add|process|prune|clear|budget|enabled  Vulkan pre-caching\n  logout                   Delete this account's local refresh token\n\n--login is an alias for the login command.\n--account NAME works before or after tui/login/library/backend/logout. A successful\nlogin or TUI resume remembers the account name; credentials stay in Secret Service.\nIf no account has been remembered, prompt once before entering the TUI.\nPasswords and Guard codes are hidden. --ephemeral bypasses token persistence.\nlogout does not revoke tokens on Steam. Enter/double-click automatically selects Valve host for VAC games and built-in for others; Ctrl+Enter forces Valve host.";
 
 #[derive(Debug, PartialEq)]
 enum Command {
     Help,
-    Tui { offline: bool },
+    Jobs(Vec<String>),
+    Updates(Vec<String>),
+    Content(Vec<String>),
+    Shaders(Vec<String>),
+    Tui {
+        offline: bool,
+    },
     Discover,
     InspectApp(u32),
-    Backend { app_id: u32, ephemeral: bool },
-    Launch { app_id: u32, valve_host: bool },
-    Login { ephemeral: bool },
-    Library { ephemeral: bool },
+    Backend {
+        app_id: u32,
+        ephemeral: bool,
+    },
+    Launch {
+        app_id: u32,
+        valve_host: bool,
+        installed: bool,
+    },
+    Login {
+        ephemeral: bool,
+    },
+    Library {
+        ephemeral: bool,
+    },
     Logout,
 }
 
@@ -39,6 +57,7 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
     let mut offline = false;
     let mut ephemeral = false;
     let mut valve_host = false;
+    let mut installed = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -55,12 +74,17 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
             "--offline" if !offline => offline = true,
             "--ephemeral" if !ephemeral => ephemeral = true,
             "--valve-host" if !valve_host => valve_host = true,
+            "--installed" if !installed => installed = true,
             "--help" | "-h" if command.is_none() => command = Some(Command::Help),
             "tui" if command.is_none() => command = Some(Command::Tui { offline: false }),
             "login" | "--login" if command.is_none() => {
                 command = Some(Command::Login { ephemeral: false });
             }
             "library" if command.is_none() => command = Some(Command::Library { ephemeral: false }),
+            "shaders" if command.is_none() => command = Some(Command::Shaders(Vec::new())),
+            "content" if command.is_none() => command = Some(Command::Content(Vec::new())),
+            "jobs" if command.is_none() => command = Some(Command::Jobs(Vec::new())),
+            "updates" if command.is_none() => command = Some(Command::Updates(Vec::new())),
             "logout" if command.is_none() => command = Some(Command::Logout),
             "discover" if command.is_none() => command = Some(Command::Discover),
             "inspect-app" | "backend" | "launch" if command.is_none() => {
@@ -76,6 +100,7 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
                     Command::Launch {
                         app_id: id,
                         valve_host: false,
+                        installed: false,
                     }
                 } else if backend {
                     Command::Backend {
@@ -85,6 +110,25 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
                 } else {
                     Command::InspectApp(id)
                 });
+            }
+            value
+                if matches!(
+                    command,
+                    Some(
+                        Command::Jobs(_)
+                            | Command::Updates(_)
+                            | Command::Content(_)
+                            | Command::Shaders(_)
+                    )
+                ) =>
+            {
+                match command.as_mut().unwrap() {
+                    Command::Jobs(args)
+                    | Command::Updates(args)
+                    | Command::Content(args)
+                    | Command::Shaders(args) => args.push(value.to_owned()),
+                    _ => unreachable!(),
+                }
             }
             _ => {
                 return Err(
@@ -97,6 +141,9 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
     let command = command.unwrap_or(Command::Tui { offline: false });
     if offline && !matches!(command, Command::Tui { .. }) {
         return Err("--offline is only supported in TUI mode");
+    }
+    if installed && !matches!(command, Command::Launch { .. }) {
+        return Err("--installed is only supported by launch");
     }
     if valve_host && !matches!(command, Command::Launch { .. }) {
         return Err("--valve-host is only supported by launch");
@@ -127,7 +174,11 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
         Command::Login { .. } => Command::Login { ephemeral },
         Command::Library { .. } => Command::Library { ephemeral },
         Command::Backend { app_id, .. } => Command::Backend { app_id, ephemeral },
-        Command::Launch { app_id, .. } => Command::Launch { app_id, valve_host },
+        Command::Launch { app_id, .. } => Command::Launch {
+            app_id,
+            valve_host,
+            installed,
+        },
         other => other,
     };
     Ok(Options { command, account })
@@ -195,6 +246,26 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
     let Options { command, account } = options;
     match command {
         Command::Help => println!("{USAGE}"),
+        Command::Shaders(args) => {
+            let account = selected_account(account, false)?
+                .ok_or("shaders requires --account or a remembered account")?;
+            content_jobs::shaders(&account, &args).await?;
+        }
+        Command::Content(args) => {
+            let account = selected_account(account, false)?
+                .ok_or("content requires --account or a remembered account")?;
+            content_jobs::content(&account, &args).await?;
+        }
+        Command::Jobs(args) => {
+            let account = selected_account(account, false)?
+                .ok_or("jobs requires --account or a remembered account")?;
+            content_jobs::run(&account, false, &args).await?;
+        }
+        Command::Updates(args) => {
+            let account = selected_account(account, false)?
+                .ok_or("updates requires --account or a remembered account")?;
+            content_jobs::run(&account, true, &args).await?;
+        }
         Command::Tui { offline } => {
             let account = selected_account(account, !offline)?;
             tui::run(account, offline).await?;
@@ -222,7 +293,11 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
                 result = tokio::signal::ctrl_c() => result?,
             }
         }
-        Command::Launch { app_id, valve_host } => {
+        Command::Launch {
+            app_id,
+            valve_host,
+            installed,
+        } => {
             let backend = if valve_host {
                 steam_core::launch::LaunchBackend::ValveHost
             } else {
@@ -234,7 +309,7 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
             let connection = steam_core::account::login(&account, false).await?;
             let inventory =
                 steam_core::installed::scan(None, Some(&account)).map_err(|e| e.to_string())?;
-            let game = inventory
+            let mut game = inventory
                 .games
                 .into_iter()
                 .find(|game| game.app_id == app_id)
@@ -242,16 +317,44 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
             let local = tokio::task::LocalSet::new();
             local
                 .run_until(async {
+                    if !installed {
+                        let selection = steam_core::updates::Queue::open(&account)?.settings()?.selections.get(&game.app_id).cloned().unwrap_or_default();
+                        match steam_core::updates::check_selected(&connection, &game, &selection).await {
+                            Ok(steam_core::catalog::UpdateStatus::UpToDate) => {},
+                            Ok(steam_core::catalog::UpdateStatus::Available { .. }) => {
+                                let queue = steam_core::updates::Queue::open(&account)?;
+                                let id = queue.enqueue(steam_core::updates::Intent::installed(&game), true)?;
+                                let (progress, mut reports) = tokio::sync::mpsc::channel(64);
+                                let cancel = tokio_util::sync::CancellationToken::new();
+                                let update = steam_core::updates::run_selected(queue, Some(id), connection.clone(), progress, cancel.clone(),
+                                    steam_core::install::PauseGate::default(), content_jobs::minute(), !steam_core::launch::running_app_ids().is_empty());
+                                tokio::pin!(update);
+                                let result = loop {
+                                    tokio::select! {
+                                        result = &mut update => break result?,
+                                        Some(report) = reports.recv() => println!("{}", terminal_text(&report.message)),
+                                        _ = tokio::signal::ctrl_c(), if !cancel.is_cancelled() => cancel.cancel(),
+                                    }
+                                };
+                                if cancel.is_cancelled() { return Err(std::io::Error::other("Update cancelled; launch was not started").into()); }
+                                game = result.ok_or_else(|| std::io::Error::other("Update job is paused or unavailable; inspect jobs before retrying"))?.1;
+                            }
+                            result => {
+                                let reason = match result { Err(e) => e.to_string(), _ => "freshness is unknown".into() };
+                                return Err(std::io::Error::other(format!("Update check failed: {reason}; use launch --installed to explicitly launch the installed version")).into());
+                            }
+                        }
+                    }
                     let mut dependencies = std::collections::BTreeSet::new();
                     let result = loop {
-                        let result = steam_core::launch::run_with_backend(
-                            &game,
-                            Some(&connection),
-                            Some(&account),
-                            backend,
-                            None,
-                        )
-                        .await;
+                        let (events, mut reports) = tokio::sync::mpsc::unbounded_channel();
+                        let launch = steam_core::launch::run_with_backend(&game, Some(&connection), Some(&account), backend, Some(events));
+                        tokio::pin!(launch);
+                        let result = loop { tokio::select! {
+                            result = &mut launch => break result,
+                            Some(event) = reports.recv() => if matches!(event.channel, "Setup" | "Shaders") { println!("{}", terminal_text(&event.title)); },
+                            _ = tokio::signal::ctrl_c() => { if steam_core::shaders::skip(game.app_id) { println!("Skipping shader processing; continuing launch"); } },
+                        } };
                         match result {
                             Ok(result) => break result,
                             Err(error) => {
@@ -265,10 +368,12 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                 let request = missing.install_request(&connection, &game, &account).await?;
                                 let (progress, mut reports) = tokio::sync::mpsc::channel(64);
                                 let cancel = tokio_util::sync::CancellationToken::new();
-                                let install = steam_core::install::run(
-                                    connection.clone(), request, progress, cancel.clone(),
-                                    steam_core::install::PauseGate::default(),
-                                );
+                                let queue = steam_core::updates::Queue::open(&account)?;
+                                let intent = steam_core::updates::Intent { app_id: request.plan.app_id, steam_root: request.steam_root, destination: request.destination,
+                                    shader: false, dependency: Some(steam_core::updates::DependencyIntent { parent_app_id: game.app_id, requirement: missing }), revision: None };
+                                let id = queue.enqueue(intent, true)?;
+                                let install = steam_core::updates::run_selected(queue, Some(id), connection.clone(), progress, cancel.clone(),
+                                    steam_core::install::PauseGate::default(), content_jobs::minute(), !steam_core::launch::running_app_ids().is_empty());
                                 tokio::pin!(install);
                                 loop {
                                     tokio::select! {
@@ -399,7 +504,8 @@ mod tests {
                     .command,
                 Command::Launch {
                     app_id: 440,
-                    valve_host: host
+                    valve_host: host,
+                    installed: false,
                 }
             );
         }

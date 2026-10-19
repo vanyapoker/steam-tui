@@ -232,7 +232,10 @@ fn disabled_dlc_is_excluded_from_granted_depots_and_removed_receipts_trigger_upd
         r#""AppState" {}"#,
     )
     .unwrap();
-    assert!(matches!(compare(&existing, &plan), UpdateStatus::UpToDate)); // Unknown extras are retained.
+    assert!(matches!(
+        compare(&existing, &plan),
+        UpdateStatus::Available { .. }
+    )); // Removed managed depots need reconciliation.
 }
 
 #[test]
@@ -717,4 +720,67 @@ fn cached_catalog_merges_fresh_inventory_and_never_trusts_cached_installs() {
         )
         .is_none()
     );
+}
+
+#[test]
+fn explicit_content_target_changes_branch_language_without_faking_installed_state() {
+    let doc = document(
+        r#"
+        "101" { "config" { "language" "german" } "manifests" { "public" { "gid" "1001" } "beta" { "gid" "2001" } } }
+        "102" { "config" { "language" "english" } "manifests" { "public" { "gid" "1002" } "beta" { "gid" "2002" } } }
+    "#,
+        "linux",
+    );
+    let installed = game();
+    let original = installed.installed_depots.clone();
+    let docs = BTreeMap::from([(10, doc)]);
+    let desired = ContentSelection {
+        branch: Some("beta".into()),
+        language: Some("german".into()),
+    };
+    let plan = metadata::select_with(
+        10,
+        Some(&installed),
+        &BTreeSet::from([10]),
+        &BTreeSet::new(),
+        &docs,
+        &desired,
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            plan.branch.as_str(),
+            plan.language.as_str(),
+            plan.depots[0].manifest_id
+        ),
+        ("beta", "german", 2001)
+    );
+    assert_eq!(installed.installed_depots, original);
+    assert_eq!(installed.branch, "public");
+    assert_eq!(installed.language, "english");
+    let invalid = ContentSelection {
+        branch: None,
+        language: Some("invented".into()),
+    };
+    assert!(
+        metadata::select_with(
+            10,
+            Some(&installed),
+            &BTreeSet::from([10]),
+            &BTreeSet::new(),
+            &docs,
+            &invalid
+        )
+        .is_err()
+    );
+    for value in ["../secret", "", "secret\n", "a/b"] {
+        assert!(
+            ContentSelection {
+                branch: Some(value.into()),
+                language: None
+            }
+            .validate()
+            .is_err()
+        );
+    }
 }

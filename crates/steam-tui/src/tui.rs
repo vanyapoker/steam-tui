@@ -121,10 +121,26 @@ enum JobEvent {
     /// the live catalog while the model is still loading.
     Interim(u64, Interim, CatalogSnapshot),
     Catalog(u64, Result<CatalogSnapshot, String>, Option<String>),
+    UpdateChecked {
+        epoch: u64,
+        game: InstalledGame,
+        backend: LaunchBackend,
+        result: Result<steam_core::catalog::UpdateStatus, String>,
+    },
+    QueueIdle,
+    ContentProperties {
+        app_id: u32,
+        result: Result<steam_core::content_options::Properties, String>,
+    },
+    ContentChanged {
+        app_id: u32,
+        result: Result<u64, String>,
+    },
     Modal(Result<Box<InstallModal>, String>),
     Destination(Result<Destination, String>),
     Installed {
         app_id: u32,
+        shader: bool,
         result: Result<InstalledGame, String>,
     },
     CloudBadges(Vec<(u32, Option<steam_core::cloud::CloudBadge>)>),
@@ -160,6 +176,7 @@ enum JobEvent {
     ToolPlan {
         epoch: u64,
         result: Result<InstallRequest, String>,
+        requirement: steam_core::launch::Dependency,
     },
     Reconnected {
         trigger: Trigger,
@@ -885,22 +902,49 @@ fn spawn_cloud(
     })
 }
 
-fn spawn_install(
+fn spawn_queued_install(
+    queue: steam_core::updates::Queue,
+    id: u64,
+    app_id: u32,
     connection: Connection,
-    request: InstallRequest,
     progress: mpsc::Sender<steam_core::install::InstallProgress>,
     updates: mpsc::Sender<JobEvent>,
 ) -> (CancellationToken, PauseGate, JoinHandle<()>) {
-    let app_id = request.plan.app_id;
     let cancel = CancellationToken::new();
-    let job_cancel = cancel.clone();
+    let token = cancel.clone();
     let pause = PauseGate::default();
-    let job_pause = pause.clone();
+    let gate = pause.clone();
     let job = tokio::task::spawn_local(async move {
-        let result = steam_core::install::run(connection, request, progress, job_cancel, job_pause)
-            .await
-            .map_err(|error| error.to_string());
-        let _ = updates.send(JobEvent::Installed { app_id, result }).await;
+        let shader = queue
+            .job(id)
+            .ok()
+            .flatten()
+            .is_some_and(|job| job.intent.shader);
+        let result = steam_core::updates::run_selected(
+            queue,
+            Some(id),
+            connection,
+            progress,
+            token,
+            gate,
+            crate::content_jobs::minute(),
+            !steam_core::launch::running_app_ids().is_empty(),
+        )
+        .await;
+        let event = match result {
+            Ok(Some((_, game))) => JobEvent::Installed {
+                app_id: game.app_id,
+                shader,
+                result: Ok(game),
+            },
+            Ok(None) => JobEvent::QueueIdle,
+            Err(error) => JobEvent::Installed {
+                app_id,
+                shader,
+                result: Err(error.to_string()),
+            },
+        };
+        let _ = updates.send(event).await;
     });
     (cancel, pause, job)
 }
@@ -916,11 +960,26 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
     let online = !offline && account.is_some();
     let connection_error = (!offline && account.is_none())
         .then(|| "No account selected; use --account or run offline".to_owned());
+    let queue = account
+        .as_deref()
+        .map(steam_core::updates::Queue::open)
+        .transpose();
+    let (queue, queue_error) = match queue {
+        Ok(q) => (q, None),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    let mut checking_updates = std::collections::BTreeSet::new();
+    let mut pending_update_launch: Option<(u64, u32, LaunchBackend)> = None;
     let mut connection: Option<Connection> = None;
     let mut workers = Workers(Vec::new());
     let mut live = Live::spawn(connection.as_ref());
     let mut model = Model::new(offline, connection_error);
     model.account = account.clone();
+    if let Some(error) = queue_error {
+        model
+            .warnings
+            .push(format!("Persistent updates unavailable: {error}"));
+    }
     if let Some(text) = super::preferences::load_settings() {
         model.apply_settings(&text);
     }
@@ -953,6 +1012,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
     tokio::pin!(shutdown);
     // Unlike auxiliary workers, an installer must never be aborted in commit.
     let mut install_job: Option<(CancellationToken, PauseGate, JoinHandle<()>)> = None;
+    let mut active_queue: Option<u64> = None;
     let mut reconnect = Reconnect::new(online);
     // Handlers only record these; they are applied at the top of the loop, when no
     // select! future borrows the workers' channels.
@@ -984,6 +1044,10 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
     }
     let result: Result<(), Box<dyn Error>> = async {
         loop {
+            if model.queue_view && let Some(queue) = &queue {
+                if let Ok(jobs) = queue.jobs() { model.queue_jobs = jobs; model.queue_selected = model.queue_selected.min(model.queue_jobs.len().saturating_sub(1)); }
+                if let Ok(settings) = queue.settings() { model.queue_settings = settings; }
+            }
             let settings = model.settings_text();
             if settings != saved_settings {
                 super::preferences::save_settings(&settings);
@@ -1025,6 +1089,26 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                 }
                 after_reconnect = None;
             }
+            if !model.install_active && !model.preparing_install && !model.loading && model.modal.is_none()
+                && !reconnect.in_flight() && !model.cancel_requested && model.launching.is_empty()
+                && let (Some(queue), Some(connection)) = (&queue, connection.clone())
+            {
+                match queue.ready(crate::content_jobs::minute(), !steam_core::launch::running_app_ids().is_empty()) {
+                    Ok(Some(job)) => {
+                        model.active_shader = job.intent.shader;
+                        model.active_install = Some((job.intent.app_id, job.intent.destination.clone()));
+                        model.install_active = true;
+                        model.begin_install(); watchdog.install_activity(Instant::now());
+                        active_queue = Some(job.id);
+                        install_job = Some(spawn_queued_install(queue.clone(), job.id, job.intent.app_id, connection, progress_tx.clone(), job_tx.clone()));
+                    }
+                    Ok(None) => {},
+                    Err(error) => { model.status = format!("Update queue unavailable: {error}"); },
+                }
+            }
+            if let (Some(queue), Some(id)) = (&queue, active_queue)
+                && let Ok(paused) = queue.suspended(id, crate::content_jobs::minute(), !steam_core::launch::running_app_ids().is_empty())
+            { model.set_paused(paused, Instant::now()); }
             let activity = Activity {
                 connected: connection.is_some() && !reconnect.in_flight(),
                 install_active: model.install_active,
@@ -1076,6 +1160,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                             };
                             match action {
                                 Action::Quit => break,
+                                Action::SkipShaders(app) => { if steam_core::shaders::skip(app) { model.status = "Skipping shader processing; continuing launch…".into(); } },
                                 Action::None => {},
                                 Action::ResolveCloud => {
                                     if let (Some(modal), Some(connection), Some(account)) = (&model.cloud_conflicts, connection.clone(), account.clone()) {
@@ -1197,25 +1282,125 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                         plan: modal.plan, destination, steam_root: modal.steam_root,
                                         account, existing: modal.existing,
                                     };
+                                    let Some(queue) = &queue else { model.status = "Persistent queue unavailable; cannot start a durable install".into(); continue; };
+                                    let id = match queue.enqueue(steam_core::updates::Intent { app_id, steam_root: request.steam_root.clone(), destination: request.destination.clone(), dependency: None, shader: false, revision: None }, true) {
+                                        Ok(id) => id, Err(e) => { model.status = format!("Cannot queue install: {e}"); continue; }
+                                    };
+                                    active_queue = Some(id);
+                                    model.active_shader = false;
                                     model.active_install = Some((app_id, request.destination.clone()));
                                     model.install_active = true;
                                     model.cancel_requested = false;
                                     model.begin_install();
                                     watchdog.install_activity(Instant::now());
                                     model.status = format!("Install [{app_id}]: preparing transaction…");
-                                    install_job = Some(spawn_install(connection, request, progress_tx.clone(), job_tx.clone()));
+                                    install_job = Some(spawn_queued_install(queue.clone(), id, app_id, connection, progress_tx.clone(), job_tx.clone()));
                                 }
                                 Action::CancelInstall => {
+                                    if pending_update_launch.as_ref().is_some_and(|(job, _, _)| Some(*job) == active_queue) { pending_update_launch = None; }
+                                    model.pending_launch = None;
+                                    if let (Some(queue), Some(id)) = (&queue, active_queue)
+                                        && let Err(error) = queue.control(id, steam_core::updates::JobState::Cancelled) { model.status = error.to_string(); }
                                     if let Some((cancel, pause, _)) = &install_job {
                                         cancel.cancel();
                                         pause.set(false);
                                     }
                                 }
                                 Action::TogglePause => {
-                                    if let Some((_, pause, _)) = &install_job { pause.set(model.paused); }
+                                    if let (Some(queue), Some(id)) = (&queue, active_queue) {
+                                        if let Err(error) = queue.control(id, if model.paused { steam_core::updates::JobState::Paused } else { steam_core::updates::JobState::Pending }) { model.status = error.to_string(); }
+                                    } else if let Some((_, pause, _)) = &install_job { pause.set(model.paused); }
+                                }
+                                Action::Queue => {
+                                    if queue.is_none() { model.status = "Persistent queue unavailable for this account".into(); }
+                                }
+                                Action::QueueControl(id, state) => {
+                                    if let Some(queue) = &queue {
+                                        if let Err(e) = queue.control(id, state) { model.status = e.to_string(); }
+                                        if state == steam_core::updates::JobState::Cancelled && pending_update_launch.as_ref().is_some_and(|(job, _, _)| *job == id) { pending_update_launch = None; }
+                                    }
+                                }
+                                Action::QueuePriority(app, delta) => {
+                                    if let Some(queue) = &queue {
+                                        let result = (|| { let mut settings = queue.settings()?; let value = settings.priorities.entry(app).or_default(); *value = value.saturating_add(delta); queue.save_settings(settings) })();
+                                        if let Err(error) = result { model.status = error.to_string(); }
+                                    }
+                                }
+                                Action::QueuePolicy(app) => {
+                                    if let Some(queue) = &queue {
+                                        let result = (|| { let mut settings = queue.settings()?; let policy = settings.policies.entry(app).or_default();
+                                            *policy = match *policy { steam_core::updates::UpdatePolicy::Automatic => steam_core::updates::UpdatePolicy::LaunchOnly, steam_core::updates::UpdatePolicy::LaunchOnly => steam_core::updates::UpdatePolicy::Manual, steam_core::updates::UpdatePolicy::Manual => steam_core::updates::UpdatePolicy::Automatic }; queue.save_settings(settings) })();
+                                        if let Err(error) = result { model.status = error.to_string(); }
+                                    }
+                                }
+                                Action::ContentProperties => {
+                                    if let Some(view) = &mut model.properties {
+                                        if let Some(connection) = connection.clone() {
+                                            let game = view.game.clone(); let updates = job_tx.clone();
+                                            workers.push(tokio::task::spawn_local(async move {
+                                                let result = steam_core::content_options::properties(&connection, &game).await.map_err(|e| e.to_string());
+                                                let _ = updates.send(JobEvent::ContentProperties { app_id: game.app_id, result }).await;
+                                            }));
+                                        } else { view.busy = false; view.error = Some("An online connection is required".into()); }
+                                    }
+                                }
+                                Action::UnlockBranch => {
+                                    if let Some(view) = &mut model.properties {
+                                        if let (Some(connection), Some(queue), Some(data), Some(password)) = (connection.clone(), queue.clone(), &view.data, view.password.take()) {
+                                            let game = view.game.clone(); let persist = view.remember_key;
+                                            let desired = steam_core::catalog::ContentSelection { branch: data.branches.get(view.branch).map(|b| b.name.clone()), language: data.languages.get(view.language).cloned() };
+                                            let updates = job_tx.clone();
+                                            workers.push(tokio::task::spawn_local(async move {
+                                                let result = async {
+                                                    let branch = desired.branch.as_deref().ok_or_else(|| std::io::Error::other("No branch selected"))?;
+                                                    steam_core::branches::unlock(&connection, game.app_id, branch, password, persist).await?;
+                                                    steam_core::content_options::select(&connection, &queue, &game, desired).await
+                                                }.await.map_err(|e: Box<dyn std::error::Error + Send + Sync>| e.to_string());
+                                                let _ = updates.send(JobEvent::ContentChanged { app_id: game.app_id, result }).await;
+                                            }));
+                                        } else { view.busy = false; view.error = Some("Online connection and queue are required".into()); }
+                                    }
+                                }
+                                action @ (Action::ApplyContent | Action::ToggleDlc(_, _)) => {
+                                    if let Some(view) = &mut model.properties {
+                                        if let (Some(connection), Some(queue), Some(data)) = (connection.clone(), queue.clone(), &view.data) {
+                                            let desired = steam_core::catalog::ContentSelection { branch: data.branches.get(view.branch).map(|b| b.name.clone()), language: data.languages.get(view.language).cloned() };
+                                            let game = view.game.clone(); let updates = job_tx.clone();
+                                            workers.push(tokio::task::spawn_local(async move {
+                                                let result = match action {
+                                                    Action::ToggleDlc(id, enabled) => steam_core::content_options::select_dlc(&connection, &queue, &game, id, enabled).await,
+                                                    _ => steam_core::content_options::select(&connection, &queue, &game, desired).await,
+                                                }.map_err(|e| e.to_string());
+                                                let _ = updates.send(JobEvent::ContentChanged { app_id: game.app_id, result }).await;
+                                            }));
+                                        } else { view.busy = false; view.error = Some("Online connection and update queue are required".into()); }
+                                    }
                                 }
                                 Action::Launch(backend) => {
+                                    if let Some(game) = model.selected_game().and_then(|g| g.installed.clone()) {
+                                        if !model.launching.insert(game.app_id) { continue; }
+                                        checking_updates.insert(game.app_id);
+                                        model.status = format!("Checking updates for {}… (Shift+Enter launches installed version)", game.name);
+                                        let updates = job_tx.clone(); let session = connection.clone();
+                                        let selection = queue.as_ref().and_then(|q| q.settings().ok()).and_then(|s| s.selections.get(&game.app_id).cloned()).unwrap_or_default();
+                                        workers.push(tokio::task::spawn_local(async move {
+                                            let result = match session {
+                                                Some(connection) => steam_core::updates::check_selected(&connection, &game, &selection).await.map_err(|e| e.to_string()),
+                                                None => Err("Offline: freshness cannot be checked".into()),
+                                            };
+                                            let _ = updates.send(JobEvent::UpdateChecked { epoch, game, backend, result }).await;
+                                        }));
+                                    }
+                                }
+                                Action::LaunchInstalled(backend) => {
                                     if let Some(game) = model.selected_game().and_then(|game| game.installed.clone()) {
+                                        if checking_updates.remove(&game.app_id) { model.launching.remove(&game.app_id); }
+                                        if pending_update_launch.as_ref().is_some_and(|(_, app, _)| *app == game.app_id) {
+                                            pending_update_launch = None;
+                                            if let Some(queue) = &queue && let Ok(jobs) = queue.jobs() {
+                                                for job in jobs.iter().filter(|j| j.intent.app_id == game.app_id && j.foreground && matches!(j.state, steam_core::updates::JobState::Pending | steam_core::updates::JobState::Paused)) { let _ = queue.control(job.id, steam_core::updates::JobState::Cancelled); }
+                                            }
+                                        }
                                         spawn_launch(game, connection.clone().zip(account.clone()), backend, &mut model, job_tx.clone(), &mut workers);
                                     }
                                 }
@@ -1309,6 +1494,15 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                         }
                         JobEvent::Catalog(_, Ok(catalog), completion) => {
                             trace("catalog_live");
+                            if let Some(queue) = &queue {
+                                for row in &catalog.items {
+                                    if let Some(game) = &row.installed && queue.settings().is_ok_and(|s| s.shaders_enabled) && steam_core::shaders::due(queue, game.app_id).unwrap_or(false)
+                                        && let Err(error) = queue.enqueue(steam_core::updates::Intent::shader(game), false) { model.warnings.push(format!("Cannot queue shaders [{}]: {error}", game.app_id)); }
+                                    if matches!(row.update, steam_core::catalog::UpdateStatus::Available { .. }) && let Some(game) = &row.installed
+                                        && let Err(error) = row.plan.as_ref().map_or_else(|| Ok(steam_core::updates::Intent::installed(game)), |plan| steam_core::updates::Intent::catalog(game, plan)).and_then(|intent| queue.enqueue(intent, false))
+                                    { model.warnings.push(format!("Cannot queue update [{}]: {error}", row.app_id)); }
+                                }
+                            }
                             model.set_catalog(catalog);
                             release_memory();
                             if let Some(message) = completion { model.status = message; }
@@ -1324,6 +1518,56 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                 reconnect_request = Some(Trigger::JobFailed);
                             }
                             model.inventory_error = Some(error);
+                        }
+                        JobEvent::ContentProperties { app_id, result } => {
+                            if let Some(view) = &mut model.properties && view.game.app_id == app_id {
+                                view.busy = false;
+                                match result {
+                                    Ok(data) => {
+                                        let desired = queue.as_ref().and_then(|q| q.settings().ok()).and_then(|s| s.selections.get(&app_id).cloned()).unwrap_or_default();
+                                        let branch = desired.branch.as_deref().unwrap_or(&view.game.branch);
+                                        let language = desired.language.as_deref().unwrap_or(&view.game.language);
+                                        view.branch = data.branches.iter().position(|b| b.name == branch).unwrap_or(0);
+                                        view.language = data.languages.iter().position(|l| l == language).unwrap_or(0);
+                                        view.data = Some(data);
+                                    }
+                                    Err(e) => view.error = Some(e),
+                                }
+                            }
+                        }
+                        JobEvent::ContentChanged { app_id, result } => {
+                            match result {
+                                Ok(id) => { model.properties = None; model.status = format!("Content change queued as job {id}"); }
+                                Err(e) => if let Some(view) = &mut model.properties && view.game.app_id == app_id { view.busy = false; view.error = Some(e); },
+                            }
+                        }
+                        JobEvent::QueueIdle => {
+                            active_queue = None;
+                            if let Some((_, _, job)) = install_job.take() { let _ = job.await; }
+                            model.active_shader = false;
+                            model.install_active = false; model.active_install = None; model.clear_progress();
+                        }
+                        JobEvent::UpdateChecked { epoch: checked_epoch, game, backend, result } => {
+                            if !checking_updates.remove(&game.app_id) { continue; }
+                            model.launching.remove(&game.app_id);
+                            if checked_epoch != epoch { model.status = "Account connection changed; retry launch".into(); continue; }
+                            match result {
+                                Ok(steam_core::catalog::UpdateStatus::UpToDate) => spawn_launch(game, connection.clone().zip(account.clone()), backend, &mut model, job_tx.clone(), &mut workers),
+                                Ok(steam_core::catalog::UpdateStatus::Available { .. }) => {
+                                    if let Some(queue) = &queue {
+                                        match queue.enqueue(steam_core::updates::Intent::installed(&game), true) {
+                                            Ok(id) => {
+                                                pending_update_launch = Some((id, game.app_id, backend));
+                                                if model.active_shader && let Some((cancel, pause, _)) = &install_job { cancel.cancel(); pause.set(false); }
+                                                model.status = format!("Updating {} before launch…", game.name);
+                                            },
+                                            Err(e) => model.status = format!("Cannot queue update: {e}; Shift+Enter launches installed version"),
+                                        }
+                                    } else { model.status = "Update required, but queue is unavailable; use u or Shift+Enter".into(); }
+                                }
+                                Ok(_) => model.status = "Update freshness is unknown; Shift+Enter explicitly launches installed version".into(),
+                                Err(error) => model.status = format!("Update check failed: {error}; Shift+Enter explicitly launches installed version"),
+                            }
                         }
                         JobEvent::Modal(result) => {
                             model.preparing_install = false;
@@ -1422,15 +1666,29 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                 }
                             }
                         }
-                        JobEvent::Installed { app_id, result } => {
+                        JobEvent::Installed { app_id, shader, result } => {
+                            let finished_queue = active_queue.take();
                             if let Some((_, _, job)) = install_job.take() { let _ = job.await; }
                             release_memory();
                             model.install_active = false;
+                            model.active_shader = false;
                             model.active_install = None;
                             // Consume this job's queued reports before a new job can start.
                             while let Ok(progress) = progress_rx.try_recv() { model.apply_progress(progress); }
                             let stalled = std::mem::take(&mut stall_cancel);
                             let installed_ok = result.is_ok();
+                            if shader {
+                                model.clear_progress();
+                                model.status = match result { Ok(_) => format!("Shader pre-cache [{app_id}] ready; processing runs before launch"), Err(error) => format!("Shader pre-cache [{app_id}]: {error}") };
+                                model.cancel_requested = false;
+                                continue;
+                            }
+                            if pending_update_launch.as_ref().is_some_and(|(job, _, _)| Some(*job) == finished_queue) {
+                                let (_, _, backend) = pending_update_launch.take().unwrap();
+                                if let Ok(game) = &result {
+                                    spawn_launch(game.clone(), connection.clone().zip(account.clone()), backend, &mut model, job_tx.clone(), &mut workers);
+                                }
+                            }
                             let message = match result {
                                 Ok(game) => {
                                     model.installed(game);
@@ -1478,7 +1736,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                     workers.push(tokio::task::spawn_local(async move {
                                         let result = dependency.install_request(&connection, &game, &account)
                                             .await.map_err(|e| e.to_string());
-                                        let _ = updates.send(JobEvent::ToolPlan { epoch, result }).await;
+                                        let _ = updates.send(JobEvent::ToolPlan { epoch, result, requirement: dependency }).await;
                                     }));
                                 }
                                 _ => {
@@ -1488,17 +1746,23 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                 }
                             }
                         }
-                        JobEvent::ToolPlan { epoch: planned_epoch, result } => match (result, connection.clone()) {
+                        JobEvent::ToolPlan { epoch: planned_epoch, result, requirement } => match (result, connection.clone()) {
                             (Ok(request), Some(connection)) if planned_epoch == epoch && !model.install_active && model.pending_launch.is_some() => {
                                 model.preparing_install = false;
                                 let app_id = request.plan.app_id;
+                                let Some(queue) = &queue else { model.preparing_install = false; model.pending_launch = None; model.status = "Dependency queue unavailable".into(); continue; };
+                                let parent = model.pending_launch.as_ref().unwrap().0.app_id;
+                                let intent = steam_core::updates::Intent { app_id, steam_root: request.steam_root.clone(), destination: request.destination.clone(), shader: false, dependency: Some(steam_core::updates::DependencyIntent { parent_app_id: parent, requirement }), revision: None };
+                                let id = match queue.enqueue(intent, true) { Ok(id) => id, Err(e) => { model.preparing_install = false; model.pending_launch = None; model.status = e.to_string(); continue; } };
+                                active_queue = Some(id);
+                                model.active_shader = false;
                                 model.active_install = Some((app_id, request.destination.clone()));
                                 model.install_active = true;
                                 model.cancel_requested = false;
                                 model.begin_install();
                                 watchdog.install_activity(Instant::now());
                                 model.status = format!("Install [{app_id}]: preparing dependency…");
-                                install_job = Some(spawn_install(connection, request, progress_tx.clone(), job_tx.clone()));
+                                install_job = Some(spawn_queued_install(queue.clone(), id, app_id, connection, progress_tx.clone(), job_tx.clone()));
                             }
                             (Err(error), _) => {
                                 model.preparing_install = false;
@@ -1513,7 +1777,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                             }
                         },
                         JobEvent::Backend(event) => {
-                            if event.channel == "Setup" && model.launching.contains(&event.app_id) {
+                            if matches!(event.channel, "Setup" | "Shaders") && model.launching.contains(&event.app_id) {
                                 model.status = format!("Launch [{}]: {}", event.app_id, event.title);
                             }
                             model.push_backend(event);

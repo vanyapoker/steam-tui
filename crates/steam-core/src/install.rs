@@ -7,8 +7,7 @@
 //! and `finish_stage` verifies each file end to end in parallel and fsyncs it
 //! before anything is committed.
 //! Changed local managed files are retained under `.steam-tui/preserved`; files
-//! absent from new ordinary depots remain untouched, including mods and saves.
-//! Removed DLC files are deleted only when their old manifest proves that they
+//! absent from new depots are deleted only when their old manifest proves that they
 //! are unchanged and not supplied by any remaining depot.
 //!
 //! Safety boundary: Linux filesystems with working rename, flock, fsync and
@@ -17,8 +16,7 @@
 //! markers cause refusal. Other same-user programs do not honor our locks, so
 //! do not edit library paths while committing. Unreadable /proc environments
 //! cannot establish that a process is a game. Symlinks never escape the game
-//! tree, directory/file collisions require explicit user action, and obsolete
-//! depot files are retained rather than guessing which files are saves/mods.
+//! tree and directory/file collisions require explicit user action.
 //! UserConfig defaults are verified but never replace existing configuration.
 //! Live DLC requests use a separate, validated same-build scope: unrelated depot
 //! manifests stay fixed and only DLC-owned/overlaid paths may change. Normal
@@ -167,7 +165,7 @@ impl PauseGate {
 
 /// Returns at once when not paused; otherwise waits for resume or cancellation
 /// (cancellation takes the usual cancelled-error path in the caller).
-async fn wait_while_paused(gate: &PauseGate, cancel: &CancellationToken) -> Result<()> {
+pub(crate) async fn wait_while_paused(gate: &PauseGate, cancel: &CancellationToken) -> Result<()> {
     if !gate.is_paused() {
         return Ok(());
     }
@@ -271,6 +269,41 @@ async fn download_group(
         report(progress, status);
         *last_report = std::time::Instant::now();
     }
+    let mut candidates = BTreeMap::<u32, (DepotSpec, u64)>::new();
+    for ((file_index, chunk_index), _) in &missing {
+        let planned = &layout.files[*file_index];
+        candidates
+            .entry(planned.depot.depot_id)
+            .or_insert_with(|| (planned.depot.clone(), 0))
+            .1 += u64::from(planned.file.chunks[*chunk_index].compressed_size);
+    }
+    let mut patches = BTreeMap::new();
+    for (id, (depot, missing_bytes)) in candidates {
+        if let Some(source) = session.source_manifest(id) {
+            let (patch, downloaded) = client.patch(&depot, source, missing_bytes, cancel).await?;
+            status.downloaded_bytes += downloaded;
+            status.total_download_bytes += downloaded;
+            if let Some(patch) = patch {
+                patches.insert(id, patch);
+            }
+        }
+    }
+    // Reserve source and dictionary copies as well as the ordinary chunk's
+    // buffers. Large reconstructions that do not fit use ordinary chunks.
+    for ((file_index, chunk_index), charge) in &mut missing {
+        let planned = &layout.files[*file_index];
+        let chunk = &planned.file.chunks[*chunk_index];
+        if let Some(source) = patches
+            .get(&planned.depot.depot_id)
+            .and_then(|p| p.entry(&chunk.id))
+            .and_then(|e| layout.reuse.get(&e.source))
+        {
+            let extra = 3 * source.size as usize;
+            if *charge + extra <= download::BUFFER_BUDGET {
+                *charge += extra;
+            }
+        }
+    }
     download::run(
         missing,
         cancel,
@@ -278,23 +311,58 @@ async fn download_group(
         |(file_index, chunk_index)| {
             let token = cancel.clone();
             let (s, l) = (Arc::clone(session), Arc::clone(layout));
+            let patches = &patches;
             async move {
                 let planned = &l.files[file_index];
                 let chunk = &planned.file.chunks[chunk_index];
-                let bytes = client.chunk(&planned.depot, chunk, &token).await?;
+                let patched = if let Some(patch) = patches.get(&planned.depot.depot_id)
+                    && let Some(entry) = patch.entry(&chunk.id)
+                    && let Some(source) = l.reuse.get(&entry.source)
+                    && 2 * chunk.compressed_size as usize
+                        + chunk.uncompressed_size as usize
+                        + 3 * source.size as usize
+                        <= download::BUFFER_BUDGET
+                {
+                    let (patch, source, target, hash, session) = (
+                        Arc::clone(patch),
+                        source.clone(),
+                        chunk.clone(),
+                        entry.source,
+                        Arc::clone(&s),
+                    );
+                    blocking(move || {
+                        let Some(bytes) = session.patch_source(&source, &hash)? else {
+                            return Ok(None);
+                        };
+                        Ok(patch.reconstruct(&target, &bytes).ok())
+                    })
+                    .await
+                    .unwrap_or(None)
+                } else {
+                    None
+                };
+                check_cancel(&token)?;
+                let (bytes, downloaded) = match patched {
+                    Some(bytes) => (bytes, 0),
+                    None => (
+                        client.chunk(&planned.depot, chunk, &token).await?,
+                        u64::from(chunk.compressed_size),
+                    ),
+                };
                 blocking(move || {
                     check_cancel(&token)?;
                     let file = &l.files[file_index].file;
                     s.write_downloaded_chunk(&file.path, &file.chunks[chunk_index], &bytes)
                 })
                 .await?;
-                Ok((file_index, chunk_index))
+                Ok((file_index, chunk_index, downloaded))
             }
         },
-        |(file_index, chunk_index)| {
+        |(file_index, chunk_index, downloaded)| {
             let file = &layout.files[file_index].file;
             let chunk = &file.chunks[chunk_index];
-            status.downloaded_bytes += u64::from(chunk.compressed_size);
+            status.downloaded_bytes += downloaded;
+            status.total_download_bytes -= u64::from(chunk.compressed_size) - downloaded;
             status.completed_bytes += u64::from(chunk.uncompressed_size);
             if last_report.elapsed() >= CHUNK_REPORT_INTERVAL {
                 status.message = format!("Downloaded {}", file.path.display());
@@ -694,13 +762,17 @@ async fn install_manifest(
     session: &Arc<transaction::Session>,
     spec: &DepotSpec,
     cancel: &CancellationToken,
+    branch: Option<&str>,
 ) -> Result<DepotManifest> {
     let (s, requested) = (session.clone(), spec.clone());
     if let Some(manifest) = blocking(move || s.cached_manifest(&requested)).await? {
         client.register_manifest(spec, &manifest).await?;
         return Ok(manifest);
     }
-    let manifest = client.manifest(spec, cancel).await?;
+    let manifest = match branch {
+        Some(branch) => client.manifest_on_branch(spec, branch, cancel).await?,
+        None => client.manifest(spec, cancel).await?,
+    };
     let (s, requested) = (session.clone(), spec.clone());
     blocking(move || {
         s.remember_manifest(&requested, &manifest)?;
@@ -740,38 +812,16 @@ async fn run_inner(
         report(progress, status);
         manifests.push((
             depot.clone(),
-            install_manifest(&client, &session, depot, cancel).await?,
+            install_manifest(&client, &session, depot, cancel, None).await?,
         ));
     }
     let mut old = Vec::new();
-    let mut removed_dlc = std::collections::BTreeSet::new();
     if let Some(existing) = &request.existing {
         let recorded = crate::installed::read_vdf(
             &existing
                 .library_root
                 .join(format!("steamapps/appmanifest_{}.acf", existing.app_id)),
         )?;
-        let app = crate::launch::app_document(existing).ok();
-        for id in existing
-            .installed_depots
-            .keys()
-            .filter(|id| !request.plan.depots.iter().any(|d| d.depot_id == **id))
-        {
-            let recorded_dlc = recorded
-                .at(&["appstate", "steamtuidlcdepots"])
-                .and_then(|n| n.text(&id.to_string()))
-                .and_then(|s| s.parse::<u32>().ok())
-                .is_some_and(|id| id != 0);
-            let declared_dlc = app
-                .as_ref()
-                .and_then(|doc| doc.at(&["depots", &id.to_string()]))
-                .and_then(|d| d.text("dlcappid"))
-                .and_then(|s| s.parse::<u32>().ok())
-                .is_some_and(|id| id != 0);
-            if recorded_dlc || declared_dlc {
-                removed_dlc.insert(*id);
-            }
-        }
         for (&depot_id, &manifest_id) in &existing.installed_depots {
             check_cancel(cancel)?;
             if let Some((_, same)) = manifests
@@ -803,6 +853,7 @@ async fn run_inner(
                             source_app_id,
                         },
                         cancel,
+                        Some(&existing.branch),
                     )
                     .await
                     .map_err(|e| {
@@ -818,7 +869,8 @@ async fn run_inner(
     if let Some(scope) = session.dlc_scope() {
         layout.restrict_to_dlc(scope)?;
     } else {
-        layout.reconcile_removals(&removed_dlc);
+        let managed = layout.old_depots.values().copied().collect();
+        layout.reconcile_removals(&managed);
     }
     let layout = Arc::new(layout);
     status.total_bytes = if session.dlc_scope().is_some() {

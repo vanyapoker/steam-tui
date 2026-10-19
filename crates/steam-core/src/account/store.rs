@@ -11,13 +11,14 @@ const SERVICE: &str = "steam-tui";
 const STORE_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTENT_TYPE: &str = "application/x-steam-refresh-token";
 
-pub(super) struct TokenStore {
+pub(crate) struct TokenStore {
     connection: SecretService<'static>,
     service: String,
+    kind: String,
 }
 
 impl TokenStore {
-    pub(super) async fn open() -> Result<Self> {
+    pub(crate) async fn open() -> Result<Self> {
         let store = Self::open_for_logout().await?;
         // Refuse to silently treat a locked or absent keyring as empty. Only an
         // unavailable provider/default collection offers explicit ephemeral mode.
@@ -36,18 +37,25 @@ impl TokenStore {
         Ok(Self {
             connection,
             service: SERVICE.to_owned(),
+            kind: "refresh-token".into(),
         })
+    }
+
+    pub(crate) async fn branch_keys() -> Result<Self> {
+        let mut store = Self::open().await?;
+        store.kind = "branch-access-key".into();
+        Ok(store)
     }
 
     fn attributes<'a>(&'a self, account: &'a str) -> HashMap<&'a str, &'a str> {
         HashMap::from([
             ("service", self.service.as_str()),
             ("account", account),
-            ("kind", "refresh-token"),
+            ("kind", self.kind.as_str()),
         ])
     }
 
-    pub(super) async fn load(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    pub(crate) async fn load(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         let items = operation(self.connection.search_items(self.attributes(account))).await?;
         if !items.locked.is_empty() {
             return Err(AccountError::Locked);
@@ -63,22 +71,40 @@ impl TokenStore {
         }
     }
 
-    pub(super) async fn save(&self, account: &str, token: &[u8]) -> Result<()> {
+    pub(crate) async fn save(&self, account: &str, token: &[u8]) -> Result<()> {
         let items = operation(self.connection.search_items(self.attributes(account))).await?;
         if !items.locked.is_empty() {
             return Err(AccountError::Locked);
         }
         match items.unlocked.as_slice() {
-            [item] => operation(item.set_secret(token, CONTENT_TYPE)).await,
+            [item] => {
+                operation(item.set_secret(
+                    token,
+                    if self.kind == "refresh-token" {
+                        CONTENT_TYPE
+                    } else {
+                        "application/x-steam-branch-access-key"
+                    },
+                ))
+                .await
+            }
             [] => {
                 let collection = operation(self.connection.get_default_collection()).await?;
                 operation(collection.ensure_unlocked()).await?;
                 operation(collection.create_item(
-                    "steam-tui Steam refresh token",
+                    if self.kind == "refresh-token" {
+                        "steam-tui Steam refresh token"
+                    } else {
+                        "steam-tui branch access key"
+                    },
                     self.attributes(account),
                     token,
                     true,
-                    CONTENT_TYPE,
+                    if self.kind == "refresh-token" {
+                        CONTENT_TYPE
+                    } else {
+                        "application/x-steam-branch-access-key"
+                    },
                 ))
                 .await?;
                 Ok(())

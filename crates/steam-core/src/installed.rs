@@ -11,7 +11,7 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 pub(crate) type Result<T, E = Box<dyn Error + Send + Sync>> = std::result::Result<T, E>;
-pub(crate) use metadata::{Node, app_metadata, read_vdf, text};
+pub(crate) use metadata::{Node, app_metadata, read_vdf, text, text_preserving_keys};
 pub(crate) fn failure(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
     Box::new(io::Error::other(message.into()))
 }

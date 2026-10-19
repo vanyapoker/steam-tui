@@ -399,3 +399,63 @@ fn dropping_a_launch_cancels_its_setup_worker() {
     drop(guard);
     assert!(token.is_cancelled());
 }
+
+#[test]
+fn native_scripts_preserve_filename_case_and_apply_only_verified_file_operations() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let root = fixture.game().install_dir;
+    fs::write(root.join("GameBinary"), b"native").unwrap();
+    let source = r#""InstallScript" { "version" "1" "chmod" { "GameBinary" "755" } "symlink" { "GameLink" "GameBinary" } "defaults" {} }"#;
+    let recipe = native::parse(source, &root).unwrap();
+    native::execute(&[recipe], &CancellationToken::new()).unwrap();
+    assert_eq!(
+        fs::read_link(root.join("GameLink")).unwrap(),
+        Path::new("GameBinary")
+    );
+    assert_eq!(
+        fs::metadata(root.join("GameBinary"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    native::execute(
+        &[native::parse(source, &root).unwrap()],
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    let v2 =
+        r#""InstallScript" { "version" "2" "chmod" { "1" { "file" "GameBinary" "mode" "700" } } }"#;
+    native::execute(
+        &[native::parse(v2, &root).unwrap()],
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::metadata(root.join("GameBinary"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    for bad in [
+        r#""InstallScript" { "chmod" { "GameBinary" "4755" } }"#,
+        r#""InstallScript" { "symlink" { "escape" "../outside" } }"#,
+        r#""InstallScript" { "chmod" { "GameBinary" "755" } "run process" {} }"#,
+        r#""InstallScript" { "symlink" { "GameBinary" "different" } }"#,
+    ] {
+        assert!(native::parse(bad, &root).is_err());
+    }
+    // Complete recipe validation failed; no permission action has run.
+    assert_eq!(
+        fs::metadata(root.join("GameBinary"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+}

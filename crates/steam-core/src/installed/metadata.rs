@@ -37,6 +37,13 @@ pub(crate) fn read_vdf(path: &Path) -> Result<Node> {
 /// localconfig JSON values can exhaust its stack. Keep both lexing and parsing
 /// iterative here, with depth/node/file bounds independent of string length.
 pub(crate) fn text(text: &str) -> Result<Node> {
+    text_inner(text, true)
+}
+/// Setup v1 uses filenames as keys; their case is significant on Linux.
+pub(crate) fn text_preserving_keys(text: &str) -> Result<Node> {
+    text_inner(text, false)
+}
+fn text_inner(text: &str, fold: bool) -> Result<Node> {
     if text.len() > 16 * 1024 * 1024 {
         return Err(failure("text VDF exceeds the 16 MiB limit"));
     }
@@ -54,7 +61,7 @@ pub(crate) fn text(text: &str) -> Result<Node> {
         match token {
             TextToken::Scalar(value) => {
                 if let Some(key) = key.take() {
-                    insert(
+                    insert_text(
                         &mut stack
                             .last_mut()
                             .ok_or_else(|| failure("missing VDF parent"))?
@@ -64,6 +71,7 @@ pub(crate) fn text(text: &str) -> Result<Node> {
                             value: Some(value.into_owned()),
                             children: BTreeMap::new(),
                         },
+                        fold,
                     )?;
                 } else {
                     nodes += 1;
@@ -88,13 +96,14 @@ pub(crate) fn text(text: &str) -> Result<Node> {
                     return Err(failure("unexpected VDF closing brace"));
                 }
                 let (key, node) = stack.pop().ok_or_else(|| failure("missing VDF group"))?;
-                insert(
+                insert_text(
                     &mut stack
                         .last_mut()
                         .ok_or_else(|| failure("missing VDF parent"))?
                         .1,
                     key,
                     node,
+                    fold,
                 )?;
             }
         }
@@ -219,6 +228,16 @@ impl<'a> TextReader<'a> {
         }
         Err(failure("unclosed VDF quoted string"))
     }
+}
+fn insert_text(parent: &mut Node, mut key: String, value: Node, fold: bool) -> Result<()> {
+    if fold {
+        key.make_ascii_lowercase();
+    }
+    if parent.children.contains_key(&key) {
+        return Err(failure(format!("duplicate VDF key {key}")));
+    }
+    parent.children.insert(key, value);
+    Ok(())
 }
 fn insert(parent: &mut Node, mut key: String, value: Node) -> Result<()> {
     key.make_ascii_lowercase();

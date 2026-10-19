@@ -45,13 +45,46 @@ pub(super) fn select(
     licensed_depots: &BTreeSet<u32>,
     docs: &BTreeMap<u32, Node>,
 ) -> Result<InstallPlan> {
+    select_with(
+        app_id,
+        existing,
+        owned,
+        licensed_depots,
+        docs,
+        &super::ContentSelection::default(),
+    )
+}
+
+pub(super) fn select_with(
+    app_id: u32,
+    existing: Option<&InstalledGame>,
+    owned: &BTreeSet<u32>,
+    licensed_depots: &BTreeSet<u32>,
+    docs: &BTreeMap<u32, Node>,
+    selection: &super::ContentSelection,
+) -> Result<InstallPlan> {
+    selection.validate()?;
     let doc = docs
         .get(&app_id)
         .ok_or_else(|| failure("App metadata is unavailable"))?;
     let depots = doc
         .child("depots")
         .ok_or_else(|| failure("This app has no downloadable depot metadata"))?;
-    let branch = existing.map(|g| g.branch.as_str()).unwrap_or("public");
+    let branch = selection
+        .branch
+        .as_deref()
+        .or_else(|| existing.map(|g| g.branch.as_str()))
+        .unwrap_or("public");
+    let language = selection
+        .language
+        .as_deref()
+        .or_else(|| existing.map(|g| g.language.as_str()))
+        .unwrap_or("english");
+    if selection.language.is_some() && !super::languages(doc).contains(language) {
+        return Err(failure(format!(
+            "Language {language} is not declared by this app"
+        )));
+    }
     let branch_node = depots
         .at(&["branches", branch])
         .ok_or_else(|| failure(format!("Branch {branch} is unavailable or private")))?;
@@ -76,7 +109,7 @@ pub(super) fn select(
         depots,
         branch,
         build_id,
-        language: existing.map(|g| g.language.as_str()).unwrap_or("english"),
+        language,
     };
     let mut empty = Vec::new();
     for platform in platforms(existing, doc, depots)? {

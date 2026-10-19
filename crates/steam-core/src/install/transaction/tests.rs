@@ -115,6 +115,47 @@ fn staged(s: &Session, layout: &Layout, contents: &[(&str, &[u8])]) {
 }
 
 #[test]
+fn ordinary_update_removes_only_unchanged_obsolete_managed_files() {
+    let temp = Temp::new();
+    let s = session(temp.path());
+    let mut config = file("config.ini", b"default");
+    config.flags = 1;
+    let old = DepotManifest {
+        depot_id: 10,
+        manifest_id: 19,
+        files: vec![
+            file("obsolete", b"official"),
+            file("changed", b"old"),
+            config,
+        ],
+    };
+    fs::write(s.install.join("obsolete"), b"official").unwrap();
+    fs::write(s.install.join("changed"), b"modded").unwrap();
+    fs::write(s.install.join("config.ini"), b"default").unwrap();
+    fs::write(s.install.join("save.dat"), b"save").unwrap();
+    let mut layout = Layout::new(
+        vec![(
+            depot(),
+            DepotManifest {
+                depot_id: 10,
+                manifest_id: 20,
+                files: vec![file("new", b"new")],
+            },
+        )],
+        vec![old],
+    )
+    .unwrap();
+    let managed = layout.old_depots.values().copied().collect();
+    layout.reconcile_removals(&managed);
+    staged(&s, &layout, &[("new", b"new")]);
+    s.commit(&layout).unwrap();
+    assert!(!s.install.join("obsolete").exists());
+    assert_eq!(fs::read(s.install.join("changed")).unwrap(), b"modded");
+    assert_eq!(fs::read(s.install.join("config.ini")).unwrap(), b"default");
+    assert_eq!(fs::read(s.install.join("save.dat")).unwrap(), b"save");
+}
+
+#[test]
 fn dlc_install_and_remove_restore_overlays_preserve_mods_and_leave_base_inode_untouched() {
     let temp = Temp::new();
     fs::create_dir(temp.path().join("steamapps")).unwrap();
@@ -971,4 +1012,31 @@ fn new_manifest_declares_public_universe_for_steam_discovery() {
     assert_eq!(app.text("Universe"), Some("1"));
     assert_eq!(app.text("appid"), Some("30"));
     assert_eq!(app.text("StateFlags"), Some("4"));
+}
+
+#[test]
+fn delta_source_is_hashed_at_read_time_and_never_follows_external_links() {
+    let temp = Temp::new();
+    let s = session(temp.path());
+    let source = ReusableChunk {
+        path: "old".into(),
+        offset: 1,
+        size: 3,
+    };
+    fs::write(s.install.join("old"), b"_old").unwrap();
+    assert_eq!(
+        s.patch_source(&source, &hash_bytes(b"old"))
+            .unwrap()
+            .unwrap(),
+        b"old"
+    );
+    fs::write(s.install.join("old"), b"_mod").unwrap();
+    assert!(
+        s.patch_source(&source, &hash_bytes(b"old"))
+            .unwrap()
+            .is_none()
+    );
+    fs::remove_file(s.install.join("old")).unwrap();
+    symlink(temp.path().join("outside"), s.install.join("old")).unwrap();
+    assert!(s.patch_source(&source, &hash_bytes(b"old")).is_err());
 }

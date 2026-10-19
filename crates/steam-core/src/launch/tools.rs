@@ -5,9 +5,12 @@ use super::*;
 const REGISTRY: u32 = 891390;
 const MAX_TOOLS: usize = 32;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Dependency {
     Tool(MissingTool),
+    Additional {
+        app_id: u32,
+    },
     Shared {
         app_id: u32,
         depots: BTreeSet<u32>,
@@ -18,6 +21,10 @@ impl std::fmt::Display for Dependency {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Tool(tool) => tool.fmt(f),
+            Self::Additional { app_id } => write!(
+                f,
+                "Additional dependency app {app_id} needs installation or update"
+            ),
             Self::Shared { app_id, .. } => write!(
                 f,
                 "Shared prerequisites (app {app_id}) need installation or update"
@@ -36,6 +43,7 @@ impl Dependency {
     pub fn app_id(&self) -> u32 {
         match self {
             Self::Tool(tool) => tool.app_id,
+            Self::Additional { app_id } => *app_id,
             Self::Shared { app_id, .. } => *app_id,
         }
     }
@@ -45,6 +53,23 @@ impl Dependency {
         game: &InstalledGame,
         account: &str,
     ) -> Result<crate::install::InstallRequest> {
+        if let Self::Additional { app_id } = self {
+            let existing = crate::installed::scan(Some(&game.steam_root), Some(account))?
+                .games
+                .into_iter()
+                .find(|g| g.app_id == *app_id);
+            let plan = additional_plan(connection, *app_id, existing.as_ref()).await?;
+            return Ok(crate::install::InstallRequest {
+                plan,
+                destination: existing
+                    .as_ref()
+                    .map(|g| g.library_root.clone())
+                    .unwrap_or_else(|| game.library_root.clone()),
+                steam_root: game.steam_root.clone(),
+                account: account.into(),
+                existing,
+            });
+        }
         let Self::Shared {
             app_id,
             depots,
@@ -253,5 +278,223 @@ impl MissingTool {
             account: account.into(),
             existing: None,
         })
+    }
+}
+
+/// Ghidra 011a0300: extended/additional_dependencies entries contain appid,
+/// src_os and dest_os. The selected game platform is the source; Linux is the
+/// destination. These apps are installations, not command-line wrappers.
+fn additional_ids(document: &Node, source: &str) -> Result<BTreeSet<u32>> {
+    let mut result = BTreeSet::new();
+    for entry in document
+        .at(&["extended", "additional_dependencies"])
+        .into_iter()
+        .flat_map(|n| n.children.values())
+    {
+        if entry.text("src_os") != Some(source) || entry.text("dest_os") != Some("linux") {
+            continue;
+        }
+        let id = entry
+            .text("appid")
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|id| *id != 0)
+            .ok_or_else(|| failure("Invalid additional dependency app ID"))?;
+        result.insert(id);
+        if result.len() > MAX_TOOLS {
+            return Err(failure("Too many additional dependencies"));
+        }
+    }
+    Ok(result)
+}
+async fn additional_plan(
+    connection: &steam_vent::Connection,
+    app: u32,
+    existing: Option<&InstalledGame>,
+) -> Result<crate::catalog::InstallPlan> {
+    if crate::library::cached_ownership(connection).is_some_and(|(owned, _)| owned.contains(&app)) {
+        return crate::catalog::plan(connection, app, existing)
+            .await
+            .map_err(|e| failure(e.to_string()));
+    }
+    let document = crate::library::cached_app(app)?
+        .ok_or_else(|| failure("Additional dependency metadata is unavailable"))?;
+    if document
+        .at(&["common"])
+        .and_then(|n| n.text("type"))
+        .is_none_or(|t| !t.eq_ignore_ascii_case("tool"))
+    {
+        return Err(failure(format!(
+            "Additional app {app} requires its own account license"
+        )));
+    }
+    crate::catalog::plan_tool(connection, app)
+        .await
+        .map_err(|e| failure(e.to_string()))
+}
+
+pub(super) async fn prepare_additional(
+    game: &InstalledGame,
+    plan: &LaunchPlan,
+    connection: Option<&steam_vent::Connection>,
+) -> Result<()> {
+    let root = app_document(game)?;
+    let os = if plan.environment.contains_key("STEAM_COMPAT_DATA_PATH") {
+        "windows"
+    } else {
+        "linux"
+    };
+    if additional_ids(&root, os)?.is_empty() {
+        return Ok(());
+    }
+    let connection =
+        connection.ok_or_else(|| failure("Connect to verify additional launch dependencies"))?;
+    let inventory = crate::installed::scan(Some(&game.steam_root), None)?;
+    let installs: BTreeMap<_, _> = inventory.games.into_iter().map(|g| (g.app_id, g)).collect();
+    let mut docs = BTreeMap::from([(game.app_id, root)]);
+    let mut graph = BTreeMap::new();
+    let mut frontier = vec![(game.app_id, os.to_owned())];
+    while let Some((id, source)) = frontier.pop() {
+        if graph.contains_key(&id) {
+            continue;
+        }
+        if graph.len() >= MAX_TOOLS {
+            return Err(failure("Additional dependency graph exceeds 32 apps"));
+        }
+        let dependencies = additional_ids(&docs[&id], &source)?;
+        let unknown: BTreeSet<_> = dependencies
+            .iter()
+            .filter(|id| !docs.contains_key(id))
+            .copied()
+            .collect();
+        if docs.len() + unknown.len() > MAX_TOOLS {
+            return Err(failure("Additional dependency graph exceeds 32 apps"));
+        }
+        if !unknown.is_empty() {
+            let (found, missing) = crate::library::inspect_apps(connection, &unknown)
+                .await
+                .map_err(|e| failure(e.to_string()))?;
+            if !missing.is_empty() {
+                return Err(failure(
+                    "Additional dependency metadata was denied or unavailable",
+                ));
+            }
+            for (id, app) in found {
+                docs.insert(
+                    id,
+                    app.document
+                        .ok_or_else(|| failure("Additional dependency has no metadata"))?,
+                );
+            }
+        }
+        for &child in &dependencies {
+            let doc = docs
+                .get(&child)
+                .ok_or_else(|| failure("Additional dependency has no metadata"))?;
+            let platform = installs
+                .get(&child)
+                .and_then(|g| g.platform)
+                .unwrap_or_else(|| {
+                    if doc
+                        .at(&["common"])
+                        .and_then(|n| n.text("oslist"))
+                        .is_some_and(|s| {
+                            s.split(',').any(|s| s == "windows")
+                                && !s.split(',').any(|s| s == "linux")
+                        })
+                    {
+                        crate::catalog::InstallPlatform::Windows
+                    } else {
+                        crate::catalog::InstallPlatform::Linux
+                    }
+                });
+            frontier.push((
+                child,
+                if platform == crate::catalog::InstallPlatform::Windows {
+                    "windows".into()
+                } else {
+                    "linux".into()
+                },
+            ));
+        }
+        graph.insert(id, dependencies);
+    }
+    let order = dependency_order(game.app_id, &graph)?;
+    for id in order.into_iter().filter(|id| *id != game.app_id) {
+        let selected = additional_plan(connection, id, installs.get(&id)).await?;
+        if installs.get(&id).is_none_or(|installed| {
+            !matches!(
+                crate::catalog::compare(installed, &selected),
+                crate::catalog::UpdateStatus::UpToDate
+            )
+        }) {
+            return Err(Box::new(Dependency::Additional { app_id: id }));
+        }
+    }
+    Ok(())
+}
+fn dependency_order(root: u32, graph: &BTreeMap<u32, BTreeSet<u32>>) -> Result<Vec<u32>> {
+    fn visit(
+        id: u32,
+        graph: &BTreeMap<u32, BTreeSet<u32>>,
+        active: &mut BTreeSet<u32>,
+        seen: &mut BTreeSet<u32>,
+        order: &mut Vec<u32>,
+    ) -> Result<()> {
+        if seen.contains(&id) {
+            return Ok(());
+        }
+        if !active.insert(id) {
+            return Err(failure(format!("Additional dependency cycle at app {id}")));
+        }
+        if active.len() > MAX_TOOLS {
+            return Err(failure("Additional dependency graph exceeds 32 apps"));
+        }
+        for &next in graph
+            .get(&id)
+            .ok_or_else(|| failure("Incomplete dependency graph"))?
+        {
+            visit(next, graph, active, seen, order)?;
+        }
+        active.remove(&id);
+        seen.insert(id);
+        order.push(id);
+        Ok(())
+    }
+    let mut order = Vec::new();
+    visit(
+        root,
+        graph,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+        &mut order,
+    )?;
+    Ok(order)
+}
+#[cfg(test)]
+mod additional_tests {
+    use super::*;
+    #[test]
+    fn additional_dependencies_filter_platform_and_sort_before_parent_and_reject_cycles() {
+        let doc = crate::installed::text(
+            r#""extended" { "additional_dependencies" {
+            "1" { "appid" "20" "src_os" "windows" "dest_os" "linux" }
+            "2" { "appid" "30" "src_os" "windows" "dest_os" "macos" }
+            "3" { "appid" "40" "src_os" "linux" "dest_os" "linux" }
+        } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            additional_ids(&doc, "windows").unwrap(),
+            BTreeSet::from([20])
+        );
+        assert_eq!(additional_ids(&doc, "linux").unwrap(), BTreeSet::from([40]));
+        let mut graph = BTreeMap::from([
+            (10, BTreeSet::from([20, 30])),
+            (20, BTreeSet::from([30])),
+            (30, BTreeSet::new()),
+        ]);
+        assert_eq!(dependency_order(10, &graph).unwrap(), [30, 20, 10]);
+        graph.insert(30, BTreeSet::from([10]));
+        assert!(dependency_order(10, &graph).is_err());
     }
 }

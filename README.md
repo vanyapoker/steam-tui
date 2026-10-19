@@ -7,9 +7,12 @@ Early state: some games won't work without original steam client.
 ![steam-tui](assets/screenshot.png)
 
 - Starts in ~2 ms and uses ~30 MB of memory.
-- Install and update games (native and Proton), with pause and resume.
+- Install and update games (native and Proton), with a persistent queue, pause/resume, priorities and download windows.
+- Check for updates before launch, with an explicit option to launch the installed version.
+- Select branches, languages and optional DLC; protected branch keys stay in the keyring.
+- Download verified Vulkan shader pre-caches and process them before launch, with progress and skip.
 - Missing Proton and runtime dependencies install automatically before launch.
-- Shared redistributables install per library; verified first-run setup runs in each game's Proton prefix.
+- Shared redistributables install per library; verified Windows prerequisites run in the Proton prefix and supported Linux setup actions run in the game tree.
 - DLC enumeration, ownership, installed state, downloads, and optional removal through the game's Steamworks APIs.
 - Friends, live notifications, game changelogs.
 - Steam Cloud saves, with a side-by-side local/cloud conflict picker.
@@ -31,14 +34,14 @@ steam-tui
 
 Make sure `~/.local/bin` is in your `PATH`.
 
-**From source** (needs Rust, CMake, make, Perl and a C++ compiler; the first build takes a few minutes):
+**From source** (needs Rust, Git, Python 3, CMake, make, Perl and a C++ compiler; the first build takes a few minutes):
 
 ```sh
 git clone https://github.com/vanyapoker/steam-tui && cd steam-tui
 ./install.sh
 ```
 
-`install.sh` installs to `~/.local` without sudo. Use `PREFIX=/some/path ./install.sh` to change that.
+`install.sh` installs to `~/.local` without sudo. Use `PREFIX=/some/path ./install.sh` to change that. It builds and packages a pinned standalone `fossilize-replay`; no Steam installation or Vulkan capture layer is needed for shader processing. Vulkan drivers are needed at runtime. For development builds, set `STEAM_TUI_FOSSILIZE_REPLAY` to your standalone helper or place it beside the executable.
 
 ## Hotkeys
 
@@ -46,7 +49,11 @@ Press `?` in the app for the full list.
 
 | Key | Action |
 | --- | --- |
-| Enter / double-click | Launch the game |
+| Enter / double-click | Check/update, then launch |
+| Shift+Enter / L | Explicitly launch the installed version |
+| J | Persistent content/shader queue |
+| P | Branch, language and DLC properties |
+| S while launching | Skip shader processing and continue launch |
 | Ctrl+Enter | Launch through Valve's Steam client |
 | i / u | Install / update |
 | p / c | Pause / cancel the download |
@@ -61,6 +68,27 @@ Press `?` in the app for the full list.
 | r | Refresh |
 | b | Backend traffic |
 | q | Quit |
+
+## Updates and shader caches
+
+The queue runs while the TUI is open or `jobs run` is active. Closing it retains pending work; there is no background daemon. Background work pauses during games by default. Explicit foreground content downloads can override that pause. Normal launch checks fresh game metadata; an unavailable check requires the explicit installed-version choice.
+
+```sh
+steam-tui jobs list
+steam-tui jobs run
+steam-tui updates policy APPID automatic  # or launch-only / manual
+steam-tui updates window 23:00 06:00
+steam-tui content show APPID
+steam-tui content unlock APPID BRANCH    # hidden password prompt; remembers returned key
+steam-tui shaders add APPID              # queue a download; then jobs run
+steam-tui shaders show APPID
+steam-tui shaders enabled off            # disables downloads and processing
+steam-tui shaders clear APPID            # reclaim this game's generated cache
+```
+
+Vulkan FOZ v6 archives have their own freshness checks and verified staging. Compilation uses two threads, low CPU priority and a 2 GiB address-space limit per helper process. Failed/skipped processing never marks a context complete and never prevents launching the game. TUI `S` skips; CLI launch/process uses Ctrl+C to skip this optional stage. Shader archives have an 8 GiB account budget including staging, adjustable with `shaders budget MIB`; old generations and unused replay contexts are pruned. The budget excludes driver-created cache data. State and caches live under `$XDG_STATE_HOME/steam-tui/updates-ACCOUNT` (`~/.local/state` by default).
+
+See [the update audit](docs/steam-update-gap-audit.md) for evidence, supported formats and validation limits.
 
 ## Steamworks coverage
 
@@ -79,6 +107,7 @@ Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK h
 - VAC-secured games run through Valve's Steam client without its web helpers. It must be signed in to the same account, and costs about 200 MB extra. Enter picks this automatically.
 - Online matchmaking and relay networking are unfinished.
 - In-game DLC changes preserve the parent build; a parent update or ambiguous metadata requires closing/updating the game. Removal retains modified files and user configuration. Windows setup scripts run at the next launch. `SetDlcContext` usage reporting is unavailable.
+- Shader download/replay currently covers Vulkan FOZ v6. Legacy GPU-specific binary caches, media transcode caches, and capture/upload are not implemented. Real-driver replay performance has not been measured.
 - Linux only.
 
 ## Not implemented yet

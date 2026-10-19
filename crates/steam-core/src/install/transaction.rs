@@ -589,6 +589,36 @@ impl Session {
         Ok(())
     }
 
+    pub(super) fn source_manifest(&self, depot: u32) -> Option<u64> {
+        self.request
+            .existing
+            .as_ref()?
+            .installed_depots
+            .get(&depot)
+            .copied()
+    }
+    pub(super) fn patch_source(
+        &self,
+        source: &ReusableChunk,
+        hash: &[u8; 20],
+    ) -> Result<Option<Vec<u8>>> {
+        if source.size == 0 || source.size > 16 * 1024 * 1024 {
+            return Ok(None);
+        }
+        let path = fsafe::checked(&self.install, &source.path, true)?;
+        let mut file = match fsafe::regular(&path, false, false) {
+            Ok(file) => file,
+            Err(_) => return Ok(None),
+        };
+        if file.metadata()?.len() < source.offset.saturating_add(u64::from(source.size)) {
+            return Ok(None);
+        }
+        let mut bytes = vec![0; source.size as usize];
+        file.seek(SeekFrom::Start(source.offset))?;
+        file.read_exact(&mut bytes)?;
+        Ok((hash_bytes(&bytes) == *hash).then_some(bytes))
+    }
+
     pub(super) fn reuse_chunk(
         &self,
         path: &Path,
@@ -1025,7 +1055,7 @@ impl Session {
                 false
             };
             // Modified files and user configuration remain in place. Only an
-            // unchanged file owned exclusively by removed DLC is removed.
+            // unchanged managed file absent from every selected depot is removed.
             if !unchanged {
                 continue;
             }

@@ -1,5 +1,6 @@
 //! First-run setup uses verified depot scripts and the game's own Proton prefix.
 //! No host shell, system registry, Steam service, or elevation is involved.
+mod native;
 mod runner;
 mod script;
 #[cfg(test)]
@@ -152,11 +153,6 @@ pub(super) async fn prepare(
         }
         sources.push((installed.expect("checked above"), Some(requested)));
     }
-    // Shared payloads also apply to native apps; Windows script execution does
-    // not. Never run a Linux host shell for a Windows first-run directive.
-    if !proton {
-        return Ok(());
-    }
     let library = game.library_root.canonicalize()?;
     let state = library.join("steamapps/.steam-tui");
     safe::checked(&library, Path::new("steamapps/.steam-tui"), true)?;
@@ -165,6 +161,8 @@ pub(super) async fn prepare(
     let directory = state.join("setup");
     safe::private_directory(&directory)?;
     let mut recipes = Vec::new();
+    let mut native_recipes = Vec::new();
+    let mut native_receipts = Vec::new();
     // Shared prerequisites precede game-specific setup.
     sources.rotate_left(1);
     for (source, selected) in sources {
@@ -179,8 +177,37 @@ pub(super) async fn prepare(
             {
                 continue;
             }
-            recipes.push(load_recipe(&source, &receipt, &game.language)?);
+            if proton {
+                recipes.push(load_recipe(&source, &receipt, &game.language)?);
+            } else {
+                native_recipes.push(native::parse(
+                    &load_source(&source, &receipt)?,
+                    &source.install_dir,
+                )?);
+                native_receipts.push((source.app_id, source.install_dir.clone(), receipt));
+            }
         }
+    }
+    if !proton {
+        let identity = serde_json::to_vec(&(1, game.app_id, &game.language, &native_receipts))?;
+        let done = safe::checked(
+            &directory,
+            Path::new(&format!("native-{}.json", game.app_id)),
+            true,
+        )?;
+        if read_bounded(&done, 1024 * 1024).ok().as_deref() == Some(identity.as_slice()) {
+            return Ok(());
+        }
+        let cancel = CancellationToken::new();
+        let _guard = CancelOnDrop(cancel.clone());
+        tokio::task::spawn_blocking(move || {
+            let _library_lock = _library_lock;
+            native::execute(&native_recipes, &cancel)?;
+            safe::atomic_write(&done, &identity)
+        })
+        .await
+        .map_err(|e| failure(format!("Native setup worker failed: {e}")))??;
+        return Ok(());
     }
     if recipes
         .iter()
@@ -221,6 +248,13 @@ fn load_recipe(
     receipt: &Receipt,
     language: &str,
 ) -> Result<script::Recipe> {
+    script::parse(
+        &load_source(source, receipt)?,
+        &source.install_dir,
+        language,
+    )
+}
+fn load_source(source: &InstalledGame, receipt: &Receipt) -> Result<String> {
     validate_receipt(source, receipt)?;
     let path = contained(&source.install_dir, &receipt.path)?;
     let bytes = read_bounded(&path, 4 * 1024 * 1024)?;
@@ -230,7 +264,7 @@ fn load_recipe(
             path.display()
         )));
     }
-    script::parse(&decode(&bytes)?, &source.install_dir, language)
+    decode(&bytes)
 }
 
 fn decode(bytes: &[u8]) -> Result<String> {

@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
-pub(super) fn relative(path: &Path) -> Result<()> {
+pub(crate) fn relative(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty()
         || path
             .components()
@@ -329,16 +329,20 @@ pub(super) fn disk_error(path: &Path, error: std::io::Error) -> super::Error {
 pub(crate) struct Lock(File);
 impl Lock {
     pub(crate) fn acquire(path: &Path) -> Result<Self> {
+        Self::try_acquire(path)?
+            .ok_or_else(|| failure(format!("Another installer holds {}", path.display())))
+    }
+    pub(crate) fn try_acquire(path: &Path) -> Result<Option<Self>> {
         let file = regular(path, true, true)?;
         use std::os::fd::AsRawFd;
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(failure(format!(
-                "Another installer holds {}: {}",
-                path.display(),
-                std::io::Error::last_os_error()
-            )));
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(error.into());
         }
-        Ok(Self(file))
+        Ok(Some(Self(file)))
     }
 }
 impl Drop for Lock {

@@ -39,6 +39,30 @@ pub enum InstallPlatform {
     /// Windows depots, run through Proton.
     Windows,
 }
+/// Desired content is independent from the last committed installation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentSelection {
+    pub branch: Option<String>,
+    pub language: Option<String>,
+}
+impl ContentSelection {
+    pub fn validate(&self) -> Result<()> {
+        for value in [&self.branch, &self.language].into_iter().flatten() {
+            if value.is_empty()
+                || value.len() > 128
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+            {
+                return Err(failure(
+                    "Branch and language must be nonempty identifiers of at most 128 bytes",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DepotSpec {
     pub depot_id: u32,
@@ -270,14 +294,28 @@ pub async fn load(
                 Some("Steam app metadata is currently unavailable".to_owned()),
             )
         } else {
-            match resolve_account(
-                app.app_id,
-                existing.as_ref(),
-                &owned,
-                &library.owned_depots,
-                &docs,
-                connection.steam_id().steam64(),
-            ) {
+            let resolved = if existing
+                .as_ref()
+                .is_some_and(|game| game.branch != "public")
+            {
+                plan_selected(
+                    connection,
+                    app.app_id,
+                    existing.as_ref(),
+                    &ContentSelection::default(),
+                )
+                .await
+            } else {
+                resolve_account(
+                    app.app_id,
+                    existing.as_ref(),
+                    &owned,
+                    &library.owned_depots,
+                    &docs,
+                    connection.steam_id().steam64(),
+                )
+            };
+            match resolved {
                 Ok(plan) => {
                     let update = existing
                         .as_ref()
@@ -409,6 +447,16 @@ pub async fn plan(
     app_id: u32,
     existing: Option<&InstalledGame>,
 ) -> Result<InstallPlan> {
+    plan_selected(connection, app_id, existing, &ContentSelection::default()).await
+}
+
+pub async fn plan_selected(
+    connection: &Connection,
+    app_id: u32,
+    existing: Option<&InstalledGame>,
+    selection: &ContentSelection,
+) -> Result<InstallPlan> {
+    selection.validate()?;
     let (owned, depots) = match library::cached_ownership(connection) {
         Some(ownership) => ownership,
         None => {
@@ -430,13 +478,26 @@ pub async fn plan(
     let mut docs = BTreeMap::from([(app_id, document)]);
     // Source-fetch failures only matter if a selected depot needs the source.
     fetch_sources(connection, &[app_id], &owned, &depots, &mut docs).await;
-    resolve_account(
+    let branch = selection
+        .branch
+        .as_deref()
+        .or_else(|| existing.map(|g| g.branch.as_str()))
+        .unwrap_or("public");
+    if branch != "public" {
+        for (&id, document) in &mut docs {
+            crate::branches::apply(connection, id, branch, document)
+                .await
+                .map_err(|e| failure(e.to_string()))?;
+        }
+    }
+    resolve_account_selected(
         app_id,
         existing,
         &owned,
         &depots,
         &docs,
         connection.steam_id().steam64(),
+        selection,
     )
 }
 
@@ -516,13 +577,35 @@ fn resolve_account(
     docs: &BTreeMap<u32, Node>,
     account: u64,
 ) -> Result<InstallPlan> {
+    resolve_account_selected(
+        app_id,
+        existing,
+        owned,
+        licensed,
+        docs,
+        account,
+        &ContentSelection::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_account_selected(
+    app_id: u32,
+    existing: Option<&InstalledGame>,
+    owned: &BTreeSet<u32>,
+    licensed: &BTreeSet<u32>,
+    docs: &BTreeMap<u32, Node>,
+    account: u64,
+    desired: &ContentSelection,
+) -> Result<InstallPlan> {
     let selection = existing
         .map(|game| crate::dlc::Selection::read(&game.library_root, account, app_id))
         .transpose()
         .map_err(|e| failure(e.to_string()))?
         .unwrap_or_default();
     if selection.disabled.is_empty() {
-        return resolve(app_id, existing, owned, licensed, docs);
+        check_graph(docs, app_id, owned, licensed)?;
+        return metadata::select_with(app_id, existing, owned, licensed, docs, desired);
     }
     // Clone only this app's bounded source graph, not the entire account catalog.
     let mut selected = BTreeMap::new();
@@ -548,7 +631,8 @@ fn resolve_account(
                 .filter(|id| !selected.contains_key(id)),
         );
     }
-    resolve(app_id, existing, owned, licensed, &selected)
+    check_graph(&selected, app_id, owned, licensed)?;
+    metadata::select_with(app_id, existing, owned, licensed, &selected, desired)
 }
 
 /// Shared-depot source apps named by `source`'s selectable depots. Redistributable
@@ -675,19 +759,12 @@ fn resolve(
     metadata::select(app_id, existing, owned, licensed_depots, docs)
 }
 
-/// Compares the installed build and the manifests of the depots the plan names.
-/// Extra depots known to belong to DLC trigger safe removal. Unclassified extra
-/// depots (including legacy shared redistributables) remain untouched.
-fn compare(installed: &InstalledGame, plan: &InstallPlan) -> UpdateStatus {
+/// Compare the complete committed selection, including removed depots and
+/// branch/language transitions whose build IDs happen to be identical.
+pub fn compare(installed: &InstalledGame, plan: &InstallPlan) -> UpdateStatus {
     let Some(build) = installed.build_id else {
         return UpdateStatus::Unknown;
     };
-    if build != plan.build_id {
-        return UpdateStatus::Available {
-            installed_build: build,
-            latest_build: plan.build_id,
-        };
-    }
     if installed.installed_depots.is_empty() {
         return UpdateStatus::Unknown;
     }
@@ -696,36 +773,20 @@ fn compare(installed: &InstalledGame, plan: &InstallPlan) -> UpdateStatus {
         .iter()
         .map(|d| (d.depot_id, d.manifest_id))
         .collect();
-    let present: BTreeMap<_, _> = installed
+    // Older Valve ACFs put shared redist depots in InstalledDepots. Their
+    // separately managed source-app installation is not a game update.
+    let present = installed
         .installed_depots
         .iter()
-        .filter(|(id, _)| desired.contains_key(id))
+        .filter(|(id, _)| !plan.shared_depots.contains_key(id) || desired.contains_key(id))
         .map(|(id, manifest)| (*id, *manifest))
-        .collect();
-    let extra: BTreeSet<_> = installed
-        .installed_depots
-        .keys()
-        .filter(|id| !desired.contains_key(id))
-        .copied()
-        .collect();
-    let removed_dlc = extra.iter().any(|id| plan.dlc_depots.contains_key(id))
-        || (!extra.is_empty()
-            && installed::read_vdf(
-                &installed
-                    .library_root
-                    .join(format!("steamapps/appmanifest_{}.acf", installed.app_id)),
-            )
-            .ok()
-            .and_then(|doc| doc.at(&["appstate", "steamtuidlcdepots"]).cloned())
-            .is_some_and(|owners| {
-                extra.iter().any(|id| {
-                    owners
-                        .text(&id.to_string())
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .is_some_and(|id| id != 0)
-                })
-            }));
-    if desired != present || removed_dlc {
+        .collect::<BTreeMap<_, _>>();
+    if build != plan.build_id
+        || desired != present
+        || installed.branch != plan.branch
+        || installed.language != plan.language
+        || installed.platform.is_some_and(|p| p != plan.platform)
+    {
         UpdateStatus::Available {
             installed_build: build,
             latest_build: plan.build_id,
@@ -733,4 +794,48 @@ fn compare(installed: &InstalledGame, plan: &InstallPlan) -> UpdateStatus {
     } else {
         UpdateStatus::UpToDate
     }
+}
+
+/// Declared language choices; unknown strings must not silently select only
+/// language-neutral depots. English is the compatibility default.
+pub(crate) fn languages(document: &Node) -> BTreeSet<String> {
+    let mut values = BTreeSet::from(["english".to_owned()]);
+    if let Some(list) = document.at(&["common"]).and_then(|n| n.text("languages")) {
+        values.extend(
+            list.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    for (key, _) in document
+        .at(&["common", "supported_languages"])
+        .into_iter()
+        .flat_map(|n| &n.children)
+    {
+        values.insert(key.clone());
+    }
+    for (_, depot) in document
+        .child("depots")
+        .into_iter()
+        .flat_map(|n| &n.children)
+    {
+        if let Some(list) = depot.child("config").and_then(|n| n.text("language")) {
+            values.extend(
+                list.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+    }
+    values.retain(|s| {
+        ContentSelection {
+            branch: None,
+            language: Some(s.clone()),
+        }
+        .validate()
+        .is_ok()
+    });
+    values
 }

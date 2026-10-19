@@ -62,7 +62,7 @@ pub(crate) fn native_home(app_id: u32, account_id: u32) -> Result<PathBuf> {
 
 /// A required Steam Play tool/runtime that is not installed yet. Callers install
 /// it through steam-tui's content service and retry the launch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MissingTool {
     pub app_id: u32,
     pub name: String,
@@ -946,10 +946,35 @@ pub async fn run_with_backend(
     }
     let owned = game.clone();
     let mut plan = tools::resolve_online(&owned, connection).await?;
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        tools::prepare_additional(&owned, &plan, connection),
+    )
+    .await
+    .map_err(|_| failure("Additional dependency planning timed out"))??;
     if plan.needs_steam && backend_kind != LaunchBackend::ValveHost {
         return Err(failure(
             "This VAC game requires Valve host: press Ctrl+Enter (CLI: --valve-host)",
         ));
+    }
+    if let Some(account) = account_name {
+        match crate::updates::Queue::open(account) {
+            Ok(queue) => {
+                let _ = crate::shaders::prepare(&queue, &owned, &mut plan, events.as_ref()).await;
+            }
+            Err(error) => {
+                if let Some(events) = &events {
+                    let _ = events.send(crate::backend::Event {
+                        at: SystemTime::now(),
+                        app_id: game.app_id,
+                        direction: crate::backend::Direction::Local,
+                        channel: "Shaders",
+                        title: format!("Shader cache skipped: {error}"),
+                        detail: String::new(),
+                    });
+                }
+            }
+        }
     }
     let host_account = if backend_kind == LaunchBackend::ValveHost {
         client_env::prepare_hosted(&mut plan)?;

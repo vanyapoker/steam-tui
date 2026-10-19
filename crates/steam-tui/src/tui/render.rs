@@ -23,7 +23,7 @@ use super::theme::{
 /// One styled run of text; lines are built from these and truncated by display width.
 type Seg = (String, Style);
 
-const HELP: &str = "LIBRARY\nUp / Down     Select game (any focus)\nLMB           Select the clicked game; double-click launches; wheel moves selection\nn / RMB       Game changelog / developer updates (Esc closes)\na             Achievements of the selected game: unlocked state and date, rarity; s / S sort (status, name, rarity, date) and reverse, f filter all / unlocked / locked, r reload\nHome / End    First / last game\nEnter         Installed: launch (VAC: Valve host; others: built-in); not installed: choose destination\nCtrl+Enter    Launch installed game using Valve host (enhanced keyboard terminal)\ni / u         Install selected game / update installed game\nv             Cycle All / Installed / Not installed\n1 / 2 / 3 / 4 Sort by the column headings Name¹ Size² Last³ Played⁴\ns / S         Cycle sort / reverse direction (unknowns last; shown as sort: in the title)\n/             Filter library names in the table; type to filter\nf             Pin / unpin the selected game at the top (★)\n              Sort, filter, pins and offline-friends toggle are remembered\nEsc           Clear filter; Enter finishes filter editing\nC             Steam Cloud sync of the selected installed game: download newer saves, then upload local changes (blocked while it runs)\n              Launching always downloads cloud saves first (never uploads); conflicts keep the local file, backups go to ~/.local/state/steam-tui/cloud/backup\n              Conflict picker: l local / r cloud; Enter confirms this file; Esc keeps both\nb             Backend traffic: exactly what the built-in Steam backend sends to / receives from Steam (message ids, names, sizes, hex head, protobuf fields); x clears\nINSTALL DESTINATION\nUp / Down     Select library (available space shown)\nn             Enter custom library path (new installs only)\nEnter         Confirm destination / check custom path\nEsc           Cancel modal / stop editing custom path\nINSTALL PROGRESS\np             Pause / resume the download; the job stays alive, no new destination step\nc             Cancel safely (also while paused); retained staging resumes next install\n              Install panel: phase, bar, verified and downloaded bytes,\n              download speed, ETA and elapsed time (paused time excluded)\n              The game's State column shows ⬇ percent, or ⏸ percent while paused\n              One install/update job at a time; no Steam required\nFRIENDS\nPgUp / PgDn   Page friends (the notification feed when it has focus)\no             Show / hide offline friends\nNOTIFICATIONS\nTab           Focus the feed (Library → Friends → Notifications)\nj / k         Scroll the focused feed; PgUp / PgDn page it\nx             Clear the feed (the count badges are Steam's and stay)\n              Live: new items appear on top, ● marks those not yet seen\n              Badges show pending trade offers, messages, items, gifts, invites\n              Only pushes received while running are listed; history cannot be fetched\nNAVIGATION\nTab           Switch focused pane (Shift-Tab goes back)\nj / k         Move within focused pane\nr             Refresh library/update metadata and friend presence\n? / F1        Toggle this help\nq / Ctrl-C    Quit; safely wait for installer (q is filter/path text while typing)\nHELP\nUp / Down     Scroll this help on small terminals\nEsc / ? / F1  Close help\nMARKERS\nOrange names  Automatic Valve host: TF2, Dota 2, CS2, Deadlock\n⚛             Proton: Windows build run through Proton (needs Proton + prefix for direct launch)\nλ             Native Linux build\n(blank)       Platform not known yet\n↻             Library title: live owned library is still refreshing (rows are local or cached)\n☁             Steam Cloud column (installed games with cloud saves): dim ☁ never synced · green ☁ synced · cyan ↑ local saves not uploaded (press C) · yellow ◐◓◑◒ syncing · red ✗ last sync failed or had conflicts\nTags          ✓ current · ↑ update · blocked · not installed · ? unknown\nNOTES\nDates are UTC (feed times are local); ? means metadata is unavailable.\nBlocked games show their reason in the status bar when selected.\nUpdate status: update / current / unknown / unavailable.\nDirect launch cannot bypass DRM or guarantee Steam-free compatibility.\nUpdates stay in their existing library; close Steam before installing.\nOnly depot-verified Windows install scripts run, inside the game's Proton prefix; unsupported setup directives block launch.\nFriends login uses saved credentials; run `steam-tui login` to sign in.";
+const HELP: &str = "LIBRARY\nUp / Down     Select game (any focus)\nLMB           Select the clicked game; double-click launches; wheel moves selection\nn / RMB       Game changelog / developer updates (Esc closes)\na             Achievements of the selected game: unlocked state and date, rarity; s / S sort (status, name, rarity, date) and reverse, f filter all / unlocked / locked, r reload\nHome / End    First / last game\nEnter         Installed: launch (VAC: Valve host; others: built-in); not installed: choose destination\nShift+Enter / L  Explicitly launch installed version without updating\nCtrl+Enter    Launch installed game using Valve host (enhanced keyboard terminal)\ni / u         Install selected game / update installed game\nJ             Persistent update queue (p pause, r retry, c cancel, +/- priority, a policy)\nP             Content properties: branch, language, DLC\nS             Skip selected game’s shader processing while launching\nv             Cycle All / Installed / Not installed\n1 / 2 / 3 / 4 Sort by the column headings Name¹ Size² Last³ Played⁴\ns / S         Cycle sort / reverse direction (unknowns last; shown as sort: in the title)\n/             Filter library names in the table; type to filter\nf             Pin / unpin the selected game at the top (★)\n              Sort, filter, pins and offline-friends toggle are remembered\nEsc           Clear filter; Enter finishes filter editing\nC             Steam Cloud sync of the selected installed game: download newer saves, then upload local changes (blocked while it runs)\n              Launching always downloads cloud saves first (never uploads); conflicts keep the local file, backups go to ~/.local/state/steam-tui/cloud/backup\n              Conflict picker: l local / r cloud; Enter confirms this file; Esc keeps both\nb             Backend traffic: exactly what the built-in Steam backend sends to / receives from Steam (message ids, names, sizes, hex head, protobuf fields); x clears\nINSTALL DESTINATION\nUp / Down     Select library (available space shown)\nn             Enter custom library path (new installs only)\nEnter         Confirm destination / check custom path\nEsc           Cancel modal / stop editing custom path\nINSTALL PROGRESS\np             Pause / resume the download; the job stays alive, no new destination step\nc             Cancel safely (also while paused); retained staging resumes next install\n              Install panel: phase, bar, verified and downloaded bytes,\n              download speed, ETA and elapsed time (paused time excluded)\n              The game's State column shows ⬇ percent, or ⏸ percent while paused\n              One install/update job at a time; no Steam required\nFRIENDS\nPgUp / PgDn   Page friends (the notification feed when it has focus)\no             Show / hide offline friends\nNOTIFICATIONS\nTab           Focus the feed (Library → Friends → Notifications)\nj / k         Scroll the focused feed; PgUp / PgDn page it\nx             Clear the feed (the count badges are Steam's and stay)\n              Live: new items appear on top, ● marks those not yet seen\n              Badges show pending trade offers, messages, items, gifts, invites\n              Only pushes received while running are listed; history cannot be fetched\nNAVIGATION\nTab           Switch focused pane (Shift-Tab goes back)\nj / k         Move within focused pane\nr             Refresh library/update metadata and friend presence\n? / F1        Toggle this help\nq / Ctrl-C    Quit; safely wait for installer (q is filter/path text while typing)\nHELP\nUp / Down     Scroll this help on small terminals\nEsc / ? / F1  Close help\nMARKERS\nOrange names  Automatic Valve host: TF2, Dota 2, CS2, Deadlock\n⚛             Proton: Windows build run through Proton (needs Proton + prefix for direct launch)\nλ             Native Linux build\n(blank)       Platform not known yet\n↻             Library title: live owned library is still refreshing (rows are local or cached)\n☁             Steam Cloud column (installed games with cloud saves): dim ☁ never synced · green ☁ synced · cyan ↑ local saves not uploaded (press C) · yellow ◐◓◑◒ syncing · red ✗ last sync failed or had conflicts\nTags          ✓ current · ↑ update · blocked · not installed · ? unknown\nNOTES\nDates are UTC (feed times are local); ? means metadata is unavailable.\nBlocked games show their reason in the status bar when selected.\nUpdate status: update / current / unknown / unavailable.\nDirect launch cannot bypass DRM or guarantee Steam-free compatibility.\nUpdates stay in their existing library; close Steam before installing.\nOnly depot-verified Windows install scripts run, inside the game's Proton prefix; unsupported setup directives block launch.\nFriends login uses saved credentials; run `steam-tui login` to sign in.";
 
 fn safe(value: &str) -> String {
     super::super::terminal_text(value).into_owned()
@@ -543,6 +543,12 @@ pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
             draw_install(frame, model, rect, now);
         }
         draw_status(frame, model, areas.status, areas.install.is_none(), now);
+    }
+    if model.queue_view {
+        queue_overlay(frame, model);
+    }
+    if model.properties.is_some() {
+        content_overlay(frame, model);
     }
     if model.backend_view {
         backend_overlay(frame, model);
@@ -2359,6 +2365,150 @@ fn help(frame: &mut Frame<'_>, model: &mut Model) {
                 Vec::new(),
             ))
             .scroll((model.help_offset, 0)),
+        area,
+    );
+}
+
+fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+    let mut lines = vec![Line::from(
+        "↑/↓ select · p pause/resume · r retry · c cancel · +/- priority · a app policy · Esc close",
+    )];
+    if model.queue_jobs.is_empty() {
+        lines.push(Line::from("No persistent update jobs"));
+    }
+    for (index, job) in model.queue_jobs.iter().enumerate().skip(
+        model
+            .queue_selected
+            .saturating_sub(area.height.saturating_sub(5) as usize),
+    ) {
+        let policy = model
+            .queue_settings
+            .policies
+            .get(&job.intent.app_id)
+            .copied()
+            .unwrap_or_default();
+        let text = format!(
+            "{} #{}  app {}  {}  {:?}  priority {}  {:?}{}{}",
+            if index == model.queue_selected {
+                "›"
+            } else {
+                " "
+            },
+            job.id,
+            job.intent.app_id,
+            if job.intent.shader {
+                "shaders"
+            } else {
+                "content"
+            },
+            job.state,
+            job.priority,
+            policy,
+            if job.foreground { " · foreground" } else { "" },
+            job.error
+                .as_ref()
+                .map(|e| format!(" · {}", safe(e)))
+                .unwrap_or_default()
+        );
+        lines.push(Line::styled(
+            text,
+            if index == model.queue_selected {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            },
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(" Update queue "))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+fn content_overlay(frame: &mut Frame<'_>, model: &Model) {
+    let Some(view) = &model.properties else {
+        return;
+    };
+    let mut lines = vec![Line::from(
+        "↑/↓ select · ←/→ choose branch/language · Enter apply · Space toggle DLC · Esc close",
+    )];
+    if let Some(data) = &view.data {
+        let branch = data
+            .branches
+            .get(view.branch)
+            .map(|b| {
+                format!(
+                    "{}{}",
+                    b.name,
+                    if b.password_required {
+                        " (password required)"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .unwrap_or_else(|| "unavailable".into());
+        let language = data
+            .languages
+            .get(view.language)
+            .map(String::as_str)
+            .unwrap_or("unavailable");
+        let mut choices = vec![format!("Branch: {branch}"), format!("Language: {language}")];
+        choices.extend(data.dlc.iter().map(|d| {
+            format!(
+                "[{}] {} [{}] · {}{}",
+                if d.enabled { "x" } else { " " },
+                safe(&d.name),
+                d.app_id,
+                if d.owned { "owned" } else { "unowned" },
+                if d.installed { " · installed" } else { "" }
+            )
+        }));
+        for (i, text) in choices.into_iter().enumerate() {
+            lines.push(Line::styled(
+                format!("{} {text}", if i == view.selected { "›" } else { " " }),
+                if i == view.selected {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                },
+            ));
+        }
+    }
+    if let Some(password) = &view.password {
+        lines.push(Line::from(format!(
+            "Branch password: {}",
+            "•".repeat(password.chars().count().min(80))
+        )));
+        lines.push(Line::from(format!(
+            "F2: {} · Enter unlocks and queues the branch · Esc cancels",
+            if view.remember_key {
+                "remember returned key in SecretService"
+            } else {
+                "session only"
+            }
+        )));
+    }
+    if view.busy {
+        lines.push(Line::from("Resolving licensed content…"));
+    }
+    if let Some(error) = &view.error {
+        lines.push(Line::styled(safe(error), Style::default().fg(Color::Red)));
+    }
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((
+                view.selected
+                    .saturating_sub(area.height.saturating_sub(6) as usize) as u16,
+                0,
+            ))
+            .block(Block::bordered().title(format!(" Content — {} ", safe(&view.game.name))))
+            .wrap(Wrap { trim: false }),
         area,
     );
 }

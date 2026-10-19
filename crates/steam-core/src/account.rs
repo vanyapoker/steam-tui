@@ -3,7 +3,7 @@
 //! Passwords and Guard machine data are never persisted. `ephemeral` bypasses
 //! Secret Service entirely. Logout deletes local credentials, not server sessions.
 
-mod store;
+pub(crate) mod store;
 mod terminal;
 
 use std::convert::Infallible;
@@ -28,7 +28,7 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_GUARD_ATTEMPTS: usize = 3;
 
 #[derive(Debug)]
-enum AccountError {
+pub(crate) enum AccountError {
     Message(&'static str),
     Unavailable,
     Locked,
@@ -391,6 +391,11 @@ impl AuthConfirmationHandler for SafeConfirmation {
             }
         })
     }
+}
+
+/// Read a branch password with the same bounded, echo-free terminal handling as login.
+pub async fn branch_password() -> std::result::Result<zeroize::Zeroizing<String>, Box<dyn Error>> {
+    Ok(terminal::prompt("Branch password: ").await?)
 }
 
 #[cfg(test)]

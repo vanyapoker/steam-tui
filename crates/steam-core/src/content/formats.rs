@@ -17,7 +17,7 @@ const BINARY: u32 = 0x16349781;
 const MAX_FILES: usize = 1_000_000;
 const MAX_CHUNKS: usize = 4_000_000;
 
-fn read_bounded(mut source: impl Read, limit: usize) -> Result<Vec<u8>> {
+pub(super) fn read_bounded(mut source: impl Read, limit: usize) -> Result<Vec<u8>> {
     let mut bytes = vec![0; limit];
     source.read_exact(&mut bytes).map_err(|_| {
         failure("decompressed content is shorter than its declared size or corrupt")
@@ -32,7 +32,7 @@ fn read_bounded(mut source: impl Read, limit: usize) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn unzip(bytes: &[u8], limit: usize, exact: Option<usize>) -> Result<Vec<u8>> {
+pub(super) fn unzip(bytes: &[u8], limit: usize, exact: Option<usize>) -> Result<Vec<u8>> {
     // Preflight EOCD before ZipArchive allocates its central-directory entries.
     // SteamPipe's bounded single-entry ZIPs never need ZIP64 or multiple disks.
     let start = bytes.len().saturating_sub(65557);
@@ -77,7 +77,7 @@ fn unzip(bytes: &[u8], limit: usize, exact: Option<usize>) -> Result<Vec<u8>> {
     }
     Ok(output)
 }
-fn decrypt(bytes: &[u8], key: &[u8; 32]) -> Result<BytesMut> {
+pub(super) fn decrypt(bytes: &[u8], key: &[u8; 32]) -> Result<BytesMut> {
     // The sibling primitive splits its input without checking; guard first.
     if bytes.len() < 32 || !bytes.len().is_multiple_of(16) {
         return Err(failure("invalid encrypted-IV AES256-CBC framing"));
@@ -696,6 +696,13 @@ fn u32_at(bytes: &[u8], at: usize) -> Result<u32> {
     ))
 }
 pub(super) fn vzip(bytes: &[u8], expected: usize) -> Result<Vec<u8>> {
+    vzip_dictionary(bytes, expected, None)
+}
+pub(super) fn vzip_dictionary(
+    bytes: &[u8],
+    expected: usize,
+    preset: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     if bytes.len() < 22 || !bytes.ends_with(b"zv") {
         return Err(failure("invalid VZip header/footer"));
     }
@@ -714,7 +721,7 @@ pub(super) fn vzip(bytes: &[u8], expected: usize) -> Result<Vec<u8>> {
         expected as u64,
         bytes[7],
         dictionary,
-        None,
+        preset,
     )
     .map_err(|_| failure("invalid VZip LZMA properties"))?;
     let output = read_bounded(reader, expected)?;
@@ -723,7 +730,14 @@ pub(super) fn vzip(bytes: &[u8], expected: usize) -> Result<Vec<u8>> {
     }
     Ok(output)
 }
-fn vzstd(bytes: &[u8], expected: usize) -> Result<Vec<u8>> {
+pub(super) fn vzstd(bytes: &[u8], expected: usize) -> Result<Vec<u8>> {
+    vzstd_dictionary(bytes, expected, None)
+}
+pub(super) fn vzstd_dictionary(
+    bytes: &[u8],
+    expected: usize,
+    preset: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     if bytes.len() < 23 || !bytes.ends_with(b"zsv") {
         return Err(failure("invalid VSZ header/footer"));
     }
@@ -737,6 +751,23 @@ fn vzstd(bytes: &[u8], expected: usize) -> Result<Vec<u8>> {
     let decoder = ruzstd::decoding::StreamingDecoder::new(Cursor::new(frame))
         .map_err(|_| failure("invalid VSZ Zstd frame"))?;
     let mut decoder = decoder;
+    if let Some(preset) = preset {
+        let dict = ruzstd::decoding::Dictionary {
+            id: 1,
+            fse: Default::default(),
+            huf: Default::default(),
+            dict_content: preset.to_vec(),
+            offset_hist: [1, 4, 8],
+        };
+        decoder
+            .decoder
+            .add_dict(dict)
+            .map_err(|_| failure("Invalid VSZ raw dictionary"))?;
+        decoder
+            .decoder
+            .force_dict(1)
+            .map_err(|_| failure("Cannot apply VSZ raw dictionary"))?;
+    }
     let output = read_bounded(&mut decoder, expected)?;
     if decoder.get_ref().position() != frame.len() as u64 {
         return Err(failure("VSZ contains trailing or multiple Zstd frames"));

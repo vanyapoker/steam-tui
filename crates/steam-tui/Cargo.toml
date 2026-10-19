@@ -17,3 +17,4 @@ unicode-width.workspace = true
 tokio-util.workspace = true
 steam-vent.workspace = true
 libc.workspace = true
+zeroize.workspace = true

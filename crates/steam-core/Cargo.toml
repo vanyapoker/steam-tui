@@ -31,3 +31,7 @@ lzma-rust2.workspace = true
 ruzstd.workspace = true
 image.workspace = true
 parking_lot.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+lzma-rust2 = { workspace = true, features = ["encoder"] }
