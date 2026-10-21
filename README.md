@@ -2,23 +2,27 @@
 
 Lightweight, fast TUI Steam client for Linux (built for Omarchy). Browse, install, update and launch your library without the Steam client or its browser processes.
 
-Early state: some games won't work without original steam client.
+Early state: some games still need Valve's Steam client. VAC-secured games automatically use the headless Valve host.
 
 ![steam-tui library with game icons, unread friend badges, notifications, and an active download](assets/library-0.4.png)
 
 *Demo screens use fictional accounts, friends, and messages.*
 
 - Starts in ~2 ms and uses ~30 MB of memory.
-- Install and update games (native and Proton), with a persistent queue, pause/resume, priorities and download windows.
+- Install and update games (native and Proton), with verified resumable downloads, crash recovery, a persistent queue, pause/resume, priorities and download windows.
 - Check for updates before launch, with an explicit option to launch the installed version.
 - Select branches, languages and optional DLC; protected branch keys stay in the keyring.
-- Optional Vulkan shader pre-caches, requested per game with `Z`, processed before launch with progress and skip.
+- Vulkan shader pre-caching enabled by default, with automatic refreshes of downloaded caches, processing before launch, and a skip control.
 - Missing Proton and runtime dependencies install automatically before launch.
 - Proton games get Valve's transcoded video/audio databases (when the app has them) and persistent per-game GPU caches.
 - Shared redistributables install per library; verified Windows prerequisites run in the Proton prefix and supported Linux setup actions run in the game tree.
 - DLC enumeration, ownership, installed state, downloads, and optional removal through the game's Steamworks APIs.
 - Game icons in the library, friends, direct-message chat with unread badges, recent and live notifications, game changelogs.
-- Steam Cloud saves, with a side-by-side local/cloud conflict picker.
+- Steam Cloud downloads before launch, manual two-way sync, and a side-by-side conflict picker with backups of replaced saves.
+- Achievement browsing with unlock dates, global rarity, sorting and filters; in-game stats, achievements and leaderboards through the built-in backend.
+- Workshop queries, subscriptions, verified downloads, votes and favorites through supported games' Steamworks calls.
+- Xbox-compatible, DualSense and DualShock 4 controllers forwarded through a virtual Xbox 360 pad, with rumble and reconnection support.
+- Offline browsing of installed games, remembered pins and view settings, multiple saved accounts, and automatic connection recovery.
 - Games run on our own Steam backend, so no Steam process is needed.
 
 ## Chat
@@ -74,7 +78,7 @@ Press `?` in the app for the full list.
 | m | Manage content: branch, language, DLC |
 | d | Downloads: the persistent content/shader queue |
 | o | Cycle the selected game's launch option (e.g. DirectX 11 / 12) |
-| z | Download a shader pre-cache for the selected game (opt-in) |
+| z | Queue a Vulkan shader pre-cache download or refresh for the selected game |
 | y | Sync Steam Cloud saves |
 | n / right-click | Changelog |
 | a | Achievements of the selected game (1-4 / s sort, f filter, r reload) |
@@ -120,6 +124,16 @@ memory for this TUI session.
 
 Other overlays close with `Esc`, `q` or the key that opened them, and share `↑↓`/`jk`, `PgUp`/`PgDn` and `Home`/`End`.
 
+## Library, saves and controllers
+
+Pins, sorting, the library view and offline-friend visibility are remembered between sessions. Start with `steam-tui tui --offline` to browse installed games without connecting. Cached catalog rows also appear during online startup while fresh account metadata loads. `--account NAME` selects a saved account; login tokens stay in the Secret Service keyring. Online sessions reconnect when the Steam connection drops.
+
+Press `a` to browse a game's achievements, including descriptions, unlock dates and global rarity, with sorting and unlocked/locked filters. Press `n` or right-click a library row to read the game's changelog. The `b` overlay shows backend traffic for diagnosing game compatibility.
+
+Before a TUI launch, Steam Cloud downloads current saves when a connection is available. Press `y` for a two-way sync, including uploading local changes; close the game first. Conflicts open the local/cloud comparison shown above, and the replaced copy is backed up.
+
+Controller forwarding needs write access to `/dev/uinput`. Supported pads appear to games as one virtual Xbox 360 controller, with rumble forwarded back and reconnection after a Bluetooth drop. Steam Input device presence is supported; action sets, remapping, gyro and touchpad forwarding remain unimplemented.
+
 ## Updates and shader caches
 
 The queue runs while the TUI is open or `jobs run` is active. Closing it retains pending work; there is no background daemon. Background work pauses during games by default. Explicit foreground content downloads can override that pause. Normal launch checks fresh game metadata; an unavailable check requires the explicit installed-version choice.
@@ -132,15 +146,19 @@ steam-tui updates window 23:00 06:00
 steam-tui content show APPID
 steam-tui content launch-option APPID [INDEX|default]   # list or choose a launch entry (TUI: o)
 steam-tui content unlock APPID BRANCH    # hidden password prompt; remembers returned key
-steam-tui shaders add APPID              # opt in: queue a download (TUI: z); then jobs run
+steam-tui shaders add APPID              # queue a download or refresh (TUI: z); then jobs run
 steam-tui shaders show APPID
-steam-tui shaders enabled off            # disables downloads and processing
+steam-tui shaders enabled off            # disable Vulkan pre-cache downloads and replay
 steam-tui shaders clear APPID            # reclaim this game's generated cache
 ```
 
 Installs verify every chunk as it is downloaded or resumed and check each staged file's size before committing, as Valve's client does. Set `STEAM_TUI_FULL_VERIFY=1` to also hash every file end to end before commit.
 
-Shader pre-caching is opt-in per game: nothing is downloaded until you press `z` (or run `shaders add APPID`); only games with a downloaded cache are refreshed afterwards. Vulkan FOZ v6 archives have their own freshness checks and verified staging. Compilation uses two threads, low CPU priority and a 2 GiB address-space limit per helper process. Failed/skipped processing never marks a context complete and never prevents launching the game. TUI `c` skips; CLI launch/process uses Ctrl+C to skip this optional stage. Shader archives have an 8 GiB account budget including staging, adjustable with `shaders budget MIB`; old generations and unused replay contexts are pruned. The budget excludes driver-created cache data. State and caches live under `$XDG_STATE_HOME/steam-tui/updates-ACCOUNT` (`~/.local/state` by default).
+Vulkan shader pre-caching is enabled by default. When the TUI refreshes the library, installed games with an existing downloaded pre-cache are automatically queued for a freshness check once their last check is at least an hour old. These jobs follow the queue's update policy, download window and pause-during-games setting. Press `z` or run `shaders add APPID` to queue an initial download or request a refresh manually. Available caches are processed automatically before launch; processing can be skipped with `c` in the TUI or Ctrl+C during CLI launch/processing. `steam-tui shaders enabled off` disables Vulkan pre-cache downloads and processing for the selected account.
+
+Proton video/audio databases are downloaded or refreshed automatically at launch on the built-in backend when Steam provides them for the game. They use the same Steam bucket service and live under `steamapps/shadercache/<app>`, but are separate from Vulkan pre-caches: `z` is not required, and `shaders enabled off` does not disable these media downloads. Existing verified databases are reused. Per-game DXVK, Mesa and NVIDIA caches also persist between launches.
+
+Vulkan FOZ v6 archives have their own freshness checks and verified staging. Compilation uses two threads, low CPU priority and a 2 GiB address-space limit per helper process. Failed or skipped processing never marks a context complete and never prevents launching the game. Shader archives have an 8 GiB account budget including staging, adjustable with `shaders budget MIB`; old generations and unused replay contexts are pruned. The budget excludes driver-created cache data and Proton media databases. Vulkan pre-cache state lives under `$XDG_STATE_HOME/steam-tui/updates-ACCOUNT` (`~/.local/state` by default).
 
 See [the update audit](docs/steam-update-gap-audit.md) for evidence, supported formats and validation limits.
 
@@ -150,7 +168,7 @@ See [the update audit](docs/steam-update-gap-audit.md) for evidence, supported f
 | --- | --- | --- |
 | User, Utils, Apps, Friends (basics) | Matchmaking and lobbies | Publishing Workshop items |
 | Game Coordinator relay | Networking sockets, P2P and relay | Inventory |
-| Steam Cloud | Auth tickets | Input, Screenshots |
+| Steam Cloud, encrypted app tickets | Auth tickets, controller presence | Steam Input actions/remapping, Screenshots |
 | Stats, achievements (with icons), leaderboards | Global stats | Friend avatars |
 | Workshop: queries, subscriptions, downloads, votes, favorites | | |
 
@@ -161,7 +179,7 @@ Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK h
 - VAC-secured games run through Valve's Steam client without its web helpers. It must be signed in to the same account, and costs about 200 MB extra. Enter picks this automatically.
 - Online matchmaking and relay networking are unfinished.
 - In-game DLC changes preserve the parent build; a parent update or ambiguous metadata requires closing/updating the game. Removal retains modified files and user configuration. Windows setup scripts run at the next launch. `SetDlcContext` usage reporting is unavailable.
-- Shader download/replay currently covers Vulkan FOZ v6. Legacy GPU-specific binary caches, media transcode caches, and capture/upload are not implemented. Real-driver replay performance has not been measured.
+- Shader download/replay currently covers Vulkan FOZ v6. Legacy GPU-specific shader binary caches and shader capture/upload are not implemented. Real-driver replay performance has not been measured.
 - Controllers: Xbox-compatible pads, DualSense and DualShock 4 are mirrored onto one virtual Xbox 360 pad (needs write access to `/dev/uinput`; set `STEAM_TUI_NO_VIRTUAL_GAMEPAD=1` to disable), and Steam Input reports that pad as connected; see [the virtual gamepad notes](docs/virtual-gamepad.md). Remapping, action sets, gyro and touchpad are not implemented, and other pad families or a second pad are left to Wine.
 - Linux only.
 
