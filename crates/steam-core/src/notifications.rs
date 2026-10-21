@@ -1,4 +1,4 @@
-//! Live Steam notifications for the signed-in account.
+//! Recent and live Steam notifications for the signed-in account.
 //!
 //! Sources (all pushed by Steam over the existing CM session, no polling):
 //! - `CMsgClientUserNotifications`: per-type counts. Steam omits a type to mean
@@ -8,10 +8,8 @@
 //! - `SteamNotificationClient.NotificationsReceived#1` service notification:
 //!   individual notifications plus pending gift/friend/family-invite counts.
 //!
-//! Not available with the generated protocol types: a request for the existing
-//! notification history (no `GetSteamNotifications` request exists) and offline
-//! chat message counts (`CMsgClientOfflineMessageNotification` has no message
-//! kind, so it cannot be received or requested). Only live pushes are shown.
+//! History is requested once per connection through the notification service,
+//! including read entries. Subsequent pushes update the same feed.
 //!
 //! Everything here is server-controlled text headed for a terminal, so it is
 //! sanitized and bounded before leaving this module. Nothing is logged.
@@ -32,8 +30,9 @@ use steam_vent_proto_steam::steammessages_notifications_steamclient::{
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-const MAX_RAW_BYTES: usize = 1024 * 1024;
-const MAX_PER_PUSH: usize = 50;
+mod history;
+
+const MAX_RAW_BYTES: usize = 8 * 1024 * 1024;
 const TITLE_CHARS: usize = 80;
 const BODY_CHARS: usize = 300;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -103,6 +102,9 @@ pub enum NotificationEvent {
     /// Complete non-zero count summary; replaces the previous one.
     Counts(Vec<(CountKind, u32)>),
     Received(Notification),
+    /// Existing account history; does not create live/unseen badges.
+    History(Vec<Notification>),
+    Removed(u64),
     Status(String),
 }
 
@@ -131,11 +133,14 @@ pub fn type_label(value: i32) -> String {
         20 => "Parental access response",
         21 => "Parental playtime response",
         22 => "Requested game added",
-        23 => "Send to phone",
-        24 => "Clip downloaded",
+        23 => "Clip downloaded",
+        24 => "Send to phone",
         25 => "2FA prompt",
         26 => "Mobile confirmation",
         27 => "Partner event",
+        28 => "Playtest invite",
+        29 => "Trade reversal",
+        30 => "Content report",
         other => return format!("Notification #{other}"),
     }
     .to_owned()
@@ -184,6 +189,69 @@ fn now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// All visible, unexpired history retained by Steam, including read entries.
+pub async fn latest(connection: &Connection) -> Result<Vec<Notification>> {
+    let response = history::fetch(connection).await?;
+    let names = resolve_names(connection, &response.0.notifications).await;
+    let time = now();
+    let mut notes: Vec<_> = response
+        .0
+        .notifications
+        .iter()
+        .filter_map(|data| decode_named(data, time, &names))
+        .collect();
+    notes.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then(b.id.cmp(&a.id)));
+    let mut ids = std::collections::HashSet::new();
+    notes.retain(|note| note.id == 0 || ids.insert(note.id));
+    Ok(notes)
+}
+
+fn body_app_id(data: &SteamNotificationData) -> Option<u32> {
+    let object: serde_json::Value = serde_json::from_str(data.body_data()).ok()?;
+    let value = object
+        .get("app_id")
+        .or_else(|| object.get("appid"))
+        .or_else(|| object.get("json_data")?.get("app_id"))?;
+    let id = value.as_u64().or_else(|| value.as_str()?.parse().ok())?;
+    u32::try_from(id).ok().filter(|id| *id != 0)
+}
+
+async fn resolve_names(
+    connection: &Connection,
+    data: &[SteamNotificationData],
+) -> BTreeMap<u32, String> {
+    let ids: std::collections::BTreeSet<u32> = data.iter().filter_map(body_app_id).collect();
+    if ids.is_empty() {
+        return BTreeMap::new();
+    }
+    if let Ok(Ok((apps, _))) = timeout(
+        Duration::from_secs(5),
+        crate::library::inspect_apps(connection, &ids),
+    )
+    .await
+    {
+        apps.into_iter()
+            .filter_map(|(id, app)| app.name.map(|name| (id, sanitize(&name, TITLE_CHARS))))
+            .collect()
+    } else {
+        BTreeMap::new()
+    }
+}
+
+fn decode_named(
+    data: &SteamNotificationData,
+    time: u64,
+    names: &BTreeMap<u32, String>,
+) -> Option<Notification> {
+    let mut note = decode(data, time)?;
+    if note.title == note.label
+        && let Some(name) = body_app_id(data).and_then(|id| names.get(&id))
+    {
+        note.title = name.clone();
+    }
+    Some(note)
+}
+
 fn text_field(
     object: &serde_json::Map<String, serde_json::Value>,
     keys: &[&str],
@@ -201,16 +269,46 @@ fn text_field(
 /// `body_data` is type-specific JSON whose schema is not part of the protocol
 /// definitions. Prefer conventional title/body keys; otherwise show the data
 /// itself (sanitized and bounded) rather than guessing at fields.
-fn describe(label: &str, body_data: &str) -> (String, String) {
+fn describe(kind: i32, label: &str, body_data: &str) -> (String, String) {
     let raw = || sanitize(body_data, BODY_CHARS);
     let Ok(serde_json::Value::Object(object)) = serde_json::from_str(body_data) else {
         return (label.to_owned(), raw());
+    };
+    let field = |keys: &[&str]| text_field(&object, keys);
+    // These fields are specific to each notification type. Unknown types retain
+    // the original data so new server formats remain inspectable.
+    let custom = match kind {
+        2 => field(&["gifter_account"]).map(|id| format!("Gift from account {id}")),
+        4 => field(&["app_id"]).map(|id| {
+            let asset = field(&["asset_id"]).map_or(String::new(), |id| format!(" · Item {id}"));
+            format!("New inventory item · App {id}{asset}")
+        }),
+        5 => field(&["requestor_id"]).map(|id| format!("Friend request from {id}")),
+        8 => field(&["appid"]).map(|id| {
+            let count = field(&["count"]).unwrap_or_else(|| "1".into());
+            format!("Wishlist sale · App {id} · {count} game(s)")
+        }),
+        9 => field(&["sender"]).map(|id| format!("Trade offer from account {id}")),
+        12 => field(&["appid"]).map(|id| format!("Game update · App {id}")),
+        15 | 18 => field(&["steamid"]).map(|id| format!("Request from {id}")),
+        16 => field(&["inviter"]).map(|id| format!("Family invitation from {id}")),
+        17 => field(&["requestor_steamid"]).map(|id| format!("Purchase request from {id}")),
+        19..=22 => field(&["responder_steamid", "steamid"]).map(|id| format!("Response from {id}")),
+        23 => field(&["content_app_name"]).map(|name| {
+            let machine =
+                field(&["machine_name"]).map_or(String::new(), |name| format!(" · {name}"));
+            format!("Clip from {name}{machine}")
+        }),
+        28 => field(&["appid"]).map(|id| format!("Playtest invitation · App {id}")),
+        30 => field(&["report_id"]).map(|id| format!("Content report {id} updated")),
+        _ => None,
     };
     let heading = text_field(
         &object,
         &["title", "heading", "app_name", "name", "persona_name"],
     );
-    let message = text_field(&object, &["body", "text", "message", "msg", "description"]);
+    let message =
+        text_field(&object, &["body", "text", "message", "msg", "description"]).or(custom);
     if heading.is_none() && message.is_none() {
         return (label.to_owned(), raw());
     }
@@ -219,18 +317,19 @@ fn describe(label: &str, body_data: &str) -> (String, String) {
             || label.to_owned(),
             |heading| sanitize(&heading, TITLE_CHARS),
         ),
-        message.unwrap_or_default(),
+        sanitize(&message.unwrap_or_default(), BODY_CHARS),
     )
 }
 
 /// Decodes one pushed notification; hidden ones are not shown. `fallback_time`
 /// stands in for a missing timestamp.
 pub fn decode(data: &SteamNotificationData, fallback_time: u64) -> Option<Notification> {
-    if data.hidden() {
+    if data.hidden() || (data.expiry() != 0 && u64::from(data.expiry()) <= fallback_time) {
         return None;
     }
-    let label = type_label(data.notification_type.map_or(0, |value| value.value()));
-    let (title, body) = describe(&label, data.body_data());
+    let kind = data.notification_type.map_or(0, |value| value.value());
+    let label = type_label(kind);
+    let (title, body) = describe(kind, &label, data.body_data());
     Some(Notification {
         id: data.notification_id(),
         timestamp: data.timestamp.map_or(fallback_time, u64::from),
@@ -239,6 +338,69 @@ pub fn decode(data: &SteamNotificationData, fallback_time: u64) -> Option<Notifi
         body,
         read: data.read(),
     })
+}
+
+/// Pushes can contain just an ID and changed fields (for example `read`).
+/// Preserve absent fields, including when a patch arrives before history.
+fn merge_data(base: &mut SteamNotificationData, patch: &SteamNotificationData) {
+    macro_rules! fields {
+        ($($field:ident),* $(,)?) => { $(if patch.$field.is_some() {
+            base.$field = patch.$field;
+        })* };
+    }
+    fields!(
+        notification_id,
+        notification_targets,
+        notification_type,
+        read,
+        timestamp,
+        hidden,
+        expiry,
+        viewed
+    );
+    if patch.body_data.is_some() {
+        base.body_data.clone_from(&patch.body_data);
+    }
+}
+
+#[derive(Default)]
+struct Feed {
+    data: BTreeMap<u64, SteamNotificationData>,
+    names: BTreeMap<u32, String>,
+}
+
+impl Feed {
+    fn push(&mut self, data: &SteamNotificationData, time: u64) -> Option<NotificationEvent> {
+        let merged = if data.notification_id() == 0 {
+            data
+        } else {
+            let entry = self.data.entry(data.notification_id()).or_default();
+            merge_data(entry, data);
+            entry
+        };
+        if merged.hidden() || (merged.expiry() != 0 && u64::from(merged.expiry()) <= time) {
+            return Some(NotificationEvent::Removed(merged.notification_id()));
+        }
+        // A state-only patch for an unseen ID needs its history body first.
+        merged.notification_type?;
+        decode_named(merged, time, &self.names).map(NotificationEvent::Received)
+    }
+
+    fn history(&mut self, data: Vec<SteamNotificationData>, time: u64) -> Vec<Notification> {
+        let mut notes = Vec::new();
+        for mut entry in data {
+            if entry.notification_id() != 0 {
+                if let Some(patch) = self.data.get(&entry.notification_id()) {
+                    merge_data(&mut entry, patch);
+                }
+                self.data.insert(entry.notification_id(), entry.clone());
+            }
+            if let Some(note) = decode_named(&entry, time, &self.names) {
+                notes.push(note);
+            }
+        }
+        notes
+    }
 }
 
 /// Current non-zero counts. Each `apply_*` returns whether anything changed.
@@ -381,6 +543,20 @@ async fn run_inner(
     send(updates, NotificationEvent::Counts(counts.snapshot())).await?;
 
     let mut reported = 0u32;
+    send(
+        updates,
+        NotificationEvent::Status("Loading recent notifications…".into()),
+    )
+    .await?;
+    let history = async {
+        let response = history::fetch(&connection).await?;
+        let names = resolve_names(&connection, &response.0.notifications).await;
+        Ok::<_, Box<dyn Error>>((response, names))
+    };
+    futures_util::pin_mut!(history);
+    let mut history_pending = true;
+    let mut pending_seen = std::collections::HashSet::new();
+    let mut feed = Feed::default();
     loop {
         let mut report = |what: &str| {
             reported += 1;
@@ -390,6 +566,32 @@ async fn run_inner(
         let mut events = Vec::new();
         let changed = tokio::select! {
             _ = updates.closed() => return Ok(()),
+            response = &mut history, if history_pending => {
+                history_pending = false;
+                match response {
+                    Ok((response, names)) => {
+                        let time = now();
+                        feed.names = names;
+                        let mut snapshot = response.0;
+                        let notes = feed.history(std::mem::take(&mut snapshot.notifications), time);
+                        events.push(NotificationEvent::History(notes));
+                        events.push(NotificationEvent::Status(String::new()));
+                        // Live pending counts are authoritative if already received.
+                        for (kind, value) in [
+                            (CountKind::Gifts, &mut snapshot.pending_gift_count),
+                            (CountKind::FriendInvites, &mut snapshot.pending_friend_count),
+                            (CountKind::FamilyInvites, &mut snapshot.pending_family_invite_count),
+                        ] {
+                            if pending_seen.contains(&kind) { *value = None; }
+                        }
+                        counts.apply_pending(&snapshot)
+                    }
+                    Err(error) => {
+                        events.push(NotificationEvent::Status(error.to_string()));
+                        false
+                    }
+                }
+            },
             message = users.next() => match message {
                 Some(Ok(message)) => counts.apply_user(&message),
                 Some(Err(_)) => { events.extend(report("count").map(NotificationEvent::Status)); false }
@@ -408,14 +610,16 @@ async fn run_inner(
             message = pushes.next() => match message {
                 Some(Ok(message)) => {
                     let time = now();
-                    events.extend(
-                        message
-                            .notifications
-                            .iter()
-                            .take(MAX_PER_PUSH)
-                            .filter_map(|data| decode(data, time))
-                            .map(NotificationEvent::Received),
-                    );
+                    for data in &message.notifications {
+                        events.extend(feed.push(data, time));
+                    }
+                    for (kind, value) in [
+                        (CountKind::Gifts, message.pending_gift_count),
+                        (CountKind::FriendInvites, message.pending_friend_count),
+                        (CountKind::FamilyInvites, message.pending_family_invite_count),
+                    ] {
+                        if value.is_some() { pending_seen.insert(kind); }
+                    }
                     counts.apply_pending(&message)
                 }
                 Some(Err(_)) => { events.extend(report("push").map(NotificationEvent::Status)); false }
@@ -621,10 +825,118 @@ mod tests {
 
     #[test]
     fn json_numbers_and_empty_titles_fall_back_gracefully() {
-        let (title, body) = describe("Gift", r#"{"name":"","text":42}"#);
+        let (title, body) = describe(2, "Gift", r#"{"name":"","text":42}"#);
         assert_eq!(title, "Gift");
         assert_eq!(body, "42");
-        let (title, body) = describe("Gift", "not json");
+        let (title, body) = describe(2, "Gift", "not json");
         assert_eq!((title.as_str(), body.as_str()), ("Gift", "not json"));
+    }
+
+    #[test]
+    fn type_specific_bodies_are_readable_and_do_not_confuse_field_names() {
+        for (kind, json, expected) in [
+            (2, r#"{"gifter_account":123}"#, "Gift from account 123"),
+            (
+                4,
+                r#"{"app_id":"440","asset_id":"987"}"#,
+                "New inventory item · App 440 · Item 987",
+            ),
+            (
+                5,
+                r#"{"requestor_id":"76561198000000001"}"#,
+                "Friend request from 76561198000000001",
+            ),
+            (
+                8,
+                r#"{"appid":620,"count":3,"appids":[620,440,570]}"#,
+                "Wishlist sale · App 620 · 3 game(s)",
+            ),
+            (9, r#"{"sender":"123"}"#, "Trade offer from account 123"),
+            (
+                16,
+                r#"{"inviter":"76561198000000001","familyid":"9"}"#,
+                "Family invitation from 76561198000000001",
+            ),
+            (
+                23,
+                r#"{"content_app_name":"Portal 2","machine_name":"Deck"}"#,
+                "Clip from Portal 2 · Deck",
+            ),
+        ] {
+            assert_eq!(describe(kind, &type_label(kind), json).1, expected);
+        }
+        assert_eq!(
+            describe(
+                3,
+                "Comment",
+                r#"{"title":"Workshop","text":"A reply","type":"10"}"#
+            ),
+            ("Workshop".into(), "A reply".into())
+        );
+        assert!(
+            describe(99, "Unknown", r#"{"future_field":42}"#)
+                .1
+                .contains("future_field")
+        );
+    }
+
+    #[test]
+    fn expired_entries_are_filtered_without_dropping_read_history() {
+        let mut note = data(ESteamNotificationType::k_ESteamNotificationType_Gift, "{}");
+        note.expiry = Some(100);
+        assert!(decode(&note, 100).is_none());
+        note.expiry = Some(101);
+        note.read = Some(true);
+        assert!(decode(&note, 100).unwrap().read);
+        note.expiry = Some(0);
+        assert!(decode(&note, 999).is_some());
+    }
+
+    #[test]
+    fn partial_pushes_merge_and_late_history_preserves_read_and_hide_changes() {
+        let original = data(
+            ESteamNotificationType::k_ESteamNotificationType_Comment,
+            r#"{"title":"Workshop","text":"Hello"}"#,
+        );
+        let patch = SteamNotificationData {
+            notification_id: Some(7),
+            read: Some(true),
+            ..Default::default()
+        };
+        let mut feed = Feed::default();
+        assert!(feed.push(&patch, 1).is_none());
+        let history = feed.history(vec![original.clone()], 1);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].title, "Workshop");
+        assert!(history[0].read);
+        let Some(NotificationEvent::Received(note)) = feed.push(&patch, 2) else {
+            panic!("missing merged note")
+        };
+        assert_eq!(note.body, "Hello");
+        assert_eq!(note.timestamp, original.timestamp() as u64);
+        let hide = SteamNotificationData {
+            notification_id: Some(7),
+            hidden: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(feed.push(&hide, 3), Some(NotificationEvent::Removed(7)));
+        assert!(feed.history(vec![original], 3).is_empty());
+    }
+
+    #[test]
+    fn current_types_and_app_names_survive_stale_protocol_enums() {
+        assert_eq!(type_label(23), "Clip downloaded");
+        assert_eq!(type_label(24), "Send to phone");
+        let mut invite = data(
+            ESteamNotificationType::k_ESteamNotificationType_Test,
+            r#"{"appid":3348390,"is_limited_launch":false,"playtest_invite_id":123}"#,
+        );
+        invite.notification_type = Some(protobuf::EnumOrUnknown::from_i32(28));
+        let names = BTreeMap::from([(3348390, "A playtest".into())]);
+        let note = decode_named(&invite, 1, &names).unwrap();
+        assert_eq!(note.label, "Playtest invite");
+        assert_eq!(note.title, "A playtest");
+        assert_eq!(note.body, "Playtest invitation · App 3348390");
+        assert_eq!(body_app_id(&invite), Some(3348390));
     }
 }

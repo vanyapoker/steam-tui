@@ -164,7 +164,7 @@ pub(super) static BINDINGS: &[Binding] = &[
         &[Code(KeyCode::Enter)],
         Any,
         Library,
-        "Launch the selected game (VAC games use Valve's host); install it when it is not installed. Double-click does the same",
+        "Open chat with the selected friend; in the library launch the selected game (VAC games use Valve's host) or install it. Double-click does the same",
     ),
     bind(
         Cmd::ValveHost,

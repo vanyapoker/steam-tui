@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-10-21
+
+### Added
+- Steam app icons beside library names, with background loading for visible rows, local asset reuse, a persistent cache and an offline fallback.
+- Ctrl+V pastes clipboard images as local chat attachments; Enter sends through Steam, and Ctrl+Delete removes the attachment. Text paste remains supported.
+- Inline previews for Steam-hosted chat images, with native terminal graphics, a colored block fallback, background loading and a bounded memory cache.
+- Select friends with arrows and press Enter for direct-message chat, with unread badges, live messages, read acknowledgements, typing indicators, paginated history and retained drafts. Chat uses the TUI's own account connection.
+- Load all visible notification history retained by Steam, including read entries, then update the TUI feed live. Notifications show game names when available, unread markers, and type-specific text, including playtest invitations.
+- `steam-tui notifications` lists account notification history without opening the TUI.
+
+### Fixed
+- Accept Steam's numeric HTTPS flags in image upload responses instead of rejecting successful begin-upload requests. Show upload error codes and image-download HTTP status.
+- Report live service-notification overflow instead of silently losing messages.
+- Preserve notification titles, bodies and timestamps across partial updates, and merge live changes with late history responses. Hidden and expired entries are excluded, history does not create new-arrival badges, and the previous 50-per-push and 100-entry limits are removed.
+- Correct the clip-download and send-to-phone notification type labels.
+
 ## 0.3.4 - 2026-10-19
 
 ### Added

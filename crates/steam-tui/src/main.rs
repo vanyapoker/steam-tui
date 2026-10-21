@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "Usage: steam-tui [--account NAME] [command]\n\nWith no command, open the TUI using the latest successful account.\nCommands:\n  tui [--offline]          Friends and installed games (default)\n  discover                 Query Steam's server directory (no account)\n  inspect-app <appid>       Fetch public app metadata (anonymous session)\n  login [--ephemeral]       Sign in; reuse/store a Secret Service refresh token\n  library [--ephemeral]     Sign in and resolve licensed packages to apps\n  backend <appid> [--ephemeral]  Experimental client backend (explicit --account required)\n  launch <appid> [--valve-host] [--installed]  Launch built-in, or explicitly use Valve host (explicit --account required)\n  content show|branch|language|dlc  Inspect or select game content\n  jobs list|add|run|pause|resume|cancel  Persistent update jobs\n  updates show|policy|priority|window|during-games  Update settings\n  shaders show|add|process|prune|clear|budget|enabled  Vulkan pre-caching\n  logout                   Delete this account's local refresh token\n\n--login is an alias for the login command.\n--account NAME works before or after tui/login/library/backend/logout. A successful\nlogin or TUI resume remembers the account name; credentials stay in Secret Service.\nIf no account has been remembered, prompt once before entering the TUI.\nPasswords and Guard codes are hidden. --ephemeral bypasses token persistence.\nlogout does not revoke tokens on Steam. Enter/double-click automatically selects Valve host for VAC games and built-in for others; Ctrl+Enter forces Valve host.";
+const USAGE: &str = "Usage: steam-tui [--account NAME] [command]\n\nWith no command, open the TUI using the latest successful account.\nCommands:\n  tui [--offline]          Friends and installed games (default)\n  notifications            Show all recent account notifications\n  discover                 Query Steam's server directory (no account)\n  inspect-app <appid>       Fetch public app metadata (anonymous session)\n  login [--ephemeral]       Sign in; reuse/store a Secret Service refresh token\n  library [--ephemeral]     Sign in and resolve licensed packages to apps\n  backend <appid> [--ephemeral]  Experimental client backend (explicit --account required)\n  launch <appid> [--valve-host] [--installed]  Launch built-in, or explicitly use Valve host (explicit --account required)\n  content show|branch|language|dlc  Inspect or select game content\n  jobs list|add|run|pause|resume|cancel  Persistent update jobs\n  updates show|policy|priority|window|during-games  Update settings\n  shaders show|add|process|prune|clear|budget|enabled  Vulkan pre-caching\n  logout                   Delete this account's local refresh token\n\n--login is an alias for the login command.\n--account NAME works before or after tui/notifications/login/library/backend/logout. A successful\nlogin or TUI resume remembers the account name; credentials stay in Secret Service.\nIf no account has been remembered, prompt once before entering the TUI.\nPasswords and Guard codes are hidden. --ephemeral bypasses token persistence.\nlogout does not revoke tokens on Steam. Enter/double-click automatically selects Valve host for VAC games and built-in for others; Ctrl+Enter forces Valve host.";
 
 #[derive(Debug, PartialEq)]
 enum Command {
@@ -26,6 +26,7 @@ enum Command {
         offline: bool,
     },
     Discover,
+    Notifications,
     InspectApp(u32),
     Backend {
         app_id: u32,
@@ -87,6 +88,7 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
             "updates" if command.is_none() => command = Some(Command::Updates(Vec::new())),
             "logout" if command.is_none() => command = Some(Command::Logout),
             "discover" if command.is_none() => command = Some(Command::Discover),
+            "notifications" if command.is_none() => command = Some(Command::Notifications),
             "inspect-app" | "backend" | "launch" if command.is_none() => {
                 let backend = args[index] == "backend";
                 let launch = args[index] == "launch";
@@ -166,7 +168,7 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
         )
     {
         return Err(
-            "--account is only supported by tui, login, library, backend, launch, and logout",
+            "--account is only supported by tui, notifications, login, library, backend, launch, and logout",
         );
     }
     let command = match command {
@@ -246,6 +248,35 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
     let Options { command, account } = options;
     match command {
         Command::Help => println!("{USAGE}"),
+        Command::Notifications => {
+            let account = selected_account(account, false)?
+                .ok_or("notifications requires --account or a remembered account")?;
+            let connection = steam_core::account::resume(&account).await?;
+            let notes = steam_core::notifications::latest(&connection).await?;
+            println!("{} recent notifications (newest first)", notes.len());
+            for note in notes {
+                let time = chrono::DateTime::from_timestamp(note.timestamp as i64, 0)
+                    .map(|time| {
+                        time.with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| note.timestamp.to_string());
+                println!(
+                    "{time} [{}] {}{}",
+                    if note.read { "read" } else { "unread" },
+                    note.label,
+                    if note.title != note.label {
+                        format!(" · {}", note.title)
+                    } else {
+                        String::new()
+                    }
+                );
+                if !note.body.is_empty() {
+                    println!("  {}", note.body);
+                }
+            }
+        }
         Command::Shaders(args) => {
             let account = selected_account(account, false)?
                 .ok_or("shaders requires --account or a remembered account")?;

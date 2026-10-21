@@ -16,5 +16,5 @@ pub use serverlist::{DiscoverOptions, ServerDiscoveryError, ServerList};
 pub use session::{ConnectionError, LoginError};
 pub use steam_vent_core::{
     ConnectionTrait, NetMessageHeader, ReadonlyConnection, ReceivableMessage, SendableMessage,
-    ServiceMethodRequest,
+    ServiceMethodRequest, ServiceNotification,
 };

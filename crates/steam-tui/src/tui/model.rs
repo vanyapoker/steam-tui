@@ -74,8 +74,6 @@ impl Focus {
     }
 }
 
-const MAX_NOTIFICATIONS: usize = 100;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LibraryFilter {
     All,
@@ -251,6 +249,7 @@ impl SpeedTracker {
 pub(super) enum Action {
     None,
     Quit,
+    Clipboard(u64),
     Refresh,
     Launch(LaunchBackend),
     LaunchInstalled(LaunchBackend),
@@ -333,6 +332,9 @@ pub(super) struct Model {
     pub friends: Vec<Friend>,
     pub friend_order: Vec<usize>,
     pub friend_offset: usize,
+    pub friend_selected: usize,
+    pub chat: super::chat::Chat,
+    pub library_icons: super::library_icons::LibraryIcons,
     pub friend_rows: usize,
     pub show_offline: bool,
     pub focus: Focus,
@@ -349,7 +351,7 @@ pub(super) struct Model {
     pub inventory_ready: bool,
     pub warnings: Vec<String>,
     pub friends_status: String,
-    /// Newest first; capped at `MAX_NOTIFICATIONS`.
+    /// All available account history, newest first.
     pub notifications: Vec<Notification>,
     /// Non-zero counts; each update replaces the whole summary.
     pub notif_counts: Vec<(CountKind, u32)>,
@@ -362,6 +364,7 @@ pub(super) struct Model {
     pub notif_rows: usize,
     /// Items received since the feed was last focused.
     pub notif_unseen: usize,
+    pub notif_fresh: std::collections::HashSet<u64>,
     pub status: String,
     pub launches: HashMap<u32, String>,
     pub running_games: std::collections::BTreeSet<u32>,
@@ -434,6 +437,17 @@ impl Model {
             friends: Vec::new(),
             friend_order: Vec::new(),
             friend_offset: 0,
+            friend_selected: 0,
+            library_icons: super::library_icons::LibraryIcons::new(!offline),
+            chat: super::chat::Chat {
+                available: notifications_live,
+                status: if notifications_live {
+                    String::new()
+                } else {
+                    "Chat unavailable — no Steam connection".into()
+                },
+                ..Default::default()
+            },
             friend_rows: 1,
             account: None,
             show_offline: false,
@@ -465,6 +479,7 @@ impl Model {
             notif_offset: 0,
             notif_rows: 1,
             notif_unseen: 0,
+            notif_fresh: Default::default(),
             status: "Scanning installed games…".to_owned(),
             launches: HashMap::new(),
             running_games: Default::default(),
@@ -592,6 +607,7 @@ impl Model {
 
     /// Replaces the rows while keeping selection, search, sort and filter.
     fn replace_games(&mut self, catalog: CatalogSnapshot) {
+        self.library_icons.refresh();
         let selected = self.selected_game().map(|game| game.app_id);
         self.games = catalog.items;
         for game in &mut self.games {
@@ -788,19 +804,51 @@ impl Model {
                 friend.steam_id,
             )
         });
+        let selected_id = self.selected_friend().map(|f| f.steam_id);
         self.friends = friends;
+        self.friend_order.clear();
+        self.filter_friends();
+        if let Some(pos) = selected_id.and_then(|id| {
+            self.friend_order
+                .iter()
+                .position(|&i| self.friends[i].steam_id == id)
+        }) {
+            self.friend_selected = pos;
+        }
+        self.keep_visible();
+    }
+
+    pub(super) fn filter_chat_friends(&mut self) {
         self.filter_friends();
     }
 
     fn filter_friends(&mut self) {
+        let selected_id = self.selected_friend().map(|f| f.steam_id);
         self.friend_order = self
             .friends
             .iter()
             .enumerate()
             .filter_map(|(index, friend)| {
-                (self.show_offline || !friend.state.is_offline()).then_some(index)
+                (self.show_offline
+                    || !friend.state.is_offline()
+                    || self
+                        .chat
+                        .conversations
+                        .get(&friend.steam_id)
+                        .is_some_and(|c| c.unread > 0))
+                .then_some(index)
             })
             .collect();
+        self.friend_selected = selected_id
+            .and_then(|id| {
+                self.friend_order
+                    .iter()
+                    .position(|&i| self.friends[i].steam_id == id)
+            })
+            .unwrap_or(
+                self.friend_selected
+                    .min(self.friend_order.len().saturating_sub(1)),
+            );
         self.friend_offset = bounded_offset(
             self.friend_offset,
             self.friend_order.len(),
@@ -816,6 +864,15 @@ impl Model {
             self.library_offset = self.selected + 1 - rows;
         }
         self.library_offset = bounded_offset(self.library_offset, self.order.len(), rows);
+        self.friend_selected = self
+            .friend_selected
+            .min(self.friend_order.len().saturating_sub(1));
+        if self.friend_selected < self.friend_offset {
+            self.friend_offset = self.friend_selected;
+        } else if self.friend_selected >= self.friend_offset.saturating_add(self.friend_rows.max(1))
+        {
+            self.friend_offset = self.friend_selected + 1 - self.friend_rows.max(1);
+        }
         self.friend_offset = bounded_offset(
             self.friend_offset,
             self.friend_order.len(),
@@ -838,16 +895,14 @@ impl Model {
 
     fn page_friends(&mut self, down: bool, page: bool) {
         let amount = if page { self.friend_rows.max(1) } else { 1 };
-        self.friend_offset = if down {
-            self.friend_offset.saturating_add(amount)
+        self.friend_selected = if down {
+            self.friend_selected
+                .saturating_add(amount)
+                .min(self.friend_order.len().saturating_sub(1))
         } else {
-            self.friend_offset.saturating_sub(amount)
+            self.friend_selected.saturating_sub(amount)
         };
-        self.friend_offset = bounded_offset(
-            self.friend_offset,
-            self.friend_order.len(),
-            self.friend_rows,
-        );
+        self.keep_visible();
     }
 
     fn page_notifications(&mut self, down: bool, page: bool) {
@@ -865,17 +920,36 @@ impl Model {
         self.notifications.clear();
         self.notif_offset = 0;
         self.notif_unseen = 0;
+        self.notif_fresh.clear();
         self.status = "Notification feed cleared".into();
     }
 
     /// The Steam session is gone: say so in the panels that depend on it.
     pub fn connection_lost(&mut self, message: &str) {
+        self.chat_disconnected();
         self.friends_status = message.to_owned();
         self.notif_status = message.to_owned();
     }
 
     /// A fresh session replaced the old one; its workers are about to report.
     pub fn connection_restored(&mut self) {
+        self.chat_disconnected();
+        self.chat.status.clear();
+        self.chat.available = true;
+        for c in self.chat.conversations.values_mut() {
+            c.unread = 0;
+        }
+        if let Some(friend) = self.chat.active {
+            let c = self.chat.conversations.entry(friend).or_default();
+            c.loading = true;
+            c.loaded = false;
+            self.chat
+                .pending
+                .push_back(steam_core::chat::Command::History {
+                    friend,
+                    before: None,
+                });
+        }
         self.friends_status = "Loading friends…".into();
         self.notif_status.clear();
         self.notifications_live = true;
@@ -887,6 +961,31 @@ impl Model {
     pub fn notification_event(&mut self, event: NotificationEvent) {
         match event {
             NotificationEvent::Counts(counts) => self.notif_counts = counts,
+            NotificationEvent::History(history) => {
+                let mut ids: std::collections::HashSet<u64> = history
+                    .iter()
+                    .filter_map(|note| (note.id != 0).then_some(note.id))
+                    .collect();
+                self.notifications
+                    .retain(|note| note.id == 0 || !ids.contains(&note.id));
+                ids.clear();
+                for mut note in history {
+                    if note.id == 0 || ids.insert(note.id) {
+                        for text in [&mut note.label, &mut note.title, &mut note.body] {
+                            *text = super::super::terminal_text(text).into_owned();
+                        }
+                        self.notifications.push(note);
+                    }
+                }
+                self.notifications
+                    .sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then(b.id.cmp(&a.id)));
+            }
+            NotificationEvent::Removed(id) => {
+                if id != 0 {
+                    self.notifications.retain(|note| note.id != id);
+                    self.notif_fresh.remove(&id);
+                }
+            }
             NotificationEvent::Status(message) => {
                 self.notif_status = super::super::terminal_text(&message).into_owned();
             }
@@ -898,19 +997,31 @@ impl Model {
                 ] {
                     *text = super::super::terminal_text(text).into_owned();
                 }
+                let existing = notification.id != 0
+                    && self
+                        .notifications
+                        .iter()
+                        .any(|note| note.id == notification.id);
+                if self.focus != Focus::Notifications && !existing {
+                    self.notif_fresh.insert(notification.id);
+                }
                 if notification.id != 0 {
                     self.notifications
                         .retain(|existing| existing.id != notification.id);
                 }
                 self.notifications.insert(0, notification);
-                self.notifications.truncate(MAX_NOTIFICATIONS);
-                if self.focus != Focus::Notifications {
-                    self.notif_unseen = (self.notif_unseen + 1).min(self.notifications.len());
-                } else {
+                self.notifications
+                    .sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then(b.id.cmp(&a.id)));
+                if self.focus == Focus::Notifications {
                     self.notif_offset = 0;
                 }
             }
         }
+        self.notif_unseen = self
+            .notifications
+            .iter()
+            .filter(|note| self.notif_fresh.contains(&note.id))
+            .count();
         self.notif_offset =
             bounded_offset(self.notif_offset, self.notifications.len(), self.notif_rows);
     }
@@ -993,7 +1104,8 @@ impl Model {
         } else {
             None
         };
-        if self.modal.is_some()
+        if self.chat.active.is_some()
+            || self.modal.is_some()
             || self.help
             || self.backend_view
             || self.queue_view
@@ -1059,6 +1171,21 @@ impl Model {
             && matches!(key.code, KeyCode::Char('c' | 'C'))
         {
             return Action::Quit;
+        }
+        if let Some(friend) = self.chat.active {
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('v' | 'V'))
+            {
+                let c = self.chat.conversations.entry(friend).or_default();
+                if !c.sending && !c.clipboard_pending {
+                    c.clipboard_pending = true;
+                    c.error.clear();
+                    return Action::Clipboard(friend);
+                }
+                return Action::None;
+            }
+            self.chat_key(key);
+            return Action::None;
         }
         if self.modal.is_some() {
             return self.modal_key(key);
@@ -1361,9 +1488,12 @@ impl Model {
                 Cmd::Down => self.page_friends(true, false),
                 Cmd::PageUp => self.page_friends(false, true),
                 Cmd::PageDown => self.page_friends(true, true),
-                Cmd::Home => self.friend_offset = 0,
+                Cmd::Home => {
+                    self.friend_selected = 0;
+                    self.keep_visible();
+                }
                 _ => {
-                    self.friend_offset = usize::MAX / 2;
+                    self.friend_selected = usize::MAX / 2;
                     self.page_friends(true, false);
                 }
             },
@@ -1396,6 +1526,10 @@ impl Model {
             Cmd::Refresh => return Action::Refresh,
             Cmd::News => return self.open_news(),
             Cmd::Achievements => return self.open_achievements(),
+            Cmd::Activate if self.focus == Focus::Friends => {
+                self.open_chat();
+                return Action::None;
+            }
             Cmd::Activate | Cmd::ValveHost => {
                 let Some(backend) = self.launch_backend(cmd == Cmd::ValveHost) else {
                     return Action::None;
@@ -1518,6 +1652,7 @@ impl Model {
                 };
                 if self.focus == Focus::Notifications {
                     self.notif_unseen = 0;
+                    self.notif_fresh.clear();
                 }
             }
             Cmd::ToggleOffline => {
@@ -2190,7 +2325,10 @@ mod tests {
         );
         model.focus = Focus::Friends;
         model.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!((model.friend_offset, model.selected), (1, 0));
+        assert_eq!(
+            (model.friend_selected, model.friend_offset, model.selected),
+            (1, 0, 0)
+        );
         for _ in 0..8 {
             model.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         }
@@ -2829,13 +2967,13 @@ mod notification_tests {
     }
 
     #[test]
-    fn feed_is_newest_first_deduplicated_and_capped() {
+    fn feed_is_newest_first_deduplicated_and_keeps_all_entries() {
         let mut model = Model::new(false, None);
         model.notification_event(note(1, "a"));
         model.notification_event(note(2, "b"));
         assert_eq!(titles(&model), ["b", "a"]);
         model.notification_event(note(1, "a2"));
-        assert_eq!(titles(&model), ["a2", "b"]);
+        assert_eq!(titles(&model), ["b", "a2"]);
         // Id 0 means unknown and is never merged.
         model.notification_event(note(0, "z"));
         model.notification_event(note(0, "z"));
@@ -2843,8 +2981,52 @@ mod notification_tests {
         for id in 10..300 {
             model.notification_event(note(id, "n"));
         }
-        assert_eq!(model.notifications.len(), MAX_NOTIFICATIONS);
-        assert!(model.notif_unseen <= MAX_NOTIFICATIONS);
+        assert_eq!(model.notifications.len(), 294);
+        assert_eq!(model.notif_unseen, 294);
+    }
+
+    #[test]
+    fn history_merges_chronologically_without_new_badges_or_overwriting_live_updates() {
+        let mut model = Model::new(false, None);
+        model.notification_event(note(500, "live"));
+        let history = (1..=200)
+            .rev()
+            .chain([500, 3])
+            .map(|id| Notification {
+                id,
+                timestamp: 1_700_000_000 + id,
+                label: "General".into(),
+                title: if id == 500 {
+                    "live".into()
+                } else {
+                    format!("old {id}")
+                },
+                body: String::new(),
+                read: true,
+            })
+            .collect();
+        model.notification_event(NotificationEvent::History(history));
+        assert_eq!(model.notifications.len(), 201);
+        assert_eq!(model.notifications[0].title, "live");
+        assert_eq!(model.notifications[1].id, 200);
+        assert_eq!(model.notifications.last().unwrap().id, 1);
+        assert_eq!(model.notif_unseen, 1);
+        model.notification_event(note(3, "updated old entry"));
+        assert_eq!(model.notif_unseen, 1);
+        assert_eq!(model.notifications[0].id, 500);
+        model.notification_event(NotificationEvent::Removed(500));
+        assert_eq!(model.notifications.len(), 200);
+        assert_eq!(model.notif_unseen, 0);
+        model.notification_event(NotificationEvent::History(vec![Notification {
+            id: 900,
+            timestamp: 1_700_000_900,
+            label: "bad\u{1b}".into(),
+            title: "safe\u{1b}[H".into(),
+            body: "text\u{07}".into(),
+            read: true,
+        }]));
+        assert_eq!(model.notifications[0].title, "safe[H");
+        assert_eq!(model.notif_unseen, 0);
     }
 
     #[test]

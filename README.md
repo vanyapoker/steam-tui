@@ -15,7 +15,7 @@ Early state: some games won't work without original steam client.
 - Proton games get Valve's transcoded video/audio databases (when the app has them) and persistent per-game GPU caches.
 - Shared redistributables install per library; verified Windows prerequisites run in the Proton prefix and supported Linux setup actions run in the game tree.
 - DLC enumeration, ownership, installed state, downloads, and optional removal through the game's Steamworks APIs.
-- Friends, live notifications, game changelogs.
+- Game icons in the library, friends, direct-message chat with unread badges, recent and live notifications, game changelogs.
 - Steam Cloud saves, with a side-by-side local/cloud conflict picker.
 - Games run on our own Steam backend, so no Steam process is needed.
 
@@ -50,7 +50,8 @@ Press `?` in the app for the full list.
 
 | Key | Action |
 | --- | --- |
-| Enter / double-click | Launch (checks for an update first); install when not installed |
+| Enter / double-click | In the library: launch (checks for an update first); install when not installed |
+| ↑ / ↓, Enter | In Friends: select a friend and open chat |
 | Ctrl+Enter | Launch through Valve's Steam client |
 | l | Launch the installed version without updating |
 | u | Update |
@@ -72,7 +73,37 @@ Press `?` in the app for the full list.
 | b | Backend traffic |
 | q | Quit (closes an overlay instead while one is open) |
 
-Overlays close with `Esc`, `q` or the key that opened them, and share `↑↓`/`jk`, `PgUp`/`PgDn` and `Home`/`End`.
+Library rows show each game's Steam app icon beside its name. Icons load only
+for visible games, reuse existing local artwork when available, and are cached
+under `~/.cache/steam-tui/icons` (or `$XDG_CACHE_HOME/steam-tui/icons`). Offline mode
+uses local icons only. Native terminal graphics give sharp icons; other terminals
+use colored blocks. Icons disappear on narrow layouts to leave names readable.
+
+Notifications load all visible history retained by Steam, including read entries,
+then update live. The feed is sorted newest first; `○` marks unread entries and
+`●` marks live arrivals since the pane was last focused. Tab to Notifications and
+use arrows, Page Up/Down, Home/End to browse. Clearing the feed only affects this
+session. `steam-tui notifications` prints the same account history without opening
+the TUI; `--account NAME` selects a different saved account.
+
+Tab to Friends, select with arrows (or `j`/`k`), and press Enter to chat.
+Steam-hosted image links get inline previews using the terminal's image protocol,
+with colored half-blocks as a fallback. Previews load in the background and stay
+in a bounded memory cache; GIF and animated WebP previews show a still frame.
+Ctrl+V reads an image or text from the desktop clipboard (`wl-paste` on Wayland,
+`xclip` on X11). Images stay as local attachments until Enter uploads and sends
+them through Steam; Ctrl+Delete removes an attachment. Existing text drafts are
+kept after image sending. Images are normalized to PNG, up to 4096×4096 pixels
+and 30 MiB, and failed or uncertain sends retain the attachment for review.
+Each friend's badge shows unread messages; offline friends with unread messages
+remain visible. Chat loads account history and receives messages live through our
+own Steam connection. Enter sends, Shift+Enter inserts a newline, PgUp/PgDn browse
+history (PgUp also loads older messages), and Esc closes chat. Drafts survive
+closing the modal and failed sends; sends with uncertain delivery are never
+retried automatically. In chat, `q` is text. Drafts and loaded messages stay in
+memory for this TUI session.
+
+Other overlays close with `Esc`, `q` or the key that opened them, and share `↑↓`/`jk`, `PgUp`/`PgDn` and `Home`/`End`.
 
 ## Updates and shader caches
 

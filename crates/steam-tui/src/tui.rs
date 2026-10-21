@@ -1,5 +1,9 @@
 mod achievements;
+mod chat;
+mod chat_images;
+mod clipboard;
 mod keys;
+mod library_icons;
 mod model;
 mod reconnect;
 mod render;
@@ -12,8 +16,9 @@ use std::time::Instant;
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -57,6 +62,7 @@ impl TerminalSession {
             io::stdout(),
             EnterAlternateScreen,
             EnableMouseCapture,
+            EnableBracketedPaste,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
             Hide
         )?;
@@ -71,6 +77,7 @@ impl Drop for TerminalSession {
                 io::stdout(),
                 Show,
                 DisableMouseCapture,
+                DisableBracketedPaste,
                 PopKeyboardEnhancementFlags,
                 LeaveAlternateScreen
             );
@@ -101,6 +108,13 @@ impl Drop for Workers {
 // Events are sent a handful of times per session; boxing the snapshots buys nothing.
 #[allow(clippy::large_enum_variant)]
 enum JobEvent {
+    ChatImage(chat_images::Loaded),
+    LibraryIcon(library_icons::Loaded),
+    LibraryIconEncoded(chat_images::Loaded),
+    Clipboard {
+        friend: u64,
+        result: Result<clipboard::Content, String>,
+    },
     CloudConflicts {
         game: InstalledGame,
         items: Vec<steam_core::cloud::Conflict>,
@@ -201,6 +215,8 @@ enum JobEvent {
 struct Live {
     presence_rx: mpsc::Receiver<PresenceEvent>,
     friend_rx: mpsc::Receiver<FriendEvent>,
+    chat_rx: mpsc::Receiver<steam_core::chat::Event>,
+    chat_tx: mpsc::Sender<steam_core::chat::Command>,
     notification_rx: mpsc::Receiver<NotificationEvent>,
     refresh_tx: mpsc::Sender<()>,
     friends_open: bool,
@@ -212,6 +228,8 @@ impl Live {
     /// Without a connection both feeds stay closed.
     fn spawn(connection: Option<&Connection>) -> Self {
         let (friend_tx, friend_rx) = mpsc::channel(32);
+        let (chat_event_tx, chat_rx) = mpsc::channel(128);
+        let (chat_tx, chat_command_rx) = mpsc::channel(32);
         let (refresh_tx, refresh_rx) = mpsc::channel(1);
         let (notification_tx, notification_rx) = mpsc::channel(64);
         let mut workers = Workers(Vec::new());
@@ -221,6 +239,11 @@ impl Live {
             presence_tx,
         )));
         if let Some(connection) = connection {
+            workers.push(tokio::task::spawn_local(steam_core::chat::run(
+                connection.clone(),
+                chat_event_tx,
+                chat_command_rx,
+            )));
             let friends = connection.clone();
             workers.push(tokio::task::spawn_local(async move {
                 let result =
@@ -250,6 +273,8 @@ impl Live {
         Self {
             presence_rx,
             friend_rx,
+            chat_rx,
+            chat_tx,
             notification_rx,
             refresh_tx,
             friends_open: connection.is_some(),
@@ -1004,6 +1029,9 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
     // Start network/disk workers before terminal initialization.
     tokio::task::yield_now().await;
     let _session = TerminalSession::enter()?;
+    model.chat.images.picker = ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+    model.library_icons.images.picker = model.chat.images.picker.clone();
     let mut terminal: Terminal<CrosstermBackend<Stdout>> =
         Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
@@ -1142,6 +1170,33 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                 apply_decision(decision, Trigger::ConnectionLost, account.as_deref(), &job_tx, &mut workers, &mut model);
             }
             terminal.draw(|frame| render::draw(frame, &mut model))?;
+            while model.chat.images.active < 2 {
+                let Some(request) = model.chat.images.pending.pop_front() else { break; };
+                model.chat.images.active += 1;
+                let updates = job_tx.clone();
+                workers.push(tokio::task::spawn_local(async move {
+                    let loaded = chat_images::load(request).await;
+                    let _ = updates.send(JobEvent::ChatImage(loaded)).await;
+                }));
+            }
+            while model.library_icons.active < 2 {
+                let Some(request) = model.library_icons.pending.pop_front() else { break; };
+                model.library_icons.active += 1;
+                let updates = job_tx.clone();
+                workers.push(tokio::task::spawn_local(async move {
+                    let loaded = library_icons::load(request).await;
+                    let _ = updates.send(JobEvent::LibraryIcon(loaded)).await;
+                }));
+            }
+            while model.library_icons.images.active < 2 {
+                let Some(request) = model.library_icons.images.pending.pop_front() else { break; };
+                model.library_icons.images.active += 1;
+                let updates = job_tx.clone();
+                workers.push(tokio::task::spawn_local(async move {
+                    let loaded = chat_images::load(request).await;
+                    let _ = updates.send(JobEvent::LibraryIconEncoded(loaded)).await;
+                }));
+            }
             if !first_frame {
                 first_frame = true;
                 trace("first_frame");
@@ -1161,6 +1216,13 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                             };
                             match action {
                                 Action::Quit => break,
+                                Action::Clipboard(friend) => {
+                                    let updates = job_tx.clone();
+                                    workers.push(tokio::task::spawn_local(async move {
+                                        let result = clipboard::read().await;
+                                        let _ = updates.send(JobEvent::Clipboard { friend, result }).await;
+                                    }));
+                                }
                                 Action::SkipShaders(app) => { if steam_core::shaders::skip(app) { model.status = "Skipping shader processing; continuing launch…".into(); } },
                                 Action::CycleLaunchOption(app) => {
                                     model.status = match model.selected_game().and_then(|g| g.installed.clone()) {
@@ -1441,12 +1503,20 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                 }
                             }
                         }
+                        Some(Ok(Event::Paste(text))) => model.chat_paste(&text),
                         Some(Ok(Event::Resize(_, _))) => {},
                         Some(Ok(_)) => continue,
                         Some(Err(error)) => return Err(error.into()),
                         None => return Err("terminal input closed".into()),
                     }
                 }
+                permit = live.chat_tx.reserve(), if !model.chat.pending.is_empty() => {
+                    match permit {
+                        Ok(permit) => { permit.send(model.chat.pending.pop_front().expect("pending chat command")); }
+                        Err(_) => model.chat_disconnected(),
+                    }
+                }
+                Some(event) = live.chat_rx.recv() => model.chat_event(event),
                 update = live.friend_rx.recv(), if live.friends_open => {
                     match update {
                         Some(FriendEvent::Snapshot(friends)) => {
@@ -1476,6 +1546,10 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                 _ = tick.tick() => {}
                 Some(update) = job_rx.recv() => {
                     match update {
+                        JobEvent::ChatImage(loaded) => model.chat.images.loaded(loaded),
+                        JobEvent::LibraryIcon(loaded) => model.library_icons.loaded(loaded),
+                        JobEvent::LibraryIconEncoded(loaded) => model.library_icons.images.loaded(loaded),
+                        JobEvent::Clipboard { friend, result } => model.clipboard_result(friend, result),
                         JobEvent::CloudConflicts { game, items } => {
                             let modal = model::CloudConflicts { game, items, index: 0, choice: None, busy: false, error: None };
                             if model.cloud_conflicts.is_some() { model.cloud_conflict_queue.push_back(modal); } else { model.cloud_conflicts = Some(modal); }

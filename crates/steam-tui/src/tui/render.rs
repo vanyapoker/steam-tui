@@ -560,6 +560,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
     let area = frame.area();
     let now = Instant::now();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+        model.library_icons.visible(&Default::default());
         too_small(frame, model, now);
     } else {
         // Library chrome: two border rows, the filter row and the header row.
@@ -624,6 +625,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
     if model.modal.is_some() {
         destination_modal(frame, model);
     }
+    if model.chat.active.is_some() {
+        chat_modal(frame, model);
+    }
 }
 
 fn draw_status(frame: &mut Frame<'_>, model: &Model, area: Rect, summary: bool, now: Instant) {
@@ -631,12 +635,14 @@ fn draw_status(frame: &mut Frame<'_>, model: &Model, area: Rect, summary: bool, 
         .selected_game()
         .is_some_and(|game| steam_core::launch::requires_valve_host(game.app_id));
     let enter = keys::label(Cmd::Activate);
-    let mut pairs = vec![if host_game {
+    let mut pairs = vec![if model.focus == Focus::Friends {
+        (enter, "chat".to_owned())
+    } else if host_game {
         (enter, "launch (Valve host)".to_owned())
     } else {
         (enter, "launch".to_owned())
     }];
-    if !host_game {
+    if !host_game && model.focus == Focus::Library {
         pairs.push((keys::label(Cmd::ValveHost), "Valve host".to_owned()));
     }
     pairs.push((keys::label(Cmd::Backend), "backend".to_owned()));
@@ -929,6 +935,7 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
+        model.library_icons.visible(&Default::default());
         return;
     }
     let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
@@ -938,6 +945,7 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
     );
     let body = parts[1];
     if model.order.is_empty() {
+        model.library_icons.visible(&Default::default());
         let (text, style) = if model.loading && model.games.is_empty() {
             (
                 if model.inventory_ready {
@@ -973,6 +981,27 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
         return;
     }
     let (columns, name_width) = library_columns(body.width as usize);
+    let show_icons = name_width >= NAME_MIN + 3;
+    let visible_ids = if show_icons {
+        model
+            .order
+            .iter()
+            .skip(model.library_offset)
+            .take(model.library_rows)
+            .map(|&index| model.games[index].app_id)
+            .collect()
+    } else {
+        Default::default()
+    };
+    model.library_icons.visible(&visible_ids);
+    let icon_x = body.x
+        + 2
+        + columns
+            .iter()
+            .take_while(|column| **column != Col::Name)
+            .map(|column| column.width() + 1)
+            .sum::<usize>() as u16;
+    let mut icon_positions = Vec::new();
     // Spinner frame: a quarter turn every 250 ms.
     let spin = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1007,7 +1036,18 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
                         } else {
                             game.name.clone()
                         };
-                        Cell::from(Span::styled(fit(&label, name_width), name_style(game)))
+                        let mut spans = Vec::new();
+                        if show_icons {
+                            spans.push(Span::styled("▣  ", dim()));
+                        }
+                        spans.push(Span::styled(
+                            fit(
+                                &label,
+                                name_width.saturating_sub(if show_icons { 3 } else { 0 }),
+                            ),
+                            name_style(game),
+                        ));
+                        Cell::from(Line::from(spans))
                     }
                     Col::Size => Cell::from(
                         Line::from(value_span(size(game.size_bytes), theme::size_style()))
@@ -1039,6 +1079,11 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
         let visual = index + usize::from(divider_at.is_some_and(|at| index >= at));
         let y = body.y.saturating_add(1 + visual as u16);
         if y < body.bottom() {
+            if show_icons {
+                let app_id = model.games[model.order[model.library_offset + index]].app_id;
+                model.library_icons.prepare(app_id);
+                icon_positions.push((app_id, Rect::new(icon_x, y, 2, 1)));
+            }
             model.library_hits.push((
                 Rect::new(body.x, y, body.width, 1),
                 model.library_offset + index,
@@ -1081,6 +1126,22 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
                 Rect::new(body.x, y, body.width, 1),
             );
         }
+    }
+    // Covered native graphics must not be marked transmitted before their
+    // escape sequences can reach the terminal. Text cells remain safe to dim.
+    let native_icons = model.chat.active.is_none()
+        && model.modal.is_none()
+        && !model.help
+        && !model.backend_view
+        && !model.queue_view
+        && model.properties.is_none()
+        && model.news.is_none()
+        && model.achievements.is_none()
+        && model.cloud_conflicts.is_none();
+    for (app_id, rect) in icon_positions {
+        model
+            .library_icons
+            .render(app_id, rect, native_icons, frame.buffer_mut());
     }
     // btop-style scrollbar on the right border, only when the list overflows.
     if model.order.len() > model.library_rows && area.height > 2 {
@@ -1127,7 +1188,12 @@ fn draw_friends(frame: &mut Frame<'_>, model: &Model, area: Rect) {
             group
         },
     ];
-    let bottom = vec![hint("PgUp/PgDn", "scroll")];
+    let mut bottom = vec![hint("↑/↓", "select"), hint("Enter", "chat")];
+    if !model.chat.available {
+        bottom.insert(0, vec![seg("Chat offline", dim())]);
+    } else if !model.chat.status.is_empty() {
+        bottom.insert(0, vec![seg("Chat needs attention", dim())]);
+    }
     let block = panel_block(border, area.width, left, Vec::new(), bottom);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1155,22 +1221,41 @@ fn draw_friends(frame: &mut Frame<'_>, model: &Model, area: Rect) {
     let lines: Vec<Line<'static>> = model
         .friend_order
         .iter()
+        .enumerate()
         .skip(model.friend_offset)
         .take(model.friend_rows)
-        .map(|&index| {
+        .map(|(position, &index)| {
             let friend = &model.friends[index];
             let offline = friend.state.is_offline();
             let presence = theme::presence_style(friend.state);
             let mut line = vec![
+                seg(
+                    if focused && position == model.friend_selected {
+                        "› "
+                    } else {
+                        "  "
+                    },
+                    accent(),
+                ),
                 seg("● ", presence),
                 seg(friend.name.clone(), if offline { dim() } else { bold() }),
                 seg(" · ", dim()),
             ];
+            if let Some(c) = model.chat.conversations.get(&friend.steam_id)
+                && c.unread > 0
+            {
+                line.insert(0, seg(format!("[{}] ", c.unread), accent()));
+            }
             match friend.game.as_deref() {
                 Some(game) if !offline => line.push(seg(game, theme::playing_style())),
                 _ => line.push(seg(friend.state.label(), presence)),
             }
-            fit_line(line, width)
+            let line = fit_line(line, width);
+            if focused && position == model.friend_selected {
+                line.style(highlight())
+            } else {
+                line
+            }
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1235,14 +1320,23 @@ fn badge_segments(counts: &[(CountKind, u32)]) -> Vec<Seg> {
 
 fn notification_line(
     model: &Model,
-    index: usize,
+    _index: usize,
     notification: &Notification,
     now: DateTime<Local>,
     width: usize,
 ) -> Line<'static> {
-    let fresh = index < model.notif_unseen;
+    let fresh = model.notif_fresh.contains(&notification.id);
     let mut line = vec![
-        seg(if fresh { "● " } else { "  " }, accent()),
+        seg(
+            if fresh {
+                "● "
+            } else if !notification.read {
+                "○ "
+            } else {
+                "  "
+            },
+            accent(),
+        ),
         seg(clock(notification.timestamp, now), dim()),
         seg(" ", Style::default()),
         seg(
@@ -1291,7 +1385,7 @@ fn draw_notifications(frame: &mut Frame<'_>, model: &Model, area: Rect) {
     if model.notifications.is_empty() {
         if model.notifications_live && model.notif_status.is_empty() {
             lines.push(fit_line(
-                vec![seg("No notifications yet — new ones appear live", dim())],
+                vec![seg("No recent notifications — new ones appear live", dim())],
                 width,
             ));
         }
@@ -3446,7 +3540,7 @@ mod tests {
         model.notifications_live = true;
         model.notif_status.clear();
         let empty = render(&mut model, 150, 40);
-        assert!(empty.contains("No notifications yet — new ones appear live"));
+        assert!(empty.contains("No recent notifications — new ones appear live"));
         assert!(empty.contains("nothing pending"));
         with_feed(&mut model);
         let screen = render(&mut model, 150, 40);
@@ -4126,5 +4220,270 @@ mod tests {
         }
         svg.push_str("</svg>\n");
         std::fs::write(path, svg).unwrap();
+    }
+}
+
+fn chat_modal(frame: &mut Frame<'_>, model: &mut Model) {
+    let Some(friend) = model.chat.active else {
+        return;
+    };
+    let name = model
+        .friends
+        .iter()
+        .find(|f| f.steam_id == friend)
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| friend.to_string());
+    let area = modal_area(frame.area(), 100, 32);
+    open_modal(frame, area);
+    let block = Block::bordered()
+        .title(format!(" Chat · {} ", safe(&name)))
+        .title_bottom(" Enter send · Ctrl+V paste · PgUp/PgDn history · Esc close ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let attached = model
+        .chat
+        .conversations
+        .get(&friend)
+        .is_some_and(|c| c.attachment.is_some());
+    let chunks = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(if attached { 6 } else { 0 }),
+        Constraint::Length(2),
+        Constraint::Length(4),
+    ])
+    .split(inner);
+    model.chat.rows = chunks[0].height as usize;
+    let c = model.chat.conversations.entry(friend).or_default();
+    let mut lines = Vec::new();
+    let mut previews = Vec::new();
+    let width = usize::from(chunks[0].width).max(1);
+    let preview_size = (chunks[0].width.clamp(1, 80), chunks[0].height.clamp(1, 12));
+    if c.more {
+        lines.push(Line::styled("PgUp loads older messages", dim()));
+    }
+    for message in &c.messages {
+        let time = DateTime::from_timestamp(i64::from(message.timestamp), 0)
+            .map(|t| t.with_timezone(&Local).format("%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        let sender = if message.outgoing { "You" } else { &name };
+        lines.extend(wrap_segments(
+            &[seg(
+                format!("{time} {sender}"),
+                if message.outgoing { accent() } else { bold() },
+            )],
+            width,
+        ));
+        for line in message.text.split('\n') {
+            lines.extend(wrap_segments(&[seg(safe(line), Style::default())], width));
+        }
+        for url in super::chat_images::links(&message.text) {
+            previews.push((url, lines.len()));
+            lines.extend((0..preview_size.1).map(|_| Line::raw("")));
+        }
+        lines.push(Line::raw(""));
+    }
+    if c.loading {
+        lines.push(Line::styled("Loading messages…", dim()));
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled("No messages yet", dim()));
+    }
+    let total = lines.len();
+    let paragraph = Paragraph::new(lines);
+    let max_offset = total.saturating_sub(chunks[0].height as usize);
+    model.chat.offset = model.chat.offset.min(max_offset);
+    let start = max_offset
+        .saturating_sub(model.chat.offset)
+        .min(u16::MAX as usize) as u16;
+    frame.render_widget(paragraph.scroll((start, 0)), chunks[0]);
+    for (url, row) in previews {
+        let top = row.max(usize::from(start));
+        let bottom = (row + usize::from(preview_size.1))
+            .min(usize::from(start) + usize::from(chunks[0].height));
+        if top >= bottom {
+            continue;
+        }
+        model.chat.images.prepare(&url, preview_size);
+        let area = Rect::new(
+            chunks[0].x,
+            chunks[0].y + (top - usize::from(start)) as u16,
+            preview_size.0.min(chunks[0].width),
+            (bottom - top) as u16,
+        );
+        if !model.chat.images.render(
+            &url,
+            area,
+            (top - row) as u16,
+            preview_size.1,
+            frame.buffer_mut(),
+        ) {
+            frame.render_widget(
+                Paragraph::new(model.chat.images.status(&url)).style(dim()),
+                area,
+            );
+        }
+    }
+
+    if let Some(attachment) = &c.attachment {
+        let key = format!("clipboard:{friend}:{}", attachment.sha);
+        let size = (chunks[1].width.clamp(1, 50), chunks[1].height.max(1));
+        model
+            .chat
+            .images
+            .prepare_local(&key, attachment.image.clone(), size);
+        if !model
+            .chat
+            .images
+            .render(&key, chunks[1], 0, chunks[1].height, frame.buffer_mut())
+        {
+            frame.render_widget(
+                Paragraph::new("Preparing attachment preview…").style(dim()),
+                chunks[1],
+            );
+        }
+    }
+    let status = if !c.error.is_empty() {
+        c.error.clone()
+    } else if !model.chat.status.is_empty() {
+        model.chat.status.clone()
+    } else if c.clipboard_pending {
+        "Reading clipboard…".into()
+    } else if c.sending {
+        if c.attachment.is_some() {
+            "Uploading image…".into()
+        } else {
+            "Sending…".into()
+        }
+    } else if !c.notice.is_empty() {
+        c.notice.clone()
+    } else if super::chat::typing(c) {
+        format!("{name} is typing…")
+    } else {
+        format!(
+            "{} / {} bytes",
+            c.draft.len(),
+            steam_core::chat::MAX_MESSAGE_BYTES
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(safe(&status)).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+    let composer = format!("{}▏{}", &c.draft[..c.cursor], &c.draft[c.cursor..]);
+    let input_lines: Vec<_> = composer
+        .split('\n')
+        .flat_map(|line| {
+            wrap_segments(
+                &[seg(safe(line), Style::default())],
+                usize::from(chunks[3].width.saturating_sub(2)).max(1),
+            )
+        })
+        .collect();
+    let before_cursor = format!("{}▏", &c.draft[..c.cursor]);
+    let cursor_lines: usize = before_cursor
+        .split('\n')
+        .map(|line| {
+            wrap_segments(
+                &[seg(safe(line), Style::default())],
+                usize::from(chunks[3].width.saturating_sub(2)).max(1),
+            )
+            .len()
+        })
+        .sum();
+    let scroll = cursor_lines
+        .saturating_sub(usize::from(chunks[3].height.saturating_sub(2)))
+        .min(u16::MAX as usize) as u16;
+    let input = Paragraph::new(input_lines)
+        .scroll((scroll, 0))
+        .block(Block::bordered().title(" Message "));
+    frame.render_widget(input, chunks[3]);
+}
+
+#[cfg(test)]
+mod chat_render_tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+    use steam_core::{
+        chat::{Event, Message},
+        friends::{Friend, Presence},
+    };
+
+    fn screen(model: &mut Model, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, model)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn unread_selection_and_chat_modal_render_without_a_real_terminal() {
+        let mut m = Model::new(false, None);
+        m.set_friends(vec![Friend {
+            steam_id: 10,
+            name: "Alice".into(),
+            state: Presence::Online,
+            game: None,
+        }]);
+        m.focus = Focus::Friends;
+        m.chat_event(Event::Message {
+            friend: 10,
+            message: Message {
+                timestamp: 100,
+                ordinal: 0,
+                outgoing: false,
+                text: "hello".into(),
+            },
+        });
+        let text = screen(&mut m, 150, 40);
+        assert!(text.contains("[1]"));
+        assert!(text.contains("› ● Alice"));
+        m.open_chat();
+        m.chat_paste("some draft");
+        let text = screen(&mut m, 120, 40);
+        assert!(text.contains("Chat · Alice"));
+        assert!(text.contains("hello"));
+        assert!(text.contains("some draft▏"));
+        for (width, height) in [(48, 14), (12, 5), (1, 1)] {
+            screen(&mut m, width, height);
+        }
+    }
+
+    #[test]
+    fn long_messages_wrap_and_the_latest_message_remains_visible() {
+        let mut m = Model::new(false, None);
+        m.set_friends(vec![Friend {
+            steam_id: 10,
+            name: "Alice".into(),
+            state: Presence::Online,
+            game: None,
+        }]);
+        m.open_chat();
+        let messages = (0..100)
+            .map(|i| Message {
+                timestamp: 100 + i,
+                ordinal: 0,
+                outgoing: false,
+                text: if i == 99 {
+                    "LATEST MESSAGE".into()
+                } else {
+                    "long wrapped text ".repeat(50)
+                },
+            })
+            .collect();
+        m.chat_event(Event::History {
+            friend: 10,
+            messages,
+            more: false,
+            older: false,
+        });
+        let text = screen(&mut m, 70, 24);
+        assert!(text.contains("LATEST MESSAGE"));
     }
 }

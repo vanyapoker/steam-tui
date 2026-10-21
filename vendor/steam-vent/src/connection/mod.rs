@@ -62,6 +62,15 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Send a unified service notification which deliberately has no reply.
+    pub async fn send_service_notification<Msg: ServiceMethodRequest<Response = ()>>(
+        &self,
+        message: Msg,
+    ) -> Result<()> {
+        let header = self.generate_header(false);
+        self.raw_send(header, ServiceMethodMessage(message)).await
+    }
+
     /// The same connection, with CM headers routed to `app_id` (needed by app-scoped
     /// services such as the matchmaking servers).
     #[must_use]
@@ -313,9 +322,12 @@ macro_rules! impl_connection {
             fn on_notification<T: ServiceNotification>(
                 &self,
             ) -> impl Stream<Item = Result<T>> + 'static {
-                BroadcastStream::new(self.filter().on_notification(T::NOTIFICATION_NAME))
-                    .filter_map(|res| res.ok())
-                    .map(|raw| raw.into_notification())
+                BroadcastStream::new(self.filter().on_notification(T::NOTIFICATION_NAME)).map(
+                    |res| {
+                        res.map_err(broadcast_error)
+                            .and_then(|raw| raw.into_notification())
+                    },
+                )
             }
 
             fn one<T: ReceivableMessage + 'static>(

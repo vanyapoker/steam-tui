@@ -1,6 +1,6 @@
 [package]
 name = "steam-tui"
-version = "0.3.4"
+version = "0.4.0"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 steam-core.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 ratatui.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
@@ -18,3 +18,7 @@ tokio-util.workspace = true
 steam-vent.workspace = true
 libc.workspace = true
 zeroize.workspace = true
+ratatui-image = { version = "9", default-features = false }
+
+image = { workspace = true, features = ["gif", "webp", "bmp"] }
+reqwest.workspace = true
