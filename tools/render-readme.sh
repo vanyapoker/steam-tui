@@ -20,7 +20,6 @@ for view in library conflict chat; do
   export STEAM_TUI_SCREENSHOT="$output_dir/$view.svg"
   export STEAM_TUI_SCREENSHOT_VIEW="$view"
   cargo test --locked -p steam-tui --manifest-path "$repo_dir/Cargo.toml" readme_screenshot -- --ignored
-  filename="$view"
-  [[ "$view" != library ]] || filename=screenshot
+  filename="$view-0.4"
   rsvg-convert -z 2 "$STEAM_TUI_SCREENSHOT" -o "$repo_dir/assets/$filename.png"
 done

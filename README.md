@@ -4,7 +4,7 @@ Lightweight, fast TUI Steam client for Linux (built for Omarchy). Browse, instal
 
 Early state: some games won't work without original steam client.
 
-![steam-tui library with game icons, unread friend badges, notifications, and an active download](assets/screenshot.png)
+![steam-tui library with game icons, unread friend badges, notifications, and an active download](assets/library-0.4.png)
 
 *Demo screens use fictional accounts, friends, and messages.*
 
@@ -27,12 +27,12 @@ Select a friend with ↑ / ↓ and press Enter. Read and send messages, preview 
 images, and paste an image with Ctrl+V to attach it. Unread badges keep new messages
 visible in the friends list.
 
-![Chat with message history, a shared image preview, and a message draft](assets/chat.png)
+![Chat with message history, a shared image preview, and a message draft](assets/chat-0.4.png)
 
 <details>
 <summary>Steam Cloud save conflict picker</summary>
 
-![Local and cloud saves compared side by side](assets/conflict.png)
+![Local and cloud saves compared side by side](assets/conflict-0.4.png)
 
 </details>
 

@@ -3831,7 +3831,7 @@ mod tests {
 
     /// Draws a mock-data session for the README. Run with
     /// `STEAM_TUI_SCREENSHOT=out.svg cargo test -p steam-tui readme_screenshot -- --ignored`
-    /// and convert with `rsvg-convert -z 2 out.svg -o assets/screenshot.png`.
+    /// and convert with `rsvg-convert -z 2 out.svg -o assets/library-0.4.png`.
     /// Set `STEAM_TUI_SCREENSHOT_THEME` to a terminal theme (an Omarchy `alacritty.toml`) to colour it.
     #[tokio::test]
     #[ignore = "writes a file; run by hand"]
