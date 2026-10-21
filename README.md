@@ -4,7 +4,9 @@ Lightweight, fast TUI Steam client for Linux (built for Omarchy). Browse, instal
 
 Early state: some games won't work without original steam client.
 
-![steam-tui](assets/screenshot.png)
+![steam-tui library with game icons, unread friend badges, notifications, and an active download](assets/screenshot.png)
+
+*Demo screens use fictional accounts, friends, and messages.*
 
 - Starts in ~2 ms and uses ~30 MB of memory.
 - Install and update games (native and Proton), with a persistent queue, pause/resume, priorities and download windows.
@@ -19,7 +21,20 @@ Early state: some games won't work without original steam client.
 - Steam Cloud saves, with a side-by-side local/cloud conflict picker.
 - Games run on our own Steam backend, so no Steam process is needed.
 
-![save conflict picker](assets/conflict.png)
+## Chat
+
+Select a friend with ↑ / ↓ and press Enter. Read and send messages, preview shared
+images, and paste an image with Ctrl+V to attach it. Unread badges keep new messages
+visible in the friends list.
+
+![Chat with message history, a shared image preview, and a message draft](assets/chat.png)
+
+<details>
+<summary>Steam Cloud save conflict picker</summary>
+
+![Local and cloud saves compared side by side](assets/conflict.png)
+
+</details>
 
 ## Installation
 
@@ -152,7 +167,7 @@ Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK h
 
 ## Not implemented yet
 
-Steam Input remapping and action sets, chat, game invites, publishing Workshop items, store and community pages, trading.
+Steam Input remapping and action sets, game invites, publishing Workshop items, store and community pages, trading.
 
 ## License
 

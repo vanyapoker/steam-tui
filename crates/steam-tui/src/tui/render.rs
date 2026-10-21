@@ -3833,9 +3833,9 @@ mod tests {
     /// `STEAM_TUI_SCREENSHOT=out.svg cargo test -p steam-tui readme_screenshot -- --ignored`
     /// and convert with `rsvg-convert -z 2 out.svg -o assets/screenshot.png`.
     /// Set `STEAM_TUI_SCREENSHOT_THEME` to a terminal theme (an Omarchy `alacritty.toml`) to colour it.
-    #[test]
+    #[tokio::test]
     #[ignore = "writes a file; run by hand"]
-    fn readme_screenshot() {
+    async fn readme_screenshot() {
         use ratatui::style::{Color, Modifier};
         use steam_core::catalog::{InstallPlatform, UpdateStatus};
         use steam_core::friends::{Friend, Presence};
@@ -4048,10 +4048,25 @@ mod tests {
             })
             .collect(),
         );
-        let now = 1_760_000_000;
+        model.chat.available = true;
+        for (index, unread) in [(0, 2), (1, 3), (5, 1)] {
+            model
+                .chat
+                .conversations
+                .entry(76_561_198_000_000_000 + index)
+                .or_default()
+                .unread = unread;
+        }
+        model.filter_chat_friends();
+        let now = 1_792_584_000;
         for (id, label, title, body) in [
             (1, "Trade offer", "1 trade offer", "Mira sent you an offer"),
-            (2, "Chat message", "Jonas", "Factorio tonight?"),
+            (
+                2,
+                "Playtest invite",
+                "New playtest invitation",
+                "You have been invited to a playtest",
+            ),
             (3, "Gift", "Priya sent you a gift", "Celeste"),
         ] {
             model.notification_event(NotificationEvent::Received(Notification {
@@ -4076,9 +4091,9 @@ mod tests {
             verify_bytes_total: 122 << 30,
             message: "depot 1086941: Data/Generated/Public/Shared.pak".into(),
         });
-        model.status = "Library refreshed: 559 games".into();
+        model.status = "Library refreshed: 16 games".into();
 
-        // Optional: STEAM_TUI_SCREENSHOT_SIZE=WxH and STEAM_TUI_SCREENSHOT_VIEW=conflict|filtered
+        // Optional: STEAM_TUI_SCREENSHOT_SIZE=WxH and STEAM_TUI_SCREENSHOT_VIEW=chat|conflict|filtered
         let (width, height) = std::env::var("STEAM_TUI_SCREENSHOT_SIZE")
             .ok()
             .and_then(|size| {
@@ -4086,6 +4101,7 @@ mod tests {
                 Some((w.parse().ok()?, h.parse().ok()?))
             })
             .unwrap_or((132u16, 36u16));
+        let mut shared_image = None;
         match std::env::var("STEAM_TUI_SCREENSHOT_VIEW").as_deref() {
             Ok("conflict") => {
                 use steam_core::cloud::{Conflict, SaveVersion};
@@ -4097,12 +4113,12 @@ mod tests {
                         local: Some(SaveVersion {
                             sha1: "9f2c1ab04d7e5513".into(),
                             size: 18_432,
-                            time: 1_759_900_000,
+                            time: now - 90_000,
                         }),
                         cloud: Some(SaveVersion {
                             sha1: "3b7e90d1c4a8f620".into(),
                             size: 17_920,
-                            time: 1_759_990_000,
+                            time: now - 1_000,
                         }),
                     }],
                     index: 0,
@@ -4111,12 +4127,104 @@ mod tests {
                     error: None,
                 });
             }
+            Ok("chat") => {
+                use steam_core::chat::Message;
+                model.install_active = false;
+                model.active_install = None;
+                model.progress = None;
+                model.focus = Focus::Friends;
+                let friend = 76_561_198_000_000_001;
+                model.friend_selected = model
+                    .friend_order
+                    .iter()
+                    .position(|&i| model.friends[i].steam_id == friend)
+                    .unwrap();
+                model.chat.active = Some(friend);
+                let conversation = model.chat.conversations.entry(friend).or_default();
+                conversation.unread = 0;
+                conversation.loaded = true;
+                conversation.history_loaded = true;
+                conversation.messages = [
+                    (false, "Factory night? I finally connected the northern outpost."),
+                    (true, "I'm in. Show me what you've been building!"),
+                    (false, "Took a break to explore. Found a pretty good spot for the next base.\nhttps://images.steamusercontent.com/ugc/demo/base.png"),
+                ].into_iter().enumerate().map(|(i, (outgoing, text))| Message {
+                    timestamp: now as u32 + i as u32 * 60,
+                    ordinal: 0,
+                    outgoing,
+                    text: text.into(),
+                }).collect();
+                conversation.draft = "That's the spot. I'll bring the supplies.".into();
+                conversation.cursor = conversation.draft.len();
+                conversation.typing = Some(Instant::now());
+                // Fictional shared image: a small pixel landscape, generated locally.
+                let landscape = image::RgbImage::from_fn(160, 80, |x, y| {
+                    let ridge = (37.0 + (x as f32 / 13.0).sin() * 9.0) as u32;
+                    let color = if y > 63 {
+                        [24, 49, 65]
+                    } else if y > ridge {
+                        [35, 65, 75]
+                    } else if (x as i32 - 115).pow(2) + (y as i32 - 23).pow(2) < 100 {
+                        [247, 196, 122]
+                    } else {
+                        [77 + y as u8, 87 + y as u8, 126 + y as u8]
+                    };
+                    image::Rgb(color)
+                });
+                let landscape = std::sync::Arc::new(image::DynamicImage::ImageRgb8(landscape));
+                shared_image = Some(landscape.clone());
+                model.chat.images.prepare_local(
+                    "https://images.steamusercontent.com/ugc/demo/base.png",
+                    landscape,
+                    (80, 12),
+                );
+            }
             Ok("filtered") => {
                 model.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
             }
             _ => {}
         }
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut model)).unwrap();
+        // Local artwork by default; opt in to public CDN downloads. No account connection is opened.
+        let download_icons = std::env::var_os("STEAM_TUI_SCREENSHOT_DOWNLOAD_ICONS").is_some();
+        let mut icons = Vec::new();
+        while let Some(request) = model.library_icons.pending.pop_front() {
+            let app_id = request.app_id;
+            let icon = steam_core::icons::load(app_id, download_icons)
+                .await
+                .unwrap_or(None);
+            if let Some(icon) = &icon {
+                icons.push((app_id, icon.image.clone()));
+            }
+            model
+                .library_icons
+                .loaded(super::super::library_icons::Loaded {
+                    app_id,
+                    generation: request.generation,
+                    result: Ok(icon),
+                });
+        }
+        // Remember icon slots before the placeholders are replaced by graphics.
+        let slots: Vec<_> = model
+            .library_hits
+            .iter()
+            .filter_map(|(rect, index)| {
+                let id = model.games[model.order[*index]].app_id;
+                let x = (rect.x..rect.right())
+                    .find(|&x| terminal.backend().buffer()[(x, rect.y)].symbol() == "▣")?;
+                Some((id, x, rect.y))
+            })
+            .collect();
+        terminal.draw(|frame| draw(frame, &mut model)).unwrap();
+        while let Some(request) = model.library_icons.images.pending.pop_front() {
+            let loaded = super::super::chat_images::load(request).await;
+            model.library_icons.images.loaded(loaded);
+        }
+        while let Some(request) = model.chat.images.pending.pop_front() {
+            let loaded = super::super::chat_images::load(request).await;
+            model.chat.images.loaded(loaded);
+        }
         terminal.draw(|frame| draw(frame, &mut model)).unwrap();
         let buffer = terminal.backend().buffer();
 
@@ -4217,6 +4325,61 @@ mod tests {
                     py + 13.5
                 ));
             }
+        }
+        if let Some(source) = shared_image {
+            // Native protocols fit the image into the reserved preview rectangle.
+            let image = source.to_rgb8();
+            let row = (0..height)
+                .find(|&y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains("https://images.steamusercontent.com/ugc/demo/base.png")
+                })
+                .expect("shared image URL is visible");
+            let x = modal_area(Rect::new(0, 0, width, height), 100, 32).x + 1;
+            let px = pad + x as f32 * cw;
+            let py = pad + (row + 1) as f32 * ch;
+            svg.push_str(&format!(
+                "<rect x=\"{px}\" y=\"{py}\" width=\"{}\" height=\"{}\" fill=\"{background}\"/>\n",
+                cw * 80.0,
+                ch * 12.0
+            ));
+            let scale = (cw * 80.0 / image.width() as f32).min(ch * 12.0 / image.height() as f32);
+            svg.push_str("<g shape-rendering=\"crispEdges\">\n");
+            for (ix, iy, pixel) in image.enumerate_pixels() {
+                let [r, g, b] = pixel.0;
+                svg.push_str(&format!("<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{scale:.2}\" height=\"{scale:.2}\" fill=\"#{r:02x}{g:02x}{b:02x}\"/>\n", px + ix as f32 * scale, py + iy as f32 * scale));
+            }
+            svg.push_str("</g>\n");
+        }
+        // SVG has no terminal graphics channel. Paint the same local artwork
+        // into the renderer's icon slots to represent native image support.
+        for (app_id, x, y) in slots {
+            let Some((_, source)) = icons.iter().find(|(id, _)| *id == app_id) else {
+                continue;
+            };
+            let image = source.thumbnail(32, 32).to_rgba8();
+            let dimmed = model.chat.active.is_some() || model.cloud_conflicts.is_some();
+            let overlay = if model.chat.active.is_some() {
+                Some(modal_area(Rect::new(0, 0, width, height), 100, 32))
+            } else if model.cloud_conflicts.is_some() {
+                Some(modal_area(Rect::new(0, 0, width, height), 100, 14))
+            } else {
+                None
+            };
+            if overlay.is_some_and(|area| area.intersects(Rect::new(x, y, 2, 1))) {
+                continue;
+            }
+            let pw = cw * 2.0 / image.width() as f32;
+            let ph = ch / image.height() as f32;
+            svg.push_str("<g shape-rendering=\"crispEdges\">\n");
+            for (ix, iy, pixel) in image.enumerate_pixels() {
+                let [r, g, b, a] = pixel.0;
+                let opacity = f32::from(a) / 255.0 * if dimmed { 0.6 } else { 1.0 };
+                svg.push_str(&format!("<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{pw:.2}\" height=\"{ph:.2}\" fill=\"#{r:02x}{g:02x}{b:02x}\" opacity=\"{opacity:.2}\"/>\n", pad + x as f32 * cw + ix as f32 * pw, pad + y as f32 * ch + iy as f32 * ph));
+            }
+            svg.push_str("</g>\n");
         }
         svg.push_str("</svg>\n");
         std::fs::write(path, svg).unwrap();
