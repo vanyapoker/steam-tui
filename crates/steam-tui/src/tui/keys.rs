@@ -5,8 +5,9 @@
 //!
 //! Rules the table follows:
 //! * no case variants with different meanings (`s`/`S`, `c`/`C`, ...);
-//! * keys act on the focused pane; only the commands that belong to one pane
-//!   (`o` offline friends, `x` clear feed) are pane-scoped;
+//! * movement follows focus except page keys, which scroll Notifications in the main view;
+//!   only the commands that belong to one pane
+//!   (such as `o` for offline friends) are pane-scoped;
 //! * overlays close with `Esc`, the key that opened them, or `q`.
 
 use super::model::Focus;
@@ -312,14 +313,14 @@ pub(super) static BINDINGS: &[Binding] = &[
         &[Code(KeyCode::Tab)],
         Any,
         Panes,
-        "Focus the next pane: Library → Friends → Notifications",
+        "Switch focus between Library and Friends",
     ),
     bind(
         Cmd::PrevPane,
         &[Code(KeyCode::BackTab)],
         Any,
         Panes,
-        "Focus the previous pane",
+        "Switch focus between Friends and Library",
     ),
     bind(
         Cmd::ToggleOffline,
@@ -331,7 +332,7 @@ pub(super) static BINDINGS: &[Binding] = &[
     bind(
         Cmd::ClearFeed,
         &[Char('x')],
-        Only(Focus::Notifications),
+        Any,
         Panes,
         "Notifications: clear the feed (the count badges are Steam's and stay)",
     ),
@@ -354,14 +355,14 @@ pub(super) static BINDINGS: &[Binding] = &[
         &[Code(KeyCode::PageUp)],
         Any,
         Panes,
-        "Page up in the focused pane",
+        "Scroll Notifications up one page (main view)",
     ),
     bind(
         Cmd::PageDown,
         &[Code(KeyCode::PageDown)],
         Any,
         Panes,
-        "Page down in the focused pane",
+        "Scroll Notifications down one page (main view)",
     ),
     bind(
         Cmd::Home,
@@ -554,7 +555,7 @@ mod tests {
 
     #[test]
     fn no_key_means_two_things_in_the_same_pane() {
-        for focus in [Focus::Library, Focus::Friends, Focus::Notifications] {
+        for focus in [Focus::Library, Focus::Friends] {
             let mut seen: Vec<(Key, Cmd)> = Vec::new();
             for binding in BINDINGS {
                 let applies = match binding.pane {
@@ -597,10 +598,9 @@ mod tests {
         let o = press(KeyCode::Char('o'));
         assert_eq!(lookup(Focus::Library, &o), Some(Cmd::LaunchOption));
         assert_eq!(lookup(Focus::Friends, &o), Some(Cmd::ToggleOffline));
-        assert_eq!(lookup(Focus::Notifications, &o), None);
         let x = press(KeyCode::Char('x'));
-        assert_eq!(lookup(Focus::Library, &x), None);
-        assert_eq!(lookup(Focus::Notifications, &x), Some(Cmd::ClearFeed));
+        assert_eq!(lookup(Focus::Library, &x), Some(Cmd::ClearFeed));
+        assert_eq!(lookup(Focus::Friends, &x), Some(Cmd::ClearFeed));
     }
 
     #[test]

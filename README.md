@@ -86,8 +86,9 @@ Press `?` in the app for the full list.
 | f | Pin a game |
 | v | All / installed / not installed |
 | 1-4, s | Sort by column (the active column again reverses), cycle sort |
-| Tab | Switch pane; movement keys act on the focused pane |
-| o / x | In Friends: show offline friends. In Notifications: clear the feed |
+| Tab / Shift+Tab | Switch between Library and Friends; arrows and Home/End follow focus |
+| PgUp / PgDn | Scroll Notifications from either main pane |
+| o / x | In Friends: show offline friends. In either main pane: clear Notifications |
 | r | Refresh |
 | b | Backend traffic |
 | q | Quit (closes an overlay instead while one is open) |
@@ -100,9 +101,9 @@ use colored blocks. Icons disappear on narrow layouts to leave names readable.
 
 Notifications load all visible history retained by Steam, including read entries,
 then update live. The feed is sorted newest first; `○` marks unread entries and
-`●` marks live arrivals since the pane was last focused. Tab to Notifications and
-use arrows, Page Up/Down, Home/End to browse. Clearing the feed only affects this
-session. `steam-tui notifications` prints the same account history without opening
+`●` marks live arrivals since the feed was last paged. Page Up/Down scrolls
+Notifications from either Library or Friends, without moving their selection;
+`x` clears the feed. Clearing only affects this session. `steam-tui notifications` prints the same account history without opening
 the TUI; `--account NAME` selects a different saved account.
 
 Tab to Friends, select with arrows (or `j`/`k`), and press Enter to chat.

@@ -1396,17 +1396,12 @@ fn notification_line(
 }
 
 fn draw_notifications(frame: &mut Frame<'_>, model: &Model, area: Rect) {
-    let focused = model.focus == Focus::Notifications;
-    let border = theme::panel_border(Panel::Notifications, focused);
+    let border = theme::panel_border(Panel::Notifications, false);
     let mut title = vec![seg("Notifications", bold())];
     if model.notif_unseen > 0 {
         title.push(seg(format!(" {}", model.notif_unseen), accent()));
     }
-    let bottom = vec![
-        hint("PgUp/PgDn", "scroll"),
-        hint("x", "clear"),
-        hint("Tab", "pane"),
-    ];
+    let bottom = vec![hint("PgUp/PgDn", "scroll"), hint("x", "clear")];
     let block = panel_block(border, area.width, vec![title], Vec::new(), bottom);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -3837,7 +3832,7 @@ mod tests {
                     }
                     model.searching = editing;
                     model.focus = if active {
-                        Focus::Notifications
+                        Focus::Friends
                     } else {
                         Focus::Library
                     };
@@ -4134,9 +4129,8 @@ mod tests {
         let line = |needle: &str| screen.lines().position(|l| l.contains(needle)).unwrap();
         assert!(line("Chat message") < line("Half price"));
         assert!(line("Half price") < line("From a friend"));
-        // Focusing the feed marks everything seen.
-        model.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        model.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        // Paging the feed marks live arrivals seen without changing focus.
+        model.key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         let focused = render(&mut model, 150, 40);
         assert!(model.notif_unseen == 0 && !focused.contains("Notifications 3"));
         // And the same data renders at the stacked size.

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Tab and Shift+Tab switch only between Library and Friends. Page Up/Down scroll Notifications from either main pane; `x` clears the feed from either pane. Overlays keep their own navigation.
+
 ## 0.4.2 - 2026-10-22
 
 ### Added

@@ -53,24 +53,17 @@ impl Sort {
 pub(super) enum Focus {
     Library,
     Friends,
-    Notifications,
 }
 
 impl Focus {
     pub fn next(self) -> Self {
         match self {
             Self::Library => Self::Friends,
-            Self::Friends => Self::Notifications,
-            Self::Notifications => Self::Library,
+            Self::Friends => Self::Library,
         }
     }
-
     pub fn previous(self) -> Self {
-        match self {
-            Self::Library => Self::Notifications,
-            Self::Friends => Self::Library,
-            Self::Notifications => Self::Friends,
-        }
+        self.next()
     }
 }
 
@@ -370,7 +363,7 @@ pub(super) struct Model {
     pub profile_live: bool,
     pub notif_offset: usize,
     pub notif_rows: usize,
-    /// Items received since the feed was last focused.
+    /// Items received since the feed was last paged.
     pub notif_unseen: usize,
     pub notif_fresh: std::collections::HashSet<u64>,
     pub status: String,
@@ -943,20 +936,19 @@ impl Model {
         self.keep_visible();
     }
 
-    fn page_friends(&mut self, down: bool, page: bool) {
-        let amount = if page { self.friend_rows.max(1) } else { 1 };
+    fn move_friend(&mut self, down: bool) {
         self.friend_selected = if down {
             self.friend_selected
-                .saturating_add(amount)
+                .saturating_add(1)
                 .min(self.friend_order.len().saturating_sub(1))
         } else {
-            self.friend_selected.saturating_sub(amount)
+            self.friend_selected.saturating_sub(1)
         };
         self.keep_visible();
     }
 
-    fn page_notifications(&mut self, down: bool, page: bool) {
-        let amount = if page { self.notif_rows.max(1) } else { 1 };
+    fn page_notifications(&mut self, down: bool) {
+        let amount = self.notif_rows.max(1);
         self.notif_offset = if down {
             self.notif_offset.saturating_add(amount)
         } else {
@@ -1054,7 +1046,7 @@ impl Model {
                         .notifications
                         .iter()
                         .any(|note| note.id == notification.id);
-                if self.focus != Focus::Notifications && !existing {
+                if !existing {
                     self.notif_fresh.insert(notification.id);
                 }
                 if notification.id != 0 {
@@ -1064,9 +1056,6 @@ impl Model {
                 self.notifications.insert(0, notification);
                 self.notifications
                     .sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then(b.id.cmp(&a.id)));
-                if self.focus == Focus::Notifications {
-                    self.notif_offset = 0;
-                }
             }
         }
         self.notif_unseen = self
@@ -1583,14 +1572,18 @@ impl Model {
         Action::None
     }
 
-    /// Movement keys act on the focused pane.
+    /// Page keys always scroll notifications; other movement follows focus.
     fn navigate(&mut self, cmd: Cmd) -> Action {
+        if matches!(cmd, Cmd::PageUp | Cmd::PageDown) {
+            self.page_notifications(cmd == Cmd::PageDown);
+            self.notif_unseen = 0;
+            self.notif_fresh.clear();
+            return Action::None;
+        }
         match self.focus {
             Focus::Library => match cmd {
                 Cmd::Up => self.move_library(false),
                 Cmd::Down => self.move_library(true),
-                Cmd::PageUp => self.page_library(false),
-                Cmd::PageDown => self.page_library(true),
                 Cmd::Home => {
                     self.selected = 0;
                     self.keep_visible();
@@ -1601,28 +1594,15 @@ impl Model {
                 }
             },
             Focus::Friends => match cmd {
-                Cmd::Up => self.page_friends(false, false),
-                Cmd::Down => self.page_friends(true, false),
-                Cmd::PageUp => self.page_friends(false, true),
-                Cmd::PageDown => self.page_friends(true, true),
+                Cmd::Up => self.move_friend(false),
+                Cmd::Down => self.move_friend(true),
                 Cmd::Home => {
                     self.friend_selected = 0;
                     self.keep_visible();
                 }
                 _ => {
                     self.friend_selected = usize::MAX / 2;
-                    self.page_friends(true, false);
-                }
-            },
-            Focus::Notifications => match cmd {
-                Cmd::Up => self.page_notifications(false, false),
-                Cmd::Down => self.page_notifications(true, false),
-                Cmd::PageUp => self.page_notifications(false, true),
-                Cmd::PageDown => self.page_notifications(true, true),
-                Cmd::Home => self.notif_offset = 0,
-                _ => {
-                    self.notif_offset = usize::MAX / 2;
-                    self.page_notifications(true, false);
+                    self.move_friend(true);
                 }
             },
         }
@@ -1767,10 +1747,6 @@ impl Model {
                 } else {
                     self.focus.previous()
                 };
-                if self.focus == Focus::Notifications {
-                    self.notif_unseen = 0;
-                    self.notif_fresh.clear();
-                }
             }
             Cmd::ToggleOffline => {
                 self.show_offline = !self.show_offline;
@@ -1886,17 +1862,6 @@ impl Model {
             return None;
         }
         Some(backend)
-    }
-
-    fn page_library(&mut self, down: bool) {
-        self.selected = if down {
-            self.selected
-                .saturating_add(keys::PAGE)
-                .min(self.order.len().saturating_sub(1))
-        } else {
-            self.selected.saturating_sub(keys::PAGE)
-        };
-        self.keep_visible();
     }
 
     /// `y`: sync Steam Cloud saves of the selected installed game (download,
@@ -2473,11 +2438,11 @@ mod tests {
             (1, 0, 0)
         );
         for _ in 0..8 {
-            model.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+            model.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         assert_eq!((model.friend_offset, model.selected), (5, 0));
         for _ in 0..8 {
-            model.key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+            model.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         }
         assert_eq!(model.friend_offset, 0);
         model.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
@@ -2487,7 +2452,9 @@ mod tests {
         model.focus = Focus::Library;
         model.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!((model.selected, model.friend_offset), (1, 0));
-        model.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        model.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(model.selected, 2);
+        model.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         assert_eq!(model.selected, model.order.len() - 1);
         model.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         assert_eq!(model.selected, 0);
@@ -2516,7 +2483,7 @@ mod tests {
         ]);
         model.focus = Focus::Friends;
         model.key(key('o'));
-        model.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        model.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(model.friend_offset, 1);
         model.key(key('o'));
         assert_eq!(model.friend_order.len(), 1);
@@ -3210,55 +3177,76 @@ mod notification_tests {
     }
 
     #[test]
-    fn tab_cycles_panes_and_focusing_the_feed_clears_unseen() {
+    fn tab_cycles_library_and_friends_without_acknowledging_notifications() {
         let mut model = Model::new(false, None);
         model.notification_event(note(1, "a"));
+        for _ in 0..3 {
+            model.key(code(KeyCode::Tab));
+            assert_eq!(model.focus, Focus::Friends);
+            model.key(code(KeyCode::Tab));
+            assert_eq!(model.focus, Focus::Library);
+            model.key(code(KeyCode::BackTab));
+            assert_eq!(model.focus, Focus::Friends);
+            model.key(code(KeyCode::BackTab));
+            assert_eq!(model.focus, Focus::Library);
+        }
         assert_eq!(model.notif_unseen, 1);
-        model.key(code(KeyCode::Tab));
-        assert_eq!(model.focus, Focus::Friends);
-        model.key(code(KeyCode::Tab));
-        assert_eq!(model.focus, Focus::Notifications);
+        model.key(code(KeyCode::PageDown));
         assert_eq!(model.notif_unseen, 0);
-        // Items arriving while focused are already in view.
-        model.notification_event(note(2, "b"));
-        assert_eq!(model.notif_unseen, 0);
-        model.key(code(KeyCode::Tab));
+        assert!(model.notif_fresh.is_empty());
         assert_eq!(model.focus, Focus::Library);
-        model.key(code(KeyCode::BackTab));
-        assert_eq!(model.focus, Focus::Notifications);
-        model.key(code(KeyCode::BackTab));
-        assert_eq!(model.focus, Focus::Friends);
+        model.notification_event(note(2, "b"));
+        assert_eq!(model.notif_unseen, 1);
     }
 
     #[test]
-    fn page_keys_scroll_the_focused_feed_and_friends_otherwise() {
+    fn page_keys_scroll_notifications_without_changing_focus_or_selection() {
         let mut model = Model::new(false, None);
         model.notif_rows = 3;
         model.friend_rows = 3;
         for id in 1..=10 {
             model.notification_event(note(id, "n"));
         }
-        model.key(code(KeyCode::PageDown));
-        assert_eq!(
-            model.notif_offset, 0,
-            "friends handle PgDn unless the feed is focused"
-        );
-        model.focus = Focus::Notifications;
-        model.key(code(KeyCode::PageDown));
-        assert_eq!(model.notif_offset, 3);
-        for _ in 0..10 {
+        for focus in [Focus::Library, Focus::Friends] {
+            model.focus = focus;
+            model.notif_offset = 0;
+            let selections = (
+                model.selected,
+                model.friend_selected,
+                model.library_offset,
+                model.friend_offset,
+            );
             model.key(code(KeyCode::PageDown));
+            assert_eq!(model.notif_offset, 3);
+            for _ in 0..10 {
+                model.key(code(KeyCode::PageDown));
+            }
+            assert_eq!(model.notif_offset, 7);
+            for _ in 0..10 {
+                model.key(code(KeyCode::PageUp));
+            }
+            assert_eq!(model.notif_offset, 0);
+            assert_eq!(model.focus, focus);
+            assert_eq!(
+                (
+                    model.selected,
+                    model.friend_selected,
+                    model.library_offset,
+                    model.friend_offset
+                ),
+                selections
+            );
         }
-        assert_eq!(model.notif_offset, 7);
-        model.key(key('k'));
-        assert_eq!(model.notif_offset, 6);
-        model.key(code(KeyCode::PageUp));
-        model.key(code(KeyCode::PageUp));
-        assert_eq!(model.notif_offset, 0);
-        // A new item scrolls the focused feed back to the top.
         model.notif_offset = 4;
         model.notification_event(note(99, "fresh"));
-        assert_eq!(model.notif_offset, 0);
+        assert_eq!(
+            model.notif_offset, 4,
+            "new arrivals must not reset the scroll position"
+        );
+        model.searching = true;
+        model.key(code(KeyCode::PageUp));
+        assert_eq!(model.notif_offset, 1);
+        assert!(model.searching);
     }
 
     #[test]
@@ -3271,10 +3259,10 @@ mod notification_tests {
         assert_eq!(model.notifications.len(), 1);
         model.key(code(KeyCode::Enter));
         model.key(code(KeyCode::Esc));
-        // `x` belongs to the notifications pane: nothing happens from the library.
         model.key(key('x'));
-        assert_eq!(model.notifications.len(), 1);
-        model.focus = Focus::Notifications;
+        assert!(model.notifications.is_empty());
+        model.notification_event(note(2, "b"));
+        model.focus = Focus::Friends;
         model.key(key('x'));
         assert!(model.notifications.is_empty());
         assert_eq!(model.notif_unseen, 0);
