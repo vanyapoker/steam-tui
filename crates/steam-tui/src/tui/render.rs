@@ -2687,8 +2687,6 @@ fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
             hint("↑↓", "select"),
             hint("f", "filter"),
             hint("←→", "runs"),
-            hint("[]", "priority"),
-            hint("{}", "details"),
             hint("Esc", "close"),
         ],
     );
@@ -2850,6 +2848,7 @@ fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
         parts[0],
     );
     let mut details = Vec::<Line>::new();
+    let mut controls = Vec::new();
     for error in model
         .queue_error
         .iter()
@@ -2947,16 +2946,20 @@ fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
                 severity_style(Severity::Error),
             ));
         }
-        let controls = match job.state {
-            JobState::Running | JobState::Pending => "p pause · c cancel",
-            JobState::Paused => "p resume · c cancel",
-            JobState::Failed => "r retry · c cancel",
-            JobState::Cancelled => "r retry",
-            JobState::Complete => "",
-        };
-        details.push(Line::from(format!(
-            "{controls}  [ lower / ] higher priority · a app policy"
-        )));
+        match job.state {
+            JobState::Running | JobState::Pending => {
+                controls.extend([hint("p", "pause"), hint("c", "cancel")])
+            }
+            JobState::Paused => controls.extend([hint("p", "resume"), hint("c", "cancel")]),
+            JobState::Failed => controls.extend([hint("r", "retry"), hint("c", "cancel")]),
+            JobState::Cancelled => controls.push(hint("r", "retry")),
+            JobState::Complete => {}
+        }
+        controls.extend([
+            hint("[", "lower priority"),
+            hint("]", "higher priority"),
+            hint("a", "app policy"),
+        ]);
     }
     let paragraph = Paragraph::new(details).wrap(Wrap { trim: false });
     let max_scroll = paragraph
@@ -2965,11 +2968,13 @@ fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
         .min(u16::MAX as usize) as u16;
     frame.render_widget(
         paragraph
-            .block(
-                Block::bordered()
-                    .border_style(accent())
-                    .title("Details · { } scroll"),
-            )
+            .block(panel_block(
+                accent(),
+                parts[1].width,
+                vec![vec![seg("Details", bold())]],
+                vec![hint("{}", "scroll")],
+                controls,
+            ))
             .scroll((model.queue_details_offset.min(max_scroll), 0)),
         parts[1],
     );
