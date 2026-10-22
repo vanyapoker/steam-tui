@@ -360,6 +360,9 @@ pub(super) struct Model {
     /// False without a Steam connection (offline mode or failed login).
     pub notifications_live: bool,
     pub account: Option<String>,
+    pub profile: Option<Friend>,
+    pub profile_name: Option<String>,
+    pub profile_live: bool,
     pub notif_offset: usize,
     pub notif_rows: usize,
     /// Items received since the feed was last focused.
@@ -383,6 +386,13 @@ pub(super) struct Model {
     pub backend_log: std::collections::VecDeque<BackendEntry>,
     pub backend_view: bool,
     pub queue_view: bool,
+    pub queue_filter: Option<super::downloads::Kind>,
+    pub queue_run: Option<u64>,
+    pub queue_error: Option<String>,
+    pub queue_load_error: Option<String>,
+    pub queue_names: HashMap<u32, String>,
+    pub queue_active: Option<u64>,
+    pub queue_details_offset: u16,
     pub queue_jobs: Vec<steam_core::updates::Job>,
     pub queue_selected: usize,
     pub queue_settings: steam_core::updates::Settings,
@@ -450,6 +460,9 @@ impl Model {
             },
             friend_rows: 1,
             account: None,
+            profile: None,
+            profile_name: None,
+            profile_live: false,
             show_offline: false,
             focus: Focus::Library,
             sort: Sort::Name,
@@ -466,6 +479,13 @@ impl Model {
             backend_log: std::collections::VecDeque::new(),
             backend_view: false,
             queue_view: false,
+            queue_filter: None,
+            queue_run: None,
+            queue_error: None,
+            queue_load_error: None,
+            queue_names: HashMap::new(),
+            queue_active: None,
+            queue_details_offset: 0,
             queue_jobs: Vec::new(),
             queue_selected: 0,
             queue_settings: Default::default(),
@@ -670,15 +690,23 @@ impl Model {
         };
         let pins: Vec<_> = self.pins.iter().map(u32::to_string).collect();
         format!(
-            "sort={sort}\nreverse={}\nfilter={filter}\nshow_offline={}\npins={}\n",
+            "sort={sort}\nreverse={}\nfilter={filter}\nshow_offline={}\npins={}\nprofile_account={}\nprofile_name={}\n",
             self.reverse,
             self.show_offline,
-            pins.join(",")
+            pins.join(","),
+            self.account.as_deref().unwrap_or_default(),
+            self.profile_name.as_deref().unwrap_or_default()
         )
     }
 
     /// Unknown keys and malformed values are ignored.
     pub fn apply_settings(&mut self, text: &str) {
+        // View preferences are global; the cached persona belongs to one account.
+        let profile_account = text
+            .lines()
+            .find_map(|line| line.strip_prefix("profile_account="));
+        let restore_profile = self.account.is_some() && profile_account == self.account.as_deref();
+        self.profile_name = None;
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else {
                 continue;
@@ -693,6 +721,9 @@ impl Model {
                 ("filter", "installed") => self.filter = LibraryFilter::Installed,
                 ("filter", "not-installed") => self.filter = LibraryFilter::NotInstalled,
                 ("show_offline", v) => self.show_offline = v == "true",
+                ("profile_name", v) if restore_profile && !v.is_empty() => {
+                    self.profile_name = Some(super::super::terminal_text(v).into_owned())
+                }
                 ("pins", v) => self.pins = v.split(',').filter_map(|id| id.parse().ok()).collect(),
                 _ => {}
             }
@@ -787,6 +818,19 @@ impl Model {
             })
             .unwrap_or_else(|| self.selected.min(self.order.len().saturating_sub(1)));
         self.keep_visible();
+    }
+
+    pub fn set_profile(&mut self, mut profile: Friend) {
+        profile.name = super::super::terminal_text(&profile.name).into_owned();
+        profile.game = profile
+            .game
+            .as_deref()
+            .map(|value| super::super::terminal_text(value).into_owned());
+        if !profile.name.trim().is_empty() {
+            self.profile_name = Some(profile.name.clone());
+        }
+        self.profile = Some(profile);
+        self.profile_live = true;
     }
 
     pub fn set_friends(&mut self, mut friends: Vec<Friend>) {
@@ -926,6 +970,7 @@ impl Model {
 
     /// The Steam session is gone: say so in the panels that depend on it.
     pub fn connection_lost(&mut self, message: &str) {
+        self.profile_live = false;
         self.chat_disconnected();
         self.friends_status = message.to_owned();
         self.notif_status = message.to_owned();
@@ -933,6 +978,7 @@ impl Model {
 
     /// A fresh session replaced the old one; its workers are about to report.
     pub fn connection_restored(&mut self) {
+        self.profile_live = false;
         self.chat_disconnected();
         self.chat.status.clear();
         self.chat.available = true;
@@ -1303,8 +1349,47 @@ impl Model {
             self.queue_view = false;
             return Action::None;
         }
-        let last = self.queue_jobs.len().saturating_sub(1);
+        if key.code == KeyCode::Char('f') {
+            use super::downloads::Kind;
+            self.queue_filter = match self.queue_filter {
+                None => Some(Kind::Content),
+                Some(Kind::Content) => Some(Kind::Shaders),
+                Some(Kind::Shaders) => Some(Kind::Dependency),
+                Some(Kind::Dependency) => None,
+            };
+            self.queue_selected = 0;
+            self.queue_run = None;
+            self.queue_details_offset = 0;
+            return Action::None;
+        }
+        if matches!(key.code, KeyCode::Left | KeyCode::Right) {
+            if let Some(entry) = self.download_entries().get(self.queue_selected) {
+                let index = self
+                    .queue_run
+                    .and_then(|id| entry.runs.iter().position(|r| *r == id))
+                    .unwrap_or(0);
+                let next = if key.code == KeyCode::Left {
+                    (index + 1).min(entry.runs.len() - 1)
+                } else {
+                    index.saturating_sub(1)
+                };
+                self.queue_run = Some(entry.runs[next]);
+                self.queue_details_offset = 0;
+            }
+            return Action::None;
+        }
+        if matches!(key.code, KeyCode::Char('{') | KeyCode::Char('}')) {
+            self.queue_details_offset = if key.code == KeyCode::Char('}') {
+                self.queue_details_offset.saturating_add(1)
+            } else {
+                self.queue_details_offset.saturating_sub(1)
+            };
+            return Action::None;
+        }
+        let last = self.download_entries().len().saturating_sub(1);
         if let Some(nav) = keys::nav(&key) {
+            self.queue_run = None;
+            self.queue_details_offset = 0;
             self.queue_selected = match nav {
                 Nav::Up => self.queue_selected.saturating_sub(1),
                 Nav::Down => self.queue_selected.saturating_add(1),
@@ -1316,23 +1401,36 @@ impl Model {
             .min(last);
             return Action::None;
         }
-        let Some(job) = self.queue_jobs.get(self.queue_selected) else {
+        let Some(job) = self.selected_download() else {
             return Action::None;
         };
         use steam_core::updates::JobState;
         match key.code {
-            KeyCode::Char('p') => Action::QueueControl(
-                job.id,
-                if job.state == JobState::Paused {
-                    JobState::Pending
-                } else {
-                    JobState::Paused
-                },
-            ),
-            KeyCode::Char('r') => Action::QueueControl(job.id, JobState::Pending),
-            KeyCode::Char('c') => Action::QueueControl(job.id, JobState::Cancelled),
-            KeyCode::Char('+') => Action::QueuePriority(job.intent.app_id, 1),
-            KeyCode::Char('-') => Action::QueuePriority(job.intent.app_id, -1),
+            KeyCode::Char('p')
+                if matches!(
+                    job.state,
+                    JobState::Running | JobState::Pending | JobState::Paused
+                ) =>
+            {
+                Action::QueueControl(
+                    job.id,
+                    if job.state == JobState::Paused {
+                        JobState::Pending
+                    } else {
+                        JobState::Paused
+                    },
+                )
+            }
+            KeyCode::Char('r') if matches!(job.state, JobState::Failed | JobState::Cancelled) => {
+                Action::QueueControl(job.id, JobState::Pending)
+            }
+            KeyCode::Char('c')
+                if !matches!(job.state, JobState::Complete | JobState::Cancelled) =>
+            {
+                Action::QueueControl(job.id, JobState::Cancelled)
+            }
+            KeyCode::Char(']') => Action::QueuePriority(job.intent.app_id, 1),
+            KeyCode::Char('[') => Action::QueuePriority(job.intent.app_id, -1),
             KeyCode::Char('a') => Action::QueuePolicy(job.intent.app_id),
             _ => Action::None,
         }
@@ -2245,6 +2343,32 @@ mod tests {
             model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Action::Launch(LaunchBackend::BuiltIn)
         );
+    }
+
+    #[test]
+    fn profile_name_is_cached_safely_without_reusing_live_presence() {
+        use steam_core::friends::Presence;
+        let mut model = Model::new(false, None);
+        model.account = Some("account-one".into());
+        model.set_profile(Friend {
+            steam_id: 76561198000000099,
+            name: "vanyapoker\nshow_offline=true\u{1b}".into(),
+            state: Presence::Online,
+            game: None,
+        });
+        let text = model.settings_text();
+        assert!(!text.contains("\nshow_offline=true"));
+        let mut restored = Model::new(true, None);
+        restored.account = Some("account-one".into());
+        restored.apply_settings(&text);
+        assert_eq!(restored.profile_name, model.profile_name);
+        assert!(restored.profile.is_none());
+        assert!(!restored.profile_live);
+        assert!(!restored.show_offline);
+        assert!(restored.friends.is_empty());
+        restored.account = Some("account-two".into());
+        restored.apply_settings(&text);
+        assert!(restored.profile_name.is_none());
     }
 
     #[test]

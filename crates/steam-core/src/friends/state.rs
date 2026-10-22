@@ -22,6 +22,7 @@ struct Persona {
 #[derive(Default)]
 pub(super) struct State {
     pub complete: bool,
+    owner: Option<u64>,
     friends: BTreeSet<u64>,
     personas: BTreeMap<u64, Persona>,
     pub names: BTreeMap<u32, Option<String>>,
@@ -33,6 +34,21 @@ fn individual(id: u64) -> bool {
 }
 
 impl State {
+    pub fn with_owner(owner: u64) -> Self {
+        Self {
+            owner: Some(owner),
+            ..Self::default()
+        }
+    }
+
+    pub fn profile(&self) -> Option<Friend> {
+        let id = self.owner?;
+        let name = self.personas.get(&id)?.name.clone()?;
+        let mut profile = self.persona(id);
+        profile.name = name;
+        Some(profile)
+    }
+
     pub fn relationships(&mut self, message: CMsgClientFriendsList) -> super::Result<Vec<u64>> {
         if message.friends.len() > MAX_FRIENDS {
             return Err(failure("Steam friend list exceeds the 10000 entry limit"));
@@ -44,7 +60,10 @@ impl State {
             self.complete = true;
         }
         for friend in message.friends {
-            let Some(id) = friend.ulfriendid.filter(|id| individual(*id)) else {
+            let Some(id) = friend
+                .ulfriendid
+                .filter(|id| individual(*id) && Some(*id) != self.owner)
+            else {
                 continue;
             };
             // Only the actual Friend relationship (3), not invitations,
@@ -62,7 +81,8 @@ impl State {
             return Err(failure("Steam friend list exceeds the 10000 entry limit"));
         }
         if self.complete {
-            self.personas.retain(|id, _| self.friends.contains(id));
+            self.personas
+                .retain(|id, _| self.friends.contains(id) || Some(*id) == self.owner);
         }
         Ok(if full {
             self.ids()
@@ -75,7 +95,7 @@ impl State {
     }
 
     pub fn personas(&mut self, message: CMsgClientPersonaState) -> super::Result<()> {
-        if message.friends.len() > MAX_FRIENDS {
+        if message.friends.len() > MAX_FRIENDS + usize::from(self.owner.is_some()) {
             return Err(failure(
                 "Steam persona message exceeds the 10000 entry limit",
             ));
@@ -85,10 +105,12 @@ impl State {
             let Some(id) = friend.friendid.filter(|id| individual(*id)) else {
                 continue;
             };
-            if self.complete && !self.friends.contains(&id) {
+            if self.complete && !self.friends.contains(&id) && Some(id) != self.owner {
                 continue;
             }
-            if !self.personas.contains_key(&id) && self.personas.len() >= MAX_FRIENDS {
+            if !self.personas.contains_key(&id)
+                && self.personas.len() >= MAX_FRIENDS + usize::from(self.owner.is_some())
+            {
                 return Err(failure(
                     "Steam initial persona cache exceeds the 10000 entry limit",
                 ));
@@ -185,6 +207,7 @@ impl State {
     pub fn missing_apps(&self) -> BTreeSet<u32> {
         self.friends
             .iter()
+            .chain(self.owner.iter())
             .filter_map(|id| {
                 let p = self.personas.get(id)?;
                 (p.app_id != 0 && p.game_name.is_none() && !self.names.contains_key(&p.app_id))
@@ -194,35 +217,34 @@ impl State {
     }
 
     pub fn snapshot(&self) -> Vec<Friend> {
-        self.friends
-            .iter()
-            .map(|&id| {
-                let persona = self.personas.get(&id);
-                Friend {
-                    steam_id: id,
-                    name: persona
-                        .and_then(|p| p.name.clone())
-                        .unwrap_or_else(|| id.to_string()),
-                    state: persona.and_then(|p| p.state).unwrap_or(Presence::Unknown),
-                    game: persona.and_then(|p| {
-                        p.game_name.clone().or_else(|| {
-                            if p.app_id != 0 {
-                                Some(
-                                    self.names
-                                        .get(&p.app_id)
-                                        .and_then(Clone::clone)
-                                        .unwrap_or_else(|| format!("App {}", p.app_id)),
-                                )
-                            } else if p.game_id != 0 {
-                                Some("Non-Steam game".to_owned())
-                            } else {
-                                None
-                            }
-                        })
-                    }),
-                }
-            })
-            .collect()
+        self.friends.iter().map(|&id| self.persona(id)).collect()
+    }
+
+    fn persona(&self, id: u64) -> Friend {
+        let persona = self.personas.get(&id);
+        Friend {
+            steam_id: id,
+            name: persona
+                .and_then(|p| p.name.clone())
+                .unwrap_or_else(|| id.to_string()),
+            state: persona.and_then(|p| p.state).unwrap_or(Presence::Unknown),
+            game: persona.and_then(|p| {
+                p.game_name.clone().or_else(|| {
+                    if p.app_id != 0 {
+                        Some(
+                            self.names
+                                .get(&p.app_id)
+                                .and_then(Clone::clone)
+                                .unwrap_or_else(|| format!("App {}", p.app_id)),
+                        )
+                    } else if p.game_id != 0 {
+                        Some("Non-Steam game".to_owned())
+                    } else {
+                        None
+                    }
+                })
+            }),
+        }
     }
 }
 
@@ -255,6 +277,54 @@ mod tests {
             friends: vec![friend],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn own_persona_survives_roster_replacement_and_stays_out_of_friends() {
+        let mut state = State::with_owner(A);
+        state
+            .personas(persona(
+                PLAYER_NAME | PRESENCE,
+                cmsg_client_persona_state::Friend {
+                    friendid: Some(A),
+                    player_name: Some("vanyapoker".into()),
+                    persona_state: Some(1),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        assert_eq!(state.profile().unwrap().name, "vanyapoker");
+        state.relationships(list(false, &[(B, 3), (A, 3)])).unwrap();
+        assert_eq!(state.ids(), vec![B]);
+        assert_eq!(state.profile().unwrap().state, Presence::Online);
+        state
+            .personas(persona(
+                PRESENCE,
+                cmsg_client_persona_state::Friend {
+                    friendid: Some(A),
+                    persona_state: Some(3),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        assert_eq!(state.profile().unwrap().name, "vanyapoker");
+        assert_eq!(state.profile().unwrap().state, Presence::Away);
+        state.relationships(list(false, &[])).unwrap();
+        assert!(state.snapshot().is_empty());
+        assert_eq!(state.profile().unwrap().name, "vanyapoker");
+        state
+            .personas(persona(
+                PLAYER_NAME,
+                cmsg_client_persona_state::Friend {
+                    friendid: Some(A),
+                    player_name: Some("New display name".into()),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        assert_eq!(state.profile().unwrap().name, "New display name");
+        state.invalidate_presence();
+        assert_eq!(state.profile().unwrap().state, Presence::Unknown);
     }
 
     #[test]

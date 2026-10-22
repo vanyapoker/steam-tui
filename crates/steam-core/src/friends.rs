@@ -100,6 +100,8 @@ pub enum FriendEvent {
     /// Complete membership snapshot, in ascending SteamID order. Metadata not
     /// returned by Steam remains an ID/name fallback and Unknown, never Offline.
     Snapshot(Vec<Friend>),
+    /// The signed-in user, separate from friend membership and navigation.
+    Profile(Friend),
     Status(String),
 }
 
@@ -153,8 +155,8 @@ async fn run_inner(
     let logged_off = connection.on::<CMsgClientLoggedOff>();
     futures_util::pin_mut!(lists, personas, logged_off);
     let own_id = connection.steam_id().steam64();
-    let mut state = State::default();
-    let mut requested = BTreeSet::new();
+    let mut state = State::with_owner(own_id);
+    let mut requested = BTreeSet::from([own_id]);
     for raw in connection
         .take_unprocessed_kind::<CMsgClientFriendsList>()
         .into_iter()
@@ -218,6 +220,7 @@ async fn run_inner(
     let mut name_limit_reported = false;
     let mut dirty = state.complete;
     let mut published = false;
+    let mut published_profile = None;
     let mut social_online = false;
     let mut refresh_open = true;
     let mut deadline = Instant::now()
@@ -295,12 +298,18 @@ async fn run_inner(
             dirty = true;
             queue_status(&mut statuses, "Steam friends loaded; listening for changes");
         }
+        let profile = state.profile();
+        let profile_changed = profile.is_some() && profile != published_profile;
         tokio::select! {
             _ = updates.closed() => return Ok(()),
-            permit = updates.reserve(), if !statuses.is_empty() || (published && dirty) => {
+            permit = updates.reserve(), if !statuses.is_empty() || profile_changed || (published && dirty) => {
                 let Ok(permit) = permit else { return Ok(()); };
                 if let Some(status) = statuses.pop_front() {
                     permit.send(FriendEvent::Status(status));
+                } else if profile_changed {
+                    let profile = profile.expect("changed profile exists");
+                    published_profile = Some(profile.clone());
+                    permit.send(FriendEvent::Profile(profile));
                 } else {
                     permit.send(FriendEvent::Snapshot(state.snapshot()));
                     dirty = false;
@@ -317,8 +326,8 @@ async fn run_inner(
                 // Do not request removed relationships still queued from an
                 // earlier full snapshot or refresh.
                 let current: BTreeSet<_> = state.ids().into_iter().collect();
-                requested.retain(|id| current.contains(id));
-                awaiting_personas.retain(|id| current.contains(id));
+                requested.retain(|id| *id == own_id || current.contains(id));
+                awaiting_personas.retain(|id| *id == own_id || current.contains(id));
                 dirty = state.complete;
                 pending_apps = state.missing_apps().difference(&app_attempts).copied().collect();
                 if !had_complete && state.complete {
@@ -405,6 +414,7 @@ async fn run_inner(
             event = refresh.recv(), if refresh_open => {
                 if event.is_some() {
                     requested.extend(state.ids());
+                    requested.insert(own_id);
                     dirty = state.complete;
                     queue_status(&mut statuses, "Refreshing Steam friend names; presence updates remain live");
                 } else {
@@ -415,6 +425,7 @@ async fn run_inner(
                 // Refresh metadata only; presence/game updates are pushed by
                 // the registered social session, not ClientRequestFriendData.
                 requested.extend(state.ids());
+                requested.insert(own_id);
             }
         }
     }

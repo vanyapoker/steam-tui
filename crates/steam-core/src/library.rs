@@ -828,6 +828,12 @@ async fn product_info(
     }
 }
 
+/// Read a game's name from validated, cached public metadata without connecting.
+pub fn cached_app_name(app_id: u32) -> crate::installed::Result<Option<String>> {
+    Ok(cached_app(app_id)?
+        .and_then(|node| node.children.get("common")?.text("name").map(str::to_owned)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
 [package]
 name = "steam-tui"
-version = "0.4.0"
+version = "0.4.1"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
@@ -9,7 +9,7 @@ license = "MIT"
 [dependencies]
 steam-core.workspace = true
 tokio = { workspace = true, features = ["process"] }
-ratatui.workspace = true
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 crossterm.workspace = true
 futures-util.workspace = true
 chrono.workspace = true

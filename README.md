@@ -136,6 +136,8 @@ Controller forwarding needs write access to `/dev/uinput`. Supported pads appear
 
 ## Updates and shader caches
 
+Press `d` for Downloads: current jobs appear above grouped history. Use `f` to filter by type, Left/Right to browse runs, `[` / `]` to lower/raise app priority, and `{` / `}` to scroll details. The selected job offers pause/resume (`p`), retry (`r`) or cancel (`c`) when applicable; `a` cycles its app’s update policy. New runs show local finish dates; older undated jobs remain unknown.
+
 The queue runs while the TUI is open or `jobs run` is active. Closing it retains pending work; there is no background daemon. Background work pauses during games by default. Explicit foreground content downloads can override that pause. Normal launch checks fresh game metadata; an unavailable check requires the explicit installed-version choice.
 
 ```sh

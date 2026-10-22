@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 - 2026-10-22
+
+### Changed
+- Downloads now shows current work above history grouped by game and job type, with dated runs, type filters, stable selection and a fixed, scrollable details panel. Colors distinguish job types and statuses; `[` / `]` adjust app priority, `{` / `}` scroll details, and Left/Right browse historical runs.
+- New download activity records creation, first-start and finish times. Legacy jobs retain unknown dates; pause/resume and recovery preserve start times, and explicit retries reset attempt dates. Live metrics follow the exact active job, and execution controls reflect the selected job’s state.
+- Show your Steam display name and live status at the top of Friends, separated from the scrolling friend list. The footer now keeps application status and key hints; cached profile names are scoped to the selected account.
 
 ## 0.4.0 - 2026-10-21
 

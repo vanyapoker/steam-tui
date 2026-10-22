@@ -86,6 +86,12 @@ pub struct Job {
     pub foreground: bool,
     pub priority: i16,
     pub error: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<i64>,
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    #[serde(default)]
+    pub finished_at: Option<i64>,
 }
 #[derive(Serialize, Deserialize)]
 struct State {
@@ -277,6 +283,10 @@ impl Queue {
                 if foreground {
                     job.foreground = true;
                     if matches!(job.state, JobState::Failed | JobState::Paused) {
+                        if job.state == JobState::Failed {
+                            job.started_at = None;
+                            job.finished_at = None;
+                        }
                         job.state = JobState::Pending;
                         job.error = None;
                     }
@@ -316,6 +326,9 @@ impl Queue {
                 foreground,
                 priority,
                 error: None,
+                created_at: Some(now()),
+                started_at: None,
+                finished_at: None,
             });
             Ok(id)
         })
@@ -335,6 +348,39 @@ impl Queue {
                 .ok_or_else(|| failure("Unknown update job"))?;
             if j.state == JobState::Complete {
                 return Err(failure("Completed jobs cannot be controlled"));
+            }
+            if j.state == target {
+                return Ok(());
+            }
+            let allowed = match target {
+                JobState::Pending => matches!(
+                    j.state,
+                    JobState::Paused | JobState::Failed | JobState::Cancelled
+                ),
+                JobState::Paused => matches!(j.state, JobState::Running | JobState::Pending),
+                JobState::Cancelled => !matches!(j.state, JobState::Complete | JobState::Cancelled),
+                _ => false,
+            };
+            if !allowed {
+                return Err(failure("Invalid job state transition"));
+            }
+            // A cancelled worker may still be unwinding. Do not erase its
+            // cancellation before it has released the runner lease.
+            let _retry_lease = if target == JobState::Pending && j.state == JobState::Cancelled {
+                Some(self.try_lease()?.ok_or_else(|| {
+                    failure("Wait for the active download to stop before retrying a cancelled job")
+                })?)
+            } else {
+                None
+            };
+            if target == JobState::Pending
+                && matches!(j.state, JobState::Failed | JobState::Cancelled)
+            {
+                j.started_at = None;
+                j.finished_at = None;
+            }
+            if target == JobState::Cancelled {
+                j.finished_at = Some(now());
             }
             j.state = target;
             j.error = None;
@@ -397,6 +443,7 @@ impl Queue {
                 .map(|(i, _)| i);
             Ok(choice.map(|i| {
                 s.jobs[i].state = JobState::Running;
+                s.jobs[i].started_at.get_or_insert_with(now);
                 s.jobs[i].clone()
             }))
         })
@@ -408,6 +455,13 @@ impl Queue {
                 .iter_mut()
                 .find(|j| j.id == id)
                 .ok_or_else(|| failure("Unknown completed update job"))?;
+            if matches!(
+                state,
+                JobState::Complete | JobState::Failed | JobState::Cancelled
+            ) && job.state != state
+            {
+                job.finished_at = Some(now());
+            }
             job.state = state;
             job.error = error.map(|e| e.chars().take(4096).collect());
             Ok(())
@@ -472,4 +526,11 @@ fn same_target(a: &Intent, b: &Intent) -> bool {
         && a.steam_root == b.steam_root
         && a.dependency == b.dependency
         && a.shader == b.shader
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }

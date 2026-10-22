@@ -569,7 +569,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
         // Rows (plus borders) Friends or Notifications could use: a line per friend,
         // or the badge line, an optional status line and the feed.
         let feed = 1 + usize::from(!model.notif_status.is_empty()) + model.notifications.len();
-        let wanted = (model.friend_order.len().max(feed) + 2).min(u16::MAX as usize) as u16;
+        let wanted = ((model.friend_order.len() + 2).max(feed) + 2).min(u16::MAX as usize) as u16;
         let areas = areas(
             area,
             model.install_active || model.progress.is_some(),
@@ -580,7 +580,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
             .max(1);
         model.friend_rows = areas
             .friends
-            .map_or(1, |rect| (rect.height.saturating_sub(2) as usize).max(1));
+            .map_or(1, |rect| (rect.height.saturating_sub(4) as usize).max(1));
         // Feed rows: borders, the badge line and an optional status line.
         let status_rows = usize::from(!model.notif_status.is_empty());
         model.notif_rows = areas.notifications.map_or(1, |rect| {
@@ -652,40 +652,7 @@ fn draw_status(frame: &mut Frame<'_>, model: &Model, area: Rect, summary: bool, 
     let right_width = right.width() as u16;
     let columns =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width + 1)]).split(area);
-    let mut left = vec![
-        seg("◆ ", accent()),
-        seg(
-            model.account.as_deref().unwrap_or("not signed in"),
-            accent(),
-        ),
-        sep(),
-    ];
-    if !model.running_games.is_empty() {
-        let names = model
-            .running_games
-            .iter()
-            .map(|id| {
-                model
-                    .games
-                    .iter()
-                    .find(|game| game.app_id == *id)
-                    .map_or_else(|| format!("[{id}]"), |game| game.name.clone())
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        left.push(seg(
-            format!("in game: {names}"),
-            severity_style(Severity::Progress),
-        ));
-        if !model.notifications_live {
-            left.push(seg(" (offline)", error_style()));
-        }
-    } else if model.notifications_live {
-        left.push(seg("● online", severity_style(Severity::Progress)));
-    } else {
-        left.push(seg("○ offline", error_style()));
-    }
-    left.push(sep());
+    let mut left = Vec::new();
     if summary && let Some(text) = progress_summary(model, now) {
         left.push(seg(text, severity_style(Severity::Progress)));
         left.push(sep());
@@ -1160,6 +1127,56 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
     }
 }
 
+fn profile_line(model: &Model, width: usize) -> Line<'static> {
+    use steam_core::friends::Presence;
+    let state = if model.profile_live {
+        model
+            .profile
+            .as_ref()
+            .map_or(Presence::Unknown, |profile| profile.state)
+    } else {
+        Presence::Offline
+    };
+    let style = theme::presence_style(state);
+    let name = model
+        .profile_name
+        .as_deref()
+        .unwrap_or(if model.account.is_some() {
+            "Steam profile"
+        } else {
+            "Not signed in"
+        });
+    let mut line = vec![seg("● ", style), seg(name, bold()), sep()];
+    if !model.running_games.is_empty() {
+        let names = model
+            .running_games
+            .iter()
+            .map(|id| {
+                model
+                    .games
+                    .iter()
+                    .find(|game| game.app_id == *id)
+                    .map_or_else(|| format!("[{id}]"), |game| game.name.clone())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        line.push(seg(format!("in game: {names}"), theme::playing_style()));
+        if !model.profile_live {
+            line.push(seg(" (offline)", dim()));
+        }
+    } else if model.profile_live
+        && let Some(game) = model
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.game.as_deref())
+    {
+        line.push(seg(game, theme::playing_style()));
+    } else {
+        line.push(seg(state.label(), style));
+    }
+    fit_line(line, width)
+}
+
 fn draw_friends(frame: &mut Frame<'_>, model: &Model, area: Rect) {
     let focused = model.focus == Focus::Friends;
     let border = theme::panel_border(Panel::Friends, focused);
@@ -1197,6 +1214,28 @@ fn draw_friends(frame: &mut Frame<'_>, model: &Model, area: Rect) {
     let block = panel_block(border, area.width, left, Vec::new(), bottom);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(profile_line(model, inner.width as usize)),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    if inner.height > 1 {
+        frame.render_widget(
+            Paragraph::new("─".repeat(inner.width as usize)).style(border),
+            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+        );
+    }
+    let inner = Rect::new(
+        inner.x,
+        inner.y.saturating_add(2),
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    if inner.is_empty() {
+        return;
+    }
     if count == 0 {
         let (message, style) = if model.friends.is_empty() {
             (
@@ -2598,75 +2637,341 @@ fn policy_word(policy: steam_core::updates::UpdatePolicy) -> &'static str {
     }
 }
 
+fn download_date(timestamp: Option<i64>, offset: bool) -> String {
+    timestamp
+        .and_then(|t| DateTime::<Utc>::from_timestamp(t, 0))
+        .map(|t| {
+            t.with_timezone(&Local)
+                .format(if offset {
+                    "%Y-%m-%d %H:%M %:z"
+                } else {
+                    "%Y-%m-%d %H:%M"
+                })
+                .to_string()
+        })
+        .unwrap_or_else(|| "Unknown".into())
+}
+
+fn download_state_style(state: steam_core::updates::JobState) -> Style {
+    use steam_core::updates::JobState;
+    match state {
+        JobState::Running => accent(),
+        JobState::Pending => Style::default().fg(Color::LightBlue),
+        JobState::Paused => severity_style(Severity::Warning),
+        JobState::Failed => severity_style(Severity::Error),
+        JobState::Complete => severity_style(Severity::Success),
+        JobState::Cancelled => dim(),
+    }
+}
+
 fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
+    use super::downloads::{Key, Kind};
+    use steam_core::updates::JobState;
     let area = frame.area();
     frame.render_widget(Clear, area);
-    let mut lines = Vec::new();
-    if model.queue_jobs.is_empty() {
-        lines.push(Line::from("No persistent update jobs"));
+    let count = |state| model.queue_jobs.iter().filter(|j| j.state == state).count();
+    let title = format!(
+        "Downloads · {} running · {} queued · {} paused · {} failed · {}",
+        count(JobState::Running),
+        count(JobState::Pending),
+        count(JobState::Paused),
+        count(JobState::Failed),
+        model.queue_filter.map_or("All", Kind::label)
+    );
+    let block = panel_block(
+        theme::panel_border(Panel::Overlay, true),
+        area.width,
+        vec![vec![seg(title, bold())]],
+        Vec::new(),
+        vec![
+            hint("↑↓", "select"),
+            hint("f", "filter"),
+            hint("←→", "runs"),
+            hint("[]", "priority"),
+            hint("{}", "details"),
+            hint("Esc", "close"),
+        ],
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let parts = Layout::vertical([
+        Constraint::Min(4),
+        Constraint::Length((inner.height / 2).clamp(3, 12)),
+    ])
+    .split(inner);
+    let width = inner.width;
+    let mut headers = vec!["Game", "Type", "Status"];
+    let mut widths = vec![
+        Constraint::Min(8),
+        Constraint::Length(12),
+        Constraint::Length(18),
+    ];
+    if width >= 64 {
+        headers.push("Progress");
+        widths.push(Constraint::Length(9));
     }
-    for (index, job) in model.queue_jobs.iter().enumerate().skip(
-        model
-            .queue_selected
-            .saturating_sub(area.height.saturating_sub(5) as usize),
-    ) {
+    if width >= 84 {
+        headers.push("Finished");
+        widths.push(Constraint::Length(16));
+    }
+    if width >= 98 {
+        headers.push("Priority");
+        widths.push(Constraint::Length(8));
+    }
+    if width >= 112 {
+        headers.push("Policy");
+        widths.push(Constraint::Length(9));
+    }
+    if width < 44 {
+        widths[1] = Constraint::Length(7);
+        widths[2] = Constraint::Length(10);
+    }
+    let entries = model.download_entries();
+    // Headings are presentation rows and never participate in navigation.
+    let capacity = parts[0].height.saturating_sub(3).max(1) as usize;
+    let start = model
+        .queue_selected
+        .saturating_sub(capacity.saturating_sub(1));
+    let mut rows = Vec::new();
+    let mut section = None;
+    for (index, entry) in entries.iter().enumerate().skip(start).take(capacity) {
+        let history = matches!(entry.key, Key::History(..));
+        if section != Some(history) {
+            rows.push(
+                Row::new(vec![Cell::from(if history {
+                    "History"
+                } else {
+                    "Current"
+                })])
+                .style(if history {
+                    Style::default()
+                        .fg(Color::LightBlue)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    accent()
+                }),
+            );
+            section = Some(history);
+        }
+        let id = if index == model.queue_selected {
+            model
+                .queue_run
+                .filter(|id| entry.runs.contains(id))
+                .unwrap_or(entry.runs[0])
+        } else {
+            entry.runs[0]
+        };
+        let Some(job) = model.queue_jobs.iter().find(|j| j.id == id) else {
+            continue;
+        };
+        let live = model.queue_active == Some(job.id) && model.install_active;
+        let mut cells = vec![
+            safe(&model.download_name(job.intent.app_id)),
+            Kind::of(job).label().into(),
+            format!(
+                "{}{}",
+                job_state_word(job.state),
+                if history {
+                    format!(
+                        " · {} {}",
+                        entry.runs.len(),
+                        if entry.runs.len() == 1 { "run" } else { "runs" }
+                    )
+                } else {
+                    String::new()
+                }
+            ),
+        ];
+        if width >= 64 {
+            cells.push(if live {
+                model
+                    .progress
+                    .as_ref()
+                    .map(|p| format!("{}%", percent(p)))
+                    .unwrap_or_else(|| "—".into())
+            } else {
+                "—".into()
+            });
+        }
+        if width >= 84 {
+            cells.push(download_date(job.finished_at, false));
+        }
+        if width >= 98 {
+            cells.push(job.priority.to_string());
+        }
+        if width >= 112 {
+            cells.push(
+                policy_word(
+                    model
+                        .queue_settings
+                        .policies
+                        .get(&job.intent.app_id)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+                .into(),
+            );
+        }
+        let kind_style = Style::default().fg(match Kind::of(job) {
+            Kind::Content => Color::LightBlue,
+            Kind::Shaders => Color::Magenta,
+            Kind::Dependency => Color::Yellow,
+        });
+        let cells: Vec<_> = cells
+            .into_iter()
+            .enumerate()
+            .map(|(column, text)| {
+                let style = match column {
+                    0 => Style::default().fg(Color::White),
+                    1 => kind_style,
+                    2 => download_state_style(job.state),
+                    3 if live => accent(),
+                    4 if job.finished_at.is_some() => Style::default().fg(Color::White),
+                    5 if job.priority != 0 => heading(),
+                    6 => Style::default().fg(Color::LightBlue),
+                    _ => dim(),
+                };
+                Cell::from(text).style(style)
+            })
+            .collect();
+        rows.push(Row::new(cells).style(if index == model.queue_selected {
+            highlight()
+        } else {
+            Style::default()
+        }));
+    }
+    if entries.is_empty() {
+        rows.push(Row::new(vec!["No download jobs in this filter"]));
+    }
+    frame.render_widget(
+        Table::new(rows, widths)
+            .header(Row::new(headers).style(accent()))
+            .column_spacing(1),
+        parts[0],
+    );
+    let mut details = Vec::<Line>::new();
+    for error in model
+        .queue_error
+        .iter()
+        .chain(model.queue_load_error.iter())
+    {
+        details.push(Line::styled(safe(error), Style::default().fg(Color::Red)));
+    }
+    if let Some(job) = model.selected_download() {
         let policy = model
             .queue_settings
             .policies
             .get(&job.intent.app_id)
             .copied()
             .unwrap_or_default();
-        let text = format!(
-            "{} #{}  app {}  {}  {}  priority {}  {}{}{}",
-            if index == model.queue_selected {
-                "›"
+        details.push(Line::from(vec![
+            Span::styled(
+                safe(&model.download_name(job.intent.app_id)),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    " · App {} · Job #{} · {} · ",
+                    job.intent.app_id,
+                    job.id,
+                    Kind::of(job).label()
+                ),
+                dim(),
+            ),
+            Span::styled(job_state_word(job.state), download_state_style(job.state)),
+        ]));
+        details.push(Line::from(format!(
+            "Destination: {}",
+            safe(&job.intent.destination.display().to_string())
+        )));
+        details.push(Line::from(format!(
+            "{} · Priority {} · Policy {} · Steam root: {}",
+            if job.foreground {
+                "Foreground"
             } else {
-                " "
+                "Background"
             },
-            job.id,
-            job.intent.app_id,
-            if job.intent.shader {
-                "shaders"
-            } else {
-                "content"
-            },
-            job_state_word(job.state),
             job.priority,
             policy_word(policy),
-            if job.foreground { " · foreground" } else { "" },
-            job.error
-                .as_ref()
-                .map(|e| format!(" · {}", safe(e)))
-                .unwrap_or_default()
-        );
-        lines.push(Line::styled(
-            text,
-            if index == model.queue_selected {
-                Style::default().fg(Color::Cyan)
+            safe(&job.intent.steam_root.display().to_string())
+        )));
+        details.push(Line::from(format!(
+            "Created: {} · Started: {} · Finished: {}",
+            download_date(job.created_at, true),
+            download_date(job.started_at, true),
+            download_date(job.finished_at, true)
+        )));
+        if let Some(dependency) = &job.intent.dependency {
+            details.push(Line::from(format!(
+                "Dependency for App {}",
+                dependency.parent_app_id
+            )));
+        }
+        if model.queue_active == Some(job.id) && model.install_active {
+            if let Some(progress) = &model.progress {
+                let now = Instant::now();
+                let (tracker, remaining) = if progress.phase == InstallPhase::Verifying {
+                    (
+                        &model.verify_speed,
+                        progress
+                            .verify_bytes_total
+                            .saturating_sub(progress.verify_bytes_done),
+                    )
+                } else {
+                    (
+                        &model.speed,
+                        progress
+                            .total_download_bytes
+                            .saturating_sub(progress.downloaded_bytes),
+                    )
+                };
+                details.push(Line::from(format!(
+                    "{} · {}% · Transferred {} · {} · ETA {}",
+                    phase_text(model, progress.phase),
+                    percent(progress),
+                    size(Some(progress.downloaded_bytes)),
+                    rate_text(tracker.speed(now)),
+                    eta_text(tracker.eta(now, remaining))
+                )));
             } else {
-                Style::default()
-            },
-        ));
+                details.push(Line::styled("Live metrics unavailable", dim()));
+            }
+        } else {
+            details.push(Line::styled("Live metrics unavailable", dim()));
+        }
+        if let Some(error) = &job.error {
+            details.push(Line::styled(
+                format!("Error: {}", safe(error)),
+                severity_style(Severity::Error),
+            ));
+        }
+        let controls = match job.state {
+            JobState::Running | JobState::Pending => "p pause · c cancel",
+            JobState::Paused => "p resume · c cancel",
+            JobState::Failed => "r retry · c cancel",
+            JobState::Cancelled => "r retry",
+            JobState::Complete => "",
+        };
+        details.push(Line::from(format!(
+            "{controls}  [ lower / ] higher priority · a app policy"
+        )));
     }
+    let paragraph = Paragraph::new(details).wrap(Wrap { trim: false });
+    let max_scroll = paragraph
+        .line_count(parts[1].width.saturating_sub(2))
+        .saturating_sub(parts[1].height.saturating_sub(2) as usize)
+        .min(u16::MAX as usize) as u16;
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel_block(
-                theme::panel_border(Panel::Overlay, true),
-                area.width,
-                vec![vec![seg("Update queue", bold())]],
-                Vec::new(),
-                vec![
-                    hint("↑↓", "select"),
-                    hint("p", "pause/resume"),
-                    hint("r", "retry"),
-                    hint("c", "cancel"),
-                    hint("+/-", "priority"),
-                    hint("a", "app policy"),
-                    hint("Esc", "close"),
-                ],
-            ))
-            .wrap(Wrap { trim: false }),
-        area,
+        paragraph
+            .block(
+                Block::bordered()
+                    .border_style(accent())
+                    .title("Details · { } scroll"),
+            )
+            .scroll((model.queue_details_offset.min(max_scroll), 0)),
+        parts[1],
     );
 }
 fn content_overlay(frame: &mut Frame<'_>, model: &Model) {
@@ -2833,6 +3138,85 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn download_mock(m: &mut Model) {
+        use super::super::downloads::tests::job;
+        use steam_core::updates::JobState::*;
+        m.queue_view = true;
+        m.queue_jobs = vec![
+            job(1, 570, Complete, Some(1_792_600_000)),
+            job(2, 570, Complete, Some(1_792_700_000)),
+            job(3, 730, Cancelled, None),
+            job(4, 440, Running, None),
+            job(5, 620, Failed, Some(1_792_710_000)),
+            job(6, 400, Pending, None),
+            job(7, 440, Complete, None),
+        ];
+        m.queue_jobs[0].intent.shader = true;
+        m.queue_jobs[1].intent.shader = true;
+        m.queue_jobs[4].error = Some("Download interrupted: connection timed out while requesting a depot chunk. Retry to continue from verified data.".into());
+        m.queue_selected = 1;
+    }
+
+    #[test]
+    fn downloads_render_dates_groups_narrow_details_and_exact_metrics() {
+        let mut m = model();
+        download_mock(&mut m);
+        let wide = render(&mut m, 140, 36);
+        for text in [
+            "Downloads",
+            "Current",
+            "History",
+            "2 runs",
+            "Unknown",
+            "Finished",
+            "Priority",
+            "Policy",
+            "connection timed out",
+        ] {
+            assert!(wide.contains(text), "missing {text}: {wide}");
+        }
+        let narrow = render(&mut m, 60, 30);
+        assert!(!narrow.contains("Progress"));
+        assert!(narrow.contains("Details"));
+        assert!(narrow.contains("Priority")); // All hidden columns remain in details.
+        m.queue_jobs[4].error = Some(format!(
+            "{} END_OF_LONG_ERROR",
+            "A long failure message ".repeat(100)
+        ));
+        let mut reached_end = false;
+        for offset in 0..150 {
+            m.queue_details_offset = offset;
+            if render(&mut m, 60, 30).contains("END_OF_LONG_ERROR") {
+                reached_end = true;
+                break;
+            }
+        }
+        assert!(reached_end);
+        m.queue_details_offset = 0;
+        m.queue_active = Some(4);
+        m.install_active = true;
+        m.progress = Some(InstallProgress {
+            app_id: 440,
+            phase: InstallPhase::Downloading,
+            message: "download".into(),
+            completed_bytes: 50,
+            total_bytes: 100,
+            downloaded_bytes: 50,
+            total_download_bytes: 100,
+            verify_bytes_done: 0,
+            verify_bytes_total: 0,
+        });
+        // The selected failed job is not the active job, even if metadata shares a game.
+        assert!(!render(&mut m, 140, 36).contains("Transferred"));
+        m.queue_selected = 0;
+        assert!(render(&mut m, 140, 36).contains("Transferred"));
+        m.queue_jobs.clear();
+        assert!(render(&mut m, 60, 20).contains("No download jobs"));
+        for (width, height) in [(20, 10), (1, 1), (40, 15)] {
+            render(&mut m, width, height);
+        }
     }
 
     #[test]
@@ -3592,19 +3976,76 @@ mod tests {
     }
 
     #[test]
-    fn status_shows_running_game_independent_of_selection_and_returns_online() {
+    fn own_profile_is_above_friends_and_status_bar_keeps_only_messages() {
+        use steam_core::friends::{Friend, Presence};
         let mut model = model_online();
-        model.account = Some("alice".into());
+        model.account = Some("private-login".into());
+        model.set_profile(Friend {
+            steam_id: 76561198000000099,
+            name: "vanyapoker".into(),
+            state: Presence::Online,
+            game: None,
+        });
+        model.set_friends(
+            (0..30)
+                .map(|id| Friend {
+                    steam_id: id,
+                    name: format!("Friend {id:02}"),
+                    state: Presence::Online,
+                    game: None,
+                })
+                .collect(),
+        );
         model.games.push(game(3124540, "Far Far West", true));
         model.running_games.insert(3124540);
-        assert!(render(&mut model, 150, 40).contains("alice · in game: Far Far West"));
-        model.notifications_live = false;
-        assert!(render(&mut model, 150, 40).contains("Far Far West (offline)"));
-        model.notifications_live = true;
-        model.running_games.clear();
         let screen = render(&mut model, 150, 40);
-        assert!(screen.contains("alice · ● online"));
-        assert!(!screen.contains("in game:"));
+        let rows: Vec<_> = screen.lines().collect();
+        let header = rows
+            .iter()
+            .position(|row| row.contains("vanyapoker"))
+            .unwrap();
+        assert!(rows[header].contains("in game: Far Far West"));
+        assert!(rows[header + 1].contains("────────"));
+        assert!(rows[header + 2].contains("Friend 00"));
+        assert!(!screen.contains("private-login"));
+        assert!(!rows.last().unwrap().contains("vanyapoker"));
+        model.focus = Focus::Friends;
+        model.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        let screen = render(&mut model, 150, 40);
+        assert!(screen.lines().nth(header).unwrap().contains("vanyapoker"));
+        assert!(screen.contains("Friend 29"));
+        assert!(!screen.contains("Friend 00"));
+        assert_eq!(model.selected_friend().unwrap().name, "Friend 29");
+        model.connection_lost("Disconnected");
+        assert!(render(&mut model, 150, 40).contains("Far Far West (offline)"));
+        model.running_games.clear();
+        assert!(render(&mut model, 150, 40).contains("vanyapoker · Offline"));
+        model.set_profile(Friend {
+            steam_id: 76561198000000099,
+            name: "vanyapoker".into(),
+            state: Presence::Away,
+            game: None,
+        });
+        assert!(render(&mut model, 150, 40).contains("vanyapoker · Away"));
+    }
+
+    #[test]
+    fn empty_friends_and_small_layouts_keep_profile_separate() {
+        use steam_core::friends::{Friend, Presence};
+        let mut model = Model::new(true, None);
+        model.account = Some("private-login".into());
+        model.set_profile(Friend {
+            steam_id: 76561198000000099,
+            name: "Very long Steam name 🔥 with Unicode 日本語".into(),
+            state: Presence::Online,
+            game: None,
+        });
+        model.connection_lost("Offline");
+        for (width, height) in [(150, 40), (80, 24), (60, 16), (45, 10), (20, 4)] {
+            let screen = render(&mut model, width, height);
+            assert!(!screen.contains("private-login"));
+            assert!(model.friends.is_empty());
+        }
     }
 
     #[test]
@@ -3847,6 +4288,12 @@ mod tests {
         };
         let mut model = Model::new(false, None);
         model.account = Some("alice".into());
+        model.set_profile(Friend {
+            steam_id: 76_561_198_000_000_099,
+            name: "Alice".into(),
+            state: Presence::Online,
+            game: None,
+        });
         // (id, name, installed, platform, update, GiB, played minutes)
         let library: [(u32, &str, bool, InstallPlatform, bool, u64, u32); 16] = [
             (
@@ -4103,6 +4550,7 @@ mod tests {
             .unwrap_or((132u16, 36u16));
         let mut shared_image = None;
         match std::env::var("STEAM_TUI_SCREENSHOT_VIEW").as_deref() {
+            Ok("downloads") => download_mock(&mut model),
             Ok("conflict") => {
                 use steam_core::cloud::{Conflict, SaveVersion};
                 let game = model.games[2].installed.clone().unwrap();

@@ -2,6 +2,7 @@ mod achievements;
 mod chat;
 mod chat_images;
 mod clipboard;
+mod downloads;
 mod keys;
 mod library_icons;
 mod model;
@@ -108,6 +109,7 @@ impl Drop for Workers {
 // Events are sent a handful of times per session; boxing the snapshots buys nothing.
 #[allow(clippy::large_enum_variant)]
 enum JobEvent {
+    DownloadNames(Vec<(u32, String)>),
     ChatImage(chat_images::Loaded),
     LibraryIcon(library_icons::Loaded),
     LibraryIconEncoded(chat_images::Loaded),
@@ -1002,6 +1004,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
     let mut model = Model::new(offline, connection_error);
     model.account = account.clone();
     if let Some(error) = queue_error {
+        model.queue_load_error = Some(error.clone());
         model
             .warnings
             .push(format!("Persistent updates unavailable: {error}"));
@@ -1042,6 +1045,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
     // Unlike auxiliary workers, an installer must never be aborted in commit.
     let mut install_job: Option<(CancellationToken, PauseGate, JoinHandle<()>)> = None;
     let mut active_queue: Option<u64> = None;
+    let mut queue_name_requests = std::collections::HashSet::new();
     let mut reconnect = Reconnect::new(online);
     // Handlers only record these; they are applied at the top of the loop, when no
     // select! future borrows the workers' channels.
@@ -1073,9 +1077,19 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
     }
     let result: Result<(), Box<dyn Error>> = async {
         loop {
+            model.queue_active = active_queue;
             if model.queue_view && let Some(queue) = &queue {
-                if let Ok(jobs) = queue.jobs() { model.queue_jobs = jobs; model.queue_selected = model.queue_selected.min(model.queue_jobs.len().saturating_sub(1)); }
-                if let Ok(settings) = queue.settings() { model.queue_settings = settings; }
+                model.refresh_downloads(queue);
+                let ids: Vec<_> = model.queue_jobs.iter().map(|j| j.intent.app_id)
+                    .filter(|id| queue_name_requests.insert(*id)).collect();
+                if !ids.is_empty() {
+                    let updates = job_tx.clone();
+                    workers.push(tokio::task::spawn_local(async move {
+                        let names = tokio::task::spawn_blocking(move || ids.into_iter().filter_map(|id|
+                            steam_core::library::cached_app_name(id).ok().flatten().filter(|name| !name.trim().is_empty()).map(|name| (id, name))).collect()).await.unwrap_or_default();
+                        let _ = updates.send(JobEvent::DownloadNames(names)).await;
+                    }));
+                }
             }
             let settings = model.settings_text();
             if settings != saved_settings {
@@ -1395,25 +1409,28 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                     } else if let Some((_, pause, _)) = &install_job { pause.set(model.paused); }
                                 }
                                 Action::Queue => {
-                                    if queue.is_none() { model.status = "Persistent queue unavailable for this account".into(); }
+                                    if queue.is_none() { model.queue_error = Some("Persistent queue unavailable for this account".into()); }
                                 }
                                 Action::QueueControl(id, state) => {
                                     if let Some(queue) = &queue {
-                                        if let Err(e) = queue.control(id, state) { model.status = e.to_string(); }
+                                        model.queue_error = queue.control(id, state).err().map(|e| e.to_string());
+                                        model.refresh_downloads(queue);
                                         if state == steam_core::updates::JobState::Cancelled && pending_update_launch.as_ref().is_some_and(|(job, _, _)| *job == id) { pending_update_launch = None; }
                                     }
                                 }
                                 Action::QueuePriority(app, delta) => {
                                     if let Some(queue) = &queue {
                                         let result = (|| { let mut settings = queue.settings()?; let value = settings.priorities.entry(app).or_default(); *value = value.saturating_add(delta); queue.save_settings(settings) })();
-                                        if let Err(error) = result { model.status = error.to_string(); }
+                                        model.queue_error = result.err().map(|e| e.to_string());
+                                        model.refresh_downloads(queue);
                                     }
                                 }
                                 Action::QueuePolicy(app) => {
                                     if let Some(queue) = &queue {
                                         let result = (|| { let mut settings = queue.settings()?; let policy = settings.policies.entry(app).or_default();
                                             *policy = match *policy { steam_core::updates::UpdatePolicy::Automatic => steam_core::updates::UpdatePolicy::LaunchOnly, steam_core::updates::UpdatePolicy::LaunchOnly => steam_core::updates::UpdatePolicy::Manual, steam_core::updates::UpdatePolicy::Manual => steam_core::updates::UpdatePolicy::Automatic }; queue.save_settings(settings) })();
-                                        if let Err(error) = result { model.status = error.to_string(); }
+                                        model.queue_error = result.err().map(|e| e.to_string());
+                                        model.refresh_downloads(queue);
                                     }
                                 }
                                 Action::ContentProperties => {
@@ -1519,12 +1536,13 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                 Some(event) = live.chat_rx.recv() => model.chat_event(event),
                 update = live.friend_rx.recv(), if live.friends_open => {
                     match update {
+                        Some(FriendEvent::Profile(profile)) => model.set_profile(profile),
                         Some(FriendEvent::Snapshot(friends)) => {
                             trace("friends_loaded");
                             model.set_friends(friends);
                         }
                         Some(FriendEvent::Status(message)) => model.friends_status = message,
-                        None => live.friends_open = false,
+                        None => { live.friends_open = false; model.profile_live = false; },
                     }
                 }
                 Some(update) = live.presence_rx.recv() => {
@@ -1546,6 +1564,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                 _ = tick.tick() => {}
                 Some(update) = job_rx.recv() => {
                     match update {
+                        JobEvent::DownloadNames(names) => model.queue_names.extend(names),
                         JobEvent::ChatImage(loaded) => model.chat.images.loaded(loaded),
                         JobEvent::LibraryIcon(loaded) => model.library_icons.loaded(loaded),
                         JobEvent::LibraryIconEncoded(loaded) => model.library_icons.images.loaded(loaded),
