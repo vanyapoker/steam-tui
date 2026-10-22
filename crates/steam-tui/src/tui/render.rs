@@ -2968,13 +2968,24 @@ fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
         .min(u16::MAX as usize) as u16;
     frame.render_widget(
         paragraph
-            .block(panel_block(
-                accent(),
-                parts[1].width,
-                vec![vec![seg("Details", bold())]],
-                vec![hint("{}", "scroll")],
-                controls,
-            ))
+            .block(
+                panel_block(
+                    accent(),
+                    parts[1].width,
+                    vec![vec![seg("Details", bold())]],
+                    vec![hint("{}", "scroll")],
+                    Vec::new(),
+                )
+                .title_bottom(
+                    title_groups(
+                        controls,
+                        accent(),
+                        parts[1].width.saturating_sub(2) as usize,
+                        Edge::Bottom,
+                    )
+                    .right_aligned(),
+                ),
+            )
             .scroll((model.queue_details_offset.min(max_scroll), 0)),
         parts[1],
     );
