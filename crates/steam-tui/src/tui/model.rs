@@ -269,6 +269,7 @@ pub(super) enum Action {
     CloudSync,
     ResolveCloud,
     News,
+    OpenNewsLink(usize),
     /// Open or reload the achievements viewer of the selected game.
     Achievements,
     StartInstall,
@@ -302,6 +303,9 @@ pub(super) struct NewsView {
     pub name: String,
     pub result: Option<Result<Vec<steam_core::news::NewsItem>, String>>,
     pub offset: u16,
+    pub document: Option<Vec<super::news_content::Block>>,
+    pub links: Vec<(Rect, String)>,
+    pub link_error: Option<String>,
 }
 
 pub(super) struct CloudConflicts {
@@ -323,6 +327,7 @@ pub(super) struct Model {
     /// Hit targets from the last frame, including its filter, scroll and divider.
     pub library_hits: Vec<(Rect, usize)>,
     pub news: Option<NewsView>,
+    pub news_images: super::chat_images::Images,
     pub achievements: Option<super::achievements::AchievementsView>,
     pub cloud_conflicts: Option<CloudConflicts>,
     pub cloud_conflict_queue: VecDeque<CloudConflicts>,
@@ -438,6 +443,7 @@ impl Model {
             library_rows: 1,
             library_hits: Vec::new(),
             news: None,
+            news_images: Default::default(),
             achievements: None,
             cloud_conflicts: None,
             cloud_conflict_queue: VecDeque::new(),
@@ -1108,6 +1114,9 @@ impl Model {
         self.news_request = self.news_request.wrapping_add(1);
         self.news = Some(NewsView {
             request: self.news_request,
+            document: None,
+            links: Vec::new(),
+            link_error: None,
             app_id,
             name,
             result: None,
@@ -1173,6 +1182,16 @@ impl Model {
             match event.kind {
                 MouseEventKind::ScrollDown => news.offset = news.offset.saturating_add(3),
                 MouseEventKind::ScrollUp => news.offset = news.offset.saturating_sub(3),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(index) = news
+                        .links
+                        .iter()
+                        .position(|(rect, _)| rect.contains((event.column, event.row).into()))
+                    {
+                        news.link_error = None;
+                        return Action::OpenNewsLink(index);
+                    }
+                }
                 MouseEventKind::Down(MouseButton::Right) => self.news = None,
                 _ => {}
             }

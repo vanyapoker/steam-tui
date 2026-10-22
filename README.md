@@ -128,7 +128,7 @@ Other overlays close with `Esc`, `q` or the key that opened them, and share `↑
 
 Pins, sorting, the library view and offline-friend visibility are remembered between sessions. Start with `steam-tui tui --offline` to browse installed games without connecting. Cached catalog rows also appear during online startup while fresh account metadata loads. `--account NAME` selects a saved account; login tokens stay in the Secret Service keyring. Online sessions reconnect when the Steam connection drops.
 
-Press `a` to browse a game's achievements, including descriptions, unlock dates and global rarity, with sorting and unlocked/locked filters. Press `n` or right-click a library row to read the game's changelog. The `b` overlay shows backend traffic for diagnosing game compatibility.
+Press `a` to browse a game's achievements, including descriptions, unlock dates and global rarity, with sorting and unlocked/locked filters. Press `n` or right-click a library row to read the game's changelog, with formatted text and inline images. Click a changelog link to open it in your default browser. The `b` overlay shows backend traffic for diagnosing game compatibility.
 
 Before a TUI launch, Steam Cloud downloads current saves when a connection is available. Press `y` for a two-way sync, including uploading local changes; close the game first. Conflicts open the local/cloud comparison shown above, and the replaced copy is backed up.
 

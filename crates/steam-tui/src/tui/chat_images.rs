@@ -28,6 +28,9 @@ pub(super) fn allowed(url: &reqwest::Url) -> bool {
                     | "steamuserimages-a.akamaihd.net"
                     | "cdn.akamai.steamstatic.com"
                     | "shared.fastly.steamstatic.com"
+                    | "clan.fastly.steamstatic.com"
+                    | "clan.akamai.steamstatic.com"
+                    | "cdn.fastly.steamstatic.com"
             )
         )
 }
@@ -106,6 +109,19 @@ impl Images {
         Self {
             capacity: capacity.max(1),
             ..Default::default()
+        }
+    }
+
+    /// Keep unloaded image slots stable, but collapse failures to a single status row.
+    pub fn preview_rows(&self, url: &str, maximum: u16) -> u16 {
+        if self
+            .entries
+            .get(url)
+            .is_some_and(|entry| entry.error.is_some())
+        {
+            1
+        } else {
+            maximum
         }
     }
 
@@ -410,6 +426,26 @@ mod tests {
         assert_eq!(images.pending.len(), CACHE_SIZE);
         images.prepare("https://images.steamusercontent.com/0", (20, 8));
         assert_eq!(images.pending.len(), CACHE_SIZE);
+    }
+
+    #[tokio::test]
+    async fn failed_news_image_slots_collapse_and_cdn_hosts_are_checked() {
+        let mut images = Images::default();
+        let url = "https://example.invalid/not-a-steam-image";
+        images.prepare(url, (80, 12));
+        assert_eq!(images.preview_rows(url, 12), 12);
+        let request = images.pending.pop_front().unwrap();
+        images.active += 1;
+        images.loaded(load(request).await);
+        assert_eq!(images.preview_rows(url, 12), 1);
+        assert_eq!(images.status(url), "Image host unsupported");
+        for url in [
+            "https://clan.fastly.steamstatic.com/images/a.jpg",
+            "https://clan.akamai.steamstatic.com/images/a.gif",
+            "https://cdn.fastly.steamstatic.com/a.jpg",
+        ] {
+            assert!(allowed(&reqwest::Url::parse(url).unwrap()));
+        }
     }
 
     #[tokio::test]

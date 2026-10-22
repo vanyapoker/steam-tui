@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.2 - 2026-10-22
+
+### Added
+- Game changelogs render inline Steam-hosted images with background loading, native terminal graphics and a text-cell fallback. Headings, emphasis, lists, quotes, code and links are formatted; paragraph-wrapped list items keep their bullets, empty editor paragraphs are collapsed and text wraps at word boundaries. Click formatted links to open them in the default browser.
+
 ## 0.4.1 - 2026-10-22
 
 ### Changed

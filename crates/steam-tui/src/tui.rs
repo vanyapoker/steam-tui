@@ -6,6 +6,7 @@ mod downloads;
 mod keys;
 mod library_icons;
 mod model;
+mod news_content;
 mod reconnect;
 mod render;
 mod theme;
@@ -111,6 +112,11 @@ impl Drop for Workers {
 enum JobEvent {
     DownloadNames(Vec<(u32, String)>),
     ChatImage(chat_images::Loaded),
+    NewsImage(chat_images::Loaded),
+    NewsLinkOpened {
+        request: u64,
+        result: Result<(), String>,
+    },
     LibraryIcon(library_icons::Loaded),
     LibraryIconEncoded(chat_images::Loaded),
     Clipboard {
@@ -982,6 +988,27 @@ pub async fn run(account: Option<String>, offline: bool) -> Result<(), Box<dyn E
     LocalSet::new().run_until(run_local(account, offline)).await
 }
 
+async fn open_news_link(raw: &str) -> Result<(), String> {
+    open_news_link_with(raw, std::ffi::OsStr::new("xdg-open")).await
+}
+
+async fn open_news_link_with(raw: &str, opener: &std::ffi::OsStr) -> Result<(), String> {
+    let url = news_content::link_url(raw).ok_or("Only HTTP and HTTPS links can be opened")?;
+    let status = tokio::process::Command::new(opener)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map_err(|error| format!("Could not open browser: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Browser opener failed ({status})"))
+    }
+}
+
 async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn Error>> {
     trace("start");
     // The terminal comes up first; sign-in runs in the background as a `Startup` reconnect.
@@ -1035,6 +1062,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
     model.chat.images.picker = ratatui_image::picker::Picker::from_query_stdio()
         .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
     model.library_icons.images.picker = model.chat.images.picker.clone();
+    model.news_images.picker = model.chat.images.picker.clone();
     let mut terminal: Terminal<CrosstermBackend<Stdout>> =
         Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
@@ -1193,6 +1221,15 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                     let _ = updates.send(JobEvent::ChatImage(loaded)).await;
                 }));
             }
+            while model.news_images.active < 2 {
+                let Some(request) = model.news_images.pending.pop_front() else { break; };
+                model.news_images.active += 1;
+                let updates = job_tx.clone();
+                workers.push(tokio::task::spawn_local(async move {
+                    let loaded = chat_images::load(request).await;
+                    let _ = updates.send(JobEvent::NewsImage(loaded)).await;
+                }));
+            }
             while model.library_icons.active < 2 {
                 let Some(request) = model.library_icons.pending.pop_front() else { break; };
                 model.library_icons.active += 1;
@@ -1230,6 +1267,16 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                             };
                             match action {
                                 Action::Quit => break,
+                                Action::OpenNewsLink(index) => {
+                                    if let Some(news) = &model.news && let Some((_, url)) = news.links.get(index) {
+                                        let (request, url) = (news.request, url.clone());
+                                        let updates = job_tx.clone();
+                                        workers.push(tokio::task::spawn_local(async move {
+                                            let result = open_news_link(&url).await;
+                                            let _ = updates.send(JobEvent::NewsLinkOpened { request, result }).await;
+                                        }));
+                                    }
+                                }
                                 Action::Clipboard(friend) => {
                                     let updates = job_tx.clone();
                                     workers.push(tokio::task::spawn_local(async move {
@@ -1566,6 +1613,10 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                     match update {
                         JobEvent::DownloadNames(names) => model.queue_names.extend(names),
                         JobEvent::ChatImage(loaded) => model.chat.images.loaded(loaded),
+                        JobEvent::NewsImage(loaded) => model.news_images.loaded(loaded),
+                        JobEvent::NewsLinkOpened { request, result } => {
+                            if let Some(news) = &mut model.news && news.request == request { news.link_error = result.err(); }
+                        },
                         JobEvent::LibraryIcon(loaded) => model.library_icons.loaded(loaded),
                         JobEvent::LibraryIconEncoded(loaded) => model.library_icons.images.loaded(loaded),
                         JobEvent::Clipboard { friend, result } => model.clipboard_result(friend, result),
@@ -1598,6 +1649,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                         }
                         JobEvent::News { request, result } => {
                             if let Some(news) = &mut model.news && news.request == request {
+                                news.document = None;
                                 news.result = Some(result);
                             }
                         }
@@ -1968,4 +2020,46 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
         }
     }
     result
+}
+
+#[cfg(test)]
+mod news_link_tests {
+    use super::*;
+    #[tokio::test]
+    async fn browser_opener_gets_one_url_argument_and_reports_failures_without_opening_windows() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("steam-tui-news-opener-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let opener = root.join("fake-opener");
+        std::fs::write(&opener, "#!/bin/sh\nprintf '%s\n' \"$@\" > \"$0.args\"\n").unwrap();
+        std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let url = "https://example.com/patch?a=1&b=2";
+        open_news_link_with(url, opener.as_os_str()).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("fake-opener.args")).unwrap(),
+            format!("{url}\n")
+        );
+        std::fs::remove_file(root.join("fake-opener.args")).unwrap();
+        assert!(
+            open_news_link_with("steam://run/440", opener.as_os_str())
+                .await
+                .is_err()
+        );
+        assert!(!root.join("fake-opener.args").exists());
+        std::fs::write(&opener, "#!/bin/sh\nexit 3\n").unwrap();
+        assert!(
+            open_news_link_with(url, opener.as_os_str())
+                .await
+                .unwrap_err()
+                .contains("failed")
+        );
+        assert!(
+            open_news_link_with(url, root.join("missing").as_os_str())
+                .await
+                .unwrap_err()
+                .contains("Could not open browser")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

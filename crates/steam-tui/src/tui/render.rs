@@ -2123,136 +2123,172 @@ fn backend_overlay(frame: &mut Frame<'_>, model: &mut Model) {
     );
 }
 
-/// Keep unknown bracketed text (e.g. version numbers), strip presentation tags.
-fn news_text(text: &str) -> String {
-    let mut output = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(['[', '<']) {
-        output.push_str(&rest[..start]);
-        rest = &rest[start..];
-        let end_char = if rest.starts_with('[') { ']' } else { '>' };
-        let Some(end) = rest.find(end_char) else {
-            break;
-        };
-        let tag = rest[1..end].trim().to_ascii_lowercase();
-        let name = tag
-            .trim_start_matches('/')
-            .split(['=', ' ', '/'])
-            .next()
-            .unwrap_or("");
-        let known = matches!(
-            name,
-            "b" | "i"
-                | "u"
-                | "s"
-                | "h1"
-                | "h2"
-                | "h3"
-                | "p"
-                | "br"
-                | "ul"
-                | "ol"
-                | "li"
-                | "list"
-                | "*"
-                | "url"
-                | "a"
-                | "img"
-                | "previewyoutube"
-                | "hr"
-                | "table"
-                | "tr"
-                | "td"
-                | "th"
-                | "quote"
-                | "blockquote"
-                | "code"
-        );
-        if known {
-            if matches!(
-                name,
-                "h1" | "h2" | "h3" | "p" | "br" | "li" | "*" | "list" | "ul" | "ol" | "hr" | "tr"
-            ) {
-                output.push('\n');
-            }
-            if matches!(name, "li" | "*") && !tag.starts_with('/') {
-                output.push_str("• ");
-            }
-        } else {
-            output.push_str(&rest[..=end]);
-        }
-        rest = &rest[end + 1..];
-    }
-    output.push_str(rest);
-    output
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
-        .lines()
-        .map(safe)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn news_overlay(frame: &mut Frame<'_>, model: &mut Model) {
+    use super::news_content::{self, Block as Content};
     let news = model.news.as_mut().expect("news view open");
+    news.links.clear();
     let area = modal_area(frame.area(), 100, 36);
-    let (width, height) = (area.width, area.height);
     open_modal(frame, area);
-    let logical = match &news.result {
-        None => vec![seg("Loading developer updates…", dim())],
-        Some(Err(error)) => vec![seg(
-            format!("Could not load updates: {}", safe(error)),
-            error_style(),
-        )],
-        Some(Ok(items)) if items.is_empty() => vec![seg(
-            "No developer announcements available for this game.",
-            dim(),
-        )],
-        Some(Ok(items)) => {
-            let mut lines = Vec::new();
-            for item in items {
-                lines.push(seg(
-                    format!("{}  {}", last_played(Some(item.date)), safe(&item.title)),
-                    bold(),
-                ));
-                lines.push(seg(news_text(&item.contents), Style::default()));
-                lines.push(seg(safe(&item.url), dim()));
-                lines.push(seg("", dim()));
+    let block = panel_block(
+        theme::panel_border(Panel::Overlay, true),
+        area.width,
+        vec![vec![seg(format!("{} · Updates", safe(&news.name)), bold())]],
+        news.link_error
+            .as_ref()
+            .map(|error| vec![seg(safe(error), error_style())])
+            .into_iter()
+            .collect(),
+        vec![
+            hint("click", "open link"),
+            hint("↑↓", "scroll"),
+            hint("PgUp/PgDn", "page"),
+            hint("Esc", "close"),
+        ],
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.is_empty() {
+        return;
+    }
+    if news.document.is_none() {
+        let document = match &news.result {
+            None => vec![Content::text(Line::styled(
+                "Loading developer updates…",
+                dim(),
+            ))],
+            Some(Err(error)) => vec![Content::text(Line::styled(
+                format!("Could not load updates: {}", safe(error)),
+                error_style(),
+            ))],
+            Some(Ok(items)) if items.is_empty() => vec![Content::text(Line::styled(
+                "No developer announcements available for this game.",
+                dim(),
+            ))],
+            Some(Ok(items)) => {
+                let mut document = Vec::new();
+                for item in items {
+                    if !document.is_empty() {
+                        document.push(Content::text(Line::default()));
+                    }
+                    document.push(Content::text(Line::from(vec![
+                        Span::styled(format!("{}  ", last_played(Some(item.date))), dim()),
+                        Span::styled(safe(&item.title), accent()),
+                    ])));
+                    document.push(Content::text(Line::default()));
+                    let mut repeated_title = false;
+                    for content in news_content::parse(&item.contents) {
+                        if let Content::Text(line) = &content {
+                            if !repeated_title
+                                && line.to_string().trim() == item.title.trim()
+                                && line
+                                    .spans
+                                    .iter()
+                                    .any(|span| span.style.fg == Some(Color::Yellow))
+                            {
+                                repeated_title = true;
+                                continue;
+                            }
+                            if line.spans.is_empty()
+                                && matches!(document.last(), Some(Content::Text(previous)) if previous.spans.is_empty())
+                            {
+                                continue;
+                            }
+                        }
+                        document.push(content);
+                    }
+                    document.push(Content::text(Line::styled(safe(&item.url), dim())));
+                }
+                document
             }
-            lines
-        }
-    };
-    let mut lines = Vec::new();
-    for (text, style) in logical {
-        for line in text.lines().chain(std::iter::once("")) {
-            lines.extend(wrap_segments(
-                &[seg(line, style)],
-                width.saturating_sub(2).max(1) as usize,
-            ));
+        };
+        // Loading is ephemeral; the response is cached after it arrives.
+        if news.result.is_some() {
+            news.document = Some(document);
+        } else {
+            frame.render_widget(
+                Paragraph::new("Loading developer updates…").style(dim()),
+                inner,
+            );
+            return;
         }
     }
+    let document = news.document.as_ref().expect("parsed news document");
+    let preview_size = (inner.width.min(80), inner.height.clamp(1, 12));
+    let heights: Vec<_> = document
+        .iter()
+        .map(|content| match content {
+            Content::Text(line) => Paragraph::new(line.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(inner.width)
+                .max(1),
+            Content::Image(url) => usize::from(model.news_images.preview_rows(url, preview_size.1)),
+        })
+        .collect();
+    let total: usize = heights.iter().sum();
     news.offset = news.offset.min(
-        lines
-            .len()
-            .saturating_sub(height.saturating_sub(2) as usize)
+        total
+            .saturating_sub(usize::from(inner.height))
             .min(u16::MAX as usize) as u16,
     );
-    frame.render_widget(
-        Paragraph::new(lines)
-            .scroll((news.offset, 0))
-            .block(panel_block(
-                theme::panel_border(Panel::Overlay, true),
-                width,
-                vec![vec![seg(format!("{} · Updates", safe(&news.name)), bold())]],
-                Vec::new(),
-                vec![hint("↑↓", "scroll"), hint("Esc", "close")],
-            )),
-        area,
-    );
+    let start = usize::from(news.offset);
+    let mut row = 0;
+    for (content, height) in document.iter().zip(heights) {
+        let top = row.max(start);
+        let bottom = (row + height).min(start + usize::from(inner.height));
+        if top < bottom {
+            let visible = Rect::new(
+                inner.x,
+                inner.y + (top - start) as u16,
+                inner.width,
+                (bottom - top) as u16,
+            );
+            match content {
+                Content::Text(line) => {
+                    let skip = (top - row) as u16;
+                    news.links.extend(line.link_hits(visible, skip));
+                    frame.render_widget(
+                        Paragraph::new(line.clone())
+                            .wrap(Wrap { trim: false })
+                            .scroll((skip, 0)),
+                        visible,
+                    );
+                }
+                Content::Image(url) => {
+                    model.news_images.prepare(url, preview_size);
+                    let image_area = Rect {
+                        width: preview_size.0,
+                        ..visible
+                    };
+                    if !model.news_images.render(
+                        url,
+                        image_area,
+                        (top - row) as u16,
+                        preview_size.1,
+                        frame.buffer_mut(),
+                    ) {
+                        frame.render_widget(
+                            Paragraph::new(model.news_images.status(url)).style(dim()),
+                            image_area,
+                        );
+                    }
+                }
+            }
+        }
+        row += height;
+        if row >= start + usize::from(inner.height) {
+            break;
+        }
+    }
+    if total > usize::from(inner.height) {
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None),
+            area,
+            &mut ScrollbarState::new(total.saturating_sub(usize::from(inner.height)))
+                .position(start),
+        );
+    }
 }
 
 /// Rarity tiers colour the percentage of players who unlocked an achievement.
@@ -3302,12 +3338,17 @@ mod tests {
             date: 1700000000,
             url: "https://example.invalid".into(),
             contents: format!(
-                "[h1]Changes[/h1]\n[list][*]Fixed &amp; improved[/list]\n{}",
+                "[h1]Patch title[/h1][h2]Changes[/h2]\n[list][*]Fixed &amp; improved[/list]\n{}",
                 "More details\n".repeat(100)
             ),
         }]));
         let output = render(&mut model, 80, 24);
         assert!(output.contains("Patch title"));
+        assert_eq!(
+            output.matches("Patch title").count(),
+            1,
+            "the article title must not repeat its heading"
+        );
         assert!(output.contains("Fixed & improved"));
         assert!(!output.contains("[h1]"));
         model.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
@@ -3330,7 +3371,141 @@ mod tests {
         model.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         assert!(model.news.is_none());
         assert_eq!(model.search, "n");
-        assert_eq!(news_text("[beta] [b]ok[/b]\nnext\u{1b}"), "[beta] ok\nnext");
+    }
+
+    #[test]
+    fn news_links_open_exact_visible_targets_after_wrapping_scrolling_and_resize() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut m = model();
+        m.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        m.news.as_mut().unwrap().result = Some(Ok(vec![steam_core::news::NewsItem {
+            title: "Clickable patch notes".into(), date: 1_700_000_000, url: "https://example.com/article".into(),
+            contents: format!("[url=https://example.com/one]Read [b]矿工 notes[/b] and the detailed changes in this announcement[/url] and [url=https://example.com/two]Read notes[/url]{}[p][dynamiclink href=\"https://youtu.be/video\"][/dynamiclink][/p]", "[list][*][p]Cluster Grenade nerfed: Explosive radius 0% → -20%[/p][/*][*][p]Diffractor prism nerfed: Weapon Range +30% → +10%[/p][/*][/list]".repeat(20)),
+        }]));
+        let selected = m.selected;
+        for (width, height) in [(110, 40), (60, 20)] {
+            m.news.as_mut().unwrap().offset = 0;
+            let screen = render(&mut m, width, height);
+            assert!(
+                !screen
+                    .lines()
+                    .any(|line| line.trim_matches(['│', ' ']).trim() == "•"),
+                "{screen}"
+            );
+            let links = m.news.as_ref().unwrap().links.clone();
+            for url in ["https://example.com/one", "https://example.com/two"] {
+                assert!(links.iter().any(|(_, target)| target == url));
+            }
+            for (index, (rect, _)) in links.iter().enumerate() {
+                assert_eq!(
+                    m.mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: rect.x,
+                        row: rect.y,
+                        modifiers: KeyModifiers::NONE
+                    }),
+                    Action::OpenNewsLink(index)
+                );
+            }
+            m.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+            render(&mut m, width, height);
+            let current = &m.news.as_ref().unwrap().links;
+            assert!(
+                current
+                    .iter()
+                    .any(|(_, url)| url == "https://example.com/article")
+            );
+            assert!(
+                !current
+                    .iter()
+                    .any(|(_, url)| url.ends_with("/one") || url.ends_with("/two"))
+            );
+            let old = links
+                .iter()
+                .map(|(rect, _)| *rect)
+                .find(|rect| {
+                    !current
+                        .iter()
+                        .any(|(new, _)| new.contains((rect.x, rect.y).into()))
+                })
+                .unwrap();
+            assert_eq!(
+                m.mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: old.x,
+                    row: old.y,
+                    modifiers: KeyModifiers::NONE
+                }),
+                Action::None
+            );
+        }
+        assert_eq!(m.selected, selected);
+    }
+
+    #[tokio::test]
+    async fn news_images_load_only_in_view_and_stay_inside_the_scrolling_panel() {
+        let mut model = model();
+        model.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let first = "https://images.steamusercontent.com/news/first.png";
+        let second = "https://images.steamusercontent.com/news/second.png";
+        model.news.as_mut().unwrap().result = Some(Ok(vec![steam_core::news::NewsItem {
+            title: "Patch with images".into(),
+            date: 1_700_000_000,
+            url: "https://example.invalid/patch".into(),
+            contents: format!(
+                "[h2]New class[/h2][p]Read this readable announcement with wrapped words.[/p][img]{first}[/img]{}[img]{second}[/img]",
+                "[p]More news below the image.[/p]".repeat(45)
+            ),
+        }]));
+        let screen = render(&mut model, 110, 40);
+        assert!(screen.contains("New class"));
+        assert!(screen.contains("Loading image"));
+        assert_eq!(
+            model.news_images.pending.len(),
+            1,
+            "off-screen images must not load"
+        );
+        let source = std::sync::Arc::new(image::DynamicImage::ImageRgb8(
+            image::RgbImage::from_pixel(160, 80, image::Rgb([210, 40, 90])),
+        ));
+        model.news_images.prepare_local(first, source, (80, 12));
+        let request = model.news_images.pending.pop_front().unwrap();
+        model.news_images.active += 1;
+        model
+            .news_images
+            .loaded(super::super::chat_images::load(request).await);
+        let mut terminal = Terminal::new(TestBackend::new(110, 40)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut model)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer.content.iter().any(
+                |cell| cell.fg == Color::Rgb(210, 40, 90) || cell.bg == Color::Rgb(210, 40, 90)
+            )
+        );
+        model.news.as_mut().unwrap().offset = 12;
+        terminal.draw(|frame| draw(frame, &mut model)).unwrap();
+        let bounds = modal_area(Rect::new(0, 0, 110, 40), 100, 36);
+        let buffer = terminal.backend().buffer();
+        for y in 0..40 {
+            for x in 0..110 {
+                if x <= bounds.x
+                    || x >= bounds.right() - 1
+                    || y <= bounds.y
+                    || y >= bounds.bottom() - 1
+                {
+                    let cell = &buffer[(x, y)];
+                    assert_ne!(cell.fg, Color::Rgb(210, 40, 90));
+                    assert_ne!(cell.bg, Color::Rgb(210, 40, 90));
+                }
+            }
+        }
+        assert!(model.news_images.pending.is_empty());
+        model.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        render(&mut model, 110, 40);
+        assert_eq!(model.news_images.pending.len(), 1);
+        for (width, height) in [(40, 15), (20, 10), (1, 1)] {
+            render(&mut model, width, height);
+        }
     }
 
     #[test]
@@ -4556,7 +4731,7 @@ mod tests {
         });
         model.status = "Library refreshed: 16 games".into();
 
-        // Optional: STEAM_TUI_SCREENSHOT_SIZE=WxH and STEAM_TUI_SCREENSHOT_VIEW=chat|conflict|filtered
+        // Optional: STEAM_TUI_SCREENSHOT_SIZE=WxH and STEAM_TUI_SCREENSHOT_VIEW=chat|conflict|filtered|downloads|news|news-lists
         let (width, height) = std::env::var("STEAM_TUI_SCREENSHOT_SIZE")
             .ok()
             .and_then(|size| {
@@ -4567,6 +4742,33 @@ mod tests {
         let mut shared_image = None;
         match std::env::var("STEAM_TUI_SCREENSHOT_VIEW").as_deref() {
             Ok("downloads") => download_mock(&mut model),
+            Ok("news") | Ok("news-lists") => {
+                model.install_active = false;
+                model.news = Some(super::super::model::NewsView {
+                    request: 1, app_id: 2321470, name: "Deep Rock Galactic: Survivor".into(), offset: 0, document: None, links: Vec::new(), link_error: None,
+                    result: Some(Ok(vec![steam_core::news::NewsItem {
+                        title: "Coming Soon: Knockout Expansion".into(), date: 1_790_726_400,
+                        url: "https://store.steampowered.com/news/app/2321470".into(),
+                        contents: r#"[p][/p][p][dynamiclink href="https://youtu.be/OAr7WlfFDx4"][/dynamiclink][/p][p]Ever wanted to punch that glyphid who messed up your perfect dive?[/p][p]Well with the [b]Knockout expansion[/b], you won’t have to wonder, and you can get your revenge![/p][p][/p][h2]NEW CLASS: BRAWLER[/h2][p]An up close and personal melee focused class, ready to brawl, maul and haul with lots of new close range weaponry![/p][p][img src="{STEAM_CLAN_IMAGE}/43726543/929cd3e5264aee296adc3eacd7d76d9999a795e0.jpg"][/img][/p][p][/p][h2]NEW BIOME: SANDBLASTED CORRIDORS[/h2][list][*]Dry and inhospitable, but rich in resources[*]A new environment for your next expedition[/list]"#.into(),
+                    }])),
+                });
+                if std::env::var("STEAM_TUI_SCREENSHOT_VIEW").as_deref() == Ok("news-lists") {
+                    model.news.as_mut().unwrap().result = Some(Ok(vec![steam_core::news::NewsItem {
+                        title: "1.1 Patch 2".into(), date: 1_790_726_400,
+                        url: "https://store.steampowered.com/news/app/2321470".into(),
+                        contents: concat!(
+                            "[p][b]Overclocks:[/b][/p][list]",
+                            "[*][p]Cluster Grenade nerfed: Explosive radius 0% → -20%[/p][/*]",
+                            "[*][p]Diffractor prism nerfed: Weapon Range +30% → +10%[/p][/*]",
+                            "[*][p]Fan of Axes buffed: Potency 0% → +20%[/p][/*]",
+                            "[*][p]Impact Punch buffed: Damage 60% → 75%[/p][/*]",
+                            "[*][p]A little more oomph! buffed: Damage 15% → 25%[/p][/*]",
+                            "[*][p]Overheat buffed: Damage -35% → -30%[/p][/*]",
+                            "[/list][p][url=https://store.steampowered.com/news/app/2321470]Read the full patch notes[/url][/p]",
+                        ).into(),
+                    }]));
+                }
+            }
             Ok("conflict") => {
                 use steam_core::cloud::{Conflict, SaveVersion};
                 let game = model.games[2].installed.clone().unwrap();
@@ -4684,6 +4886,13 @@ mod tests {
         while let Some(request) = model.library_icons.images.pending.pop_front() {
             let loaded = super::super::chat_images::load(request).await;
             model.library_icons.images.loaded(loaded);
+        }
+        if std::env::var_os("STEAM_TUI_SCREENSHOT_DOWNLOAD_NEWS").is_some() {
+            while let Some(request) = model.news_images.pending.pop_front() {
+                model.news_images.active += 1;
+                let loaded = super::super::chat_images::load(request).await;
+                model.news_images.loaded(loaded);
+            }
         }
         while let Some(request) = model.chat.images.pending.pop_front() {
             let loaded = super::super::chat_images::load(request).await;
