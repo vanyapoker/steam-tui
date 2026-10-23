@@ -227,7 +227,12 @@ unsafe extern "C" fn member_by_index(_this: *mut c_void, lobby: u64, index: i32)
 unsafe extern "C" fn get_data(_this: *mut c_void, lobby: u64, key: *const c_char) -> *const c_char {
     let key = text(key);
     let value = info(lobby)
-        .and_then(|l| l.data.into_iter().find(|(k, _)| *k == key).map(|(_, v)| v))
+        .and_then(|l| {
+            l.data
+                .into_iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+                .map(|(_, v)| v)
+        })
         .unwrap_or_default();
     keep(&value)
 }
@@ -293,7 +298,12 @@ unsafe extern "C" fn member_data(
     let key = text(key);
     let value = info(lobby)
         .and_then(|l| l.members.into_iter().find(|m| m.steam_id == user))
-        .and_then(|m| m.data.into_iter().find(|(k, _)| *k == key).map(|(_, v)| v))
+        .and_then(|m| {
+            m.data
+                .into_iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+                .map(|(_, v)| v)
+        })
         .unwrap_or_default();
     keep(&value)
 }

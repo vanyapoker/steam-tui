@@ -941,7 +941,7 @@ fn ip_message(ip: std::net::IpAddr) -> steam_vent_proto_steam::steammessages_bas
 }
 
 fn set_pair(pairs: &mut Vec<(String, String)>, key: String, value: Option<String>) {
-    pairs.retain(|(k, _)| *k != key);
+    pairs.retain(|(k, _)| !k.eq_ignore_ascii_case(&key));
     if let Some(value) = value {
         pairs.push((key, value));
     }
@@ -1182,5 +1182,10 @@ mod tests {
         assert_eq!(pairs, vec![("a".to_string(), "2".to_string())]);
         set_pair(&mut pairs, "a".into(), None);
         assert!(pairs.is_empty());
+        // Keys are case-insensitive like Valve's KeyValues: Steam returns
+        // "buildid" for a key games set and read as "buildID".
+        set_pair(&mut pairs, "buildid".into(), Some("1".into()));
+        set_pair(&mut pairs, "buildID".into(), Some("2".into()));
+        assert_eq!(pairs, vec![("buildID".to_string(), "2".to_string())]);
     }
 }
