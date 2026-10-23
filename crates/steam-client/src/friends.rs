@@ -1,7 +1,10 @@
 // SteamFriends017 slot order from Valve public headers.
 use super::*;
-use std::ffi::CString;
-use steam_ipc::{Operation, Response};
+use std::collections::{HashMap, VecDeque};
+use std::ffi::{CStr, CString};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use steam_ipc::{FriendInfo, FriendsOp, Operation, Response};
 
 fn persona() -> &'static (CString, Option<i32>) {
     static PERSONA: OnceLock<(CString, Option<i32>)> = OnceLock::new();
@@ -20,6 +23,133 @@ fn persona() -> &'static (CString, Option<i32>) {
         _ => EMPTY.get_or_init(|| (CString::default(), None)),
     }
 }
+/// Friends snapshot: games walk GetFriendByIndex every frame. Changes arrive
+/// as PersonaStateChange_t / FriendRichPresenceUpdate_t, which drop it.
+static SOCIAL: Mutex<Option<(Instant, Arc<Vec<FriendInfo>>)>> = Mutex::new(None);
+static USERS: UserCache = Mutex::new(None);
+const PERSONA_STATE_CHANGE: i32 = 304;
+const FRIEND_RICH_PRESENCE_UPDATE: i32 = 336;
+
+pub(super) fn observe(id: i32) {
+    if id == PERSONA_STATE_CHANGE || id == FRIEND_RICH_PRESENCE_UPDATE {
+        *SOCIAL.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *USERS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+fn social() -> Arc<Vec<FriendInfo>> {
+    if let Some((at, friends)) = SOCIAL.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && at.elapsed() < Duration::from_secs(1)
+    {
+        return friends.clone();
+    }
+    // Not holding the lock across the round trip keeps the callback thread's
+    // invalidation from waiting on it.
+    let friends = match bridge::request(current_app_id(), Operation::Friends(FriendsOp::Snapshot)) {
+        Ok(Response::Friends(friends)) => Arc::new(friends),
+        _ => return Arc::default(),
+    };
+    *SOCIAL.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), friends.clone()));
+    friends
+}
+fn own_id() -> u64 {
+    bridge::identity(current_app_id()).0
+}
+/// Recent `FriendsOp::User` answers, including "not known".
+type UserCache = Mutex<Option<HashMap<u64, (Instant, Option<FriendInfo>)>>>;
+/// A user with a relationship, else one the backend knows (lobby members,
+/// RequestUserInformation answers). Never triggers a fetch.
+fn known_user(id: u64) -> Option<FriendInfo> {
+    if let Some(friend) = social().iter().find(|f| f.steam_id == id) {
+        return Some(friend.clone());
+    }
+    if let Some((at, user)) = USERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|users| users.get(&id))
+        && at.elapsed() < Duration::from_secs(1)
+    {
+        return user.clone();
+    }
+    let user = match bridge::request(
+        current_app_id(),
+        Operation::Friends(FriendsOp::User {
+            steam_id: id,
+            request: false,
+        }),
+    ) {
+        Ok(Response::User(user)) => user,
+        _ => None,
+    };
+    let mut users = USERS.lock().unwrap_or_else(|e| e.into_inner());
+    let users = users.get_or_insert_with(HashMap::new);
+    if users.len() >= 4096 {
+        users.clear();
+    }
+    users.insert(id, (Instant::now(), user.clone()));
+    user
+}
+/// Stable C strings per (user, field): a pointer stays valid until that value
+/// changes, and replaced values are kept a while longer, like Valve's client.
+fn intern(user: u64, field: &str, value: &str) -> *const c_char {
+    static STRINGS: Mutex<Option<HashMap<(u64, String), CString>>> = Mutex::new(None);
+    static RETIRED: Mutex<VecDeque<CString>> = Mutex::new(VecDeque::new());
+    let mut strings = STRINGS.lock().unwrap_or_else(|e| e.into_inner());
+    let strings = strings.get_or_insert_with(HashMap::new);
+    let key = (user, field.to_owned());
+    if let Some(existing) = strings.get(&key)
+        && existing.as_bytes() == value.as_bytes()
+    {
+        return existing.as_ptr();
+    }
+    let owned = CString::new(value.replace('\0', "")).unwrap_or_default();
+    if let Some(old) = strings.insert(key.clone(), owned) {
+        let mut retired = RETIRED.lock().unwrap_or_else(|e| e.into_inner());
+        if retired.len() >= 1024 {
+            retired.pop_front();
+        }
+        retired.push_back(old);
+    }
+    strings.get(&key).map_or(c"".as_ptr(), |c| c.as_ptr())
+}
+/// EFriendFlags bit for an EFriendRelationship.
+fn relationship_flag(relationship: i32) -> i32 {
+    match relationship {
+        1 => 0x01,  // Blocked
+        2 => 0x02,  // FriendshipRequested (they asked us)
+        3 => 0x04,  // Immediate
+        4 => 0x80,  // RequestingFriendship (we asked them)
+        5 => 0x200, // Ignored
+        6 => 0x400, // IgnoredFriend
+        _ => 0,
+    }
+}
+fn with_flags(flags: i32) -> Vec<FriendInfo> {
+    social()
+        .iter()
+        .filter(|f| relationship_flag(f.relationship) & flags != 0)
+        .cloned()
+        .collect()
+}
+/// This account's rich presence as last set by the game.
+static OWN_RICH_PRESENCE: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+fn rich_presence(id: u64) -> Vec<(String, String)> {
+    if id == own_id() && id != 0 {
+        return OWN_RICH_PRESENCE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+    }
+    known_user(id).map(|u| u.rich_presence).unwrap_or_default()
+}
+/// SetPlayedWith records, as Valve's client keeps them locally: user, time, app.
+static COPLAY: Mutex<Vec<(u64, u32, u32)>> = Mutex::new(Vec::new());
+fn unix_now() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as u32)
+}
 unsafe extern "C" fn name(_this: *mut c_void) -> *const c_char {
     trace("friends.GetPersonaName");
     persona().0.as_ptr()
@@ -34,34 +164,50 @@ unsafe extern "C" fn slot_1() -> u64 {
     trace("friends.SetPersonaName (not supported)");
     0
 }
-unsafe extern "C" fn slot_3() -> i32 {
-    trace("friends.GetFriendCount (no social graph)");
-    0
+unsafe extern "C" fn slot_3(_this: *mut c_void, flags: i32) -> i32 {
+    with_flags(flags).len() as i32
 }
-unsafe extern "C" fn slot_4() -> u64 {
-    trace("friends.GetFriendByIndex (no social graph)");
-    0
+unsafe extern "C" fn slot_4(_this: *mut c_void, index: i32, flags: i32) -> u64 {
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| with_flags(flags).get(i).map(|f| f.steam_id))
+        .unwrap_or(0)
 }
-unsafe extern "C" fn slot_5() -> i32 {
-    trace("friends.GetFriendRelationship (no social graph)");
-    0
+unsafe extern "C" fn slot_5(_this: *mut c_void, id: u64) -> i32 {
+    social()
+        .iter()
+        .find(|f| f.steam_id == id)
+        .map_or(0, |f| f.relationship)
 }
-unsafe extern "C" fn slot_6() -> i32 {
-    trace("friends.GetFriendPersonaState (no social graph)");
-    0
+unsafe extern "C" fn slot_6(_this: *mut c_void, id: u64) -> i32 {
+    known_user(id).map_or(0, |u| u.state)
 }
 unsafe extern "C" fn slot_7(_this: *mut c_void, id: u64) -> *const c_char {
-    trace("friends.GetFriendPersonaName");
-    let (own, _) = bridge::identity(current_app_id());
+    let own = own_id();
     if id == own && own != 0 {
-        persona().0.as_ptr()
-    } else {
-        c"[unknown]".as_ptr()
+        return persona().0.as_ptr();
+    }
+    match known_user(id).filter(|u| !u.name.is_empty()) {
+        Some(user) => intern(id, "name", &user.name),
+        None => c"[unknown]".as_ptr(),
     }
 }
-unsafe extern "C" fn slot_8() -> bool {
-    trace("friends.GetFriendGamePlayed (no social graph)");
-    false
+// FriendGameInfo_t { u64 gameID; u32 ip; u16 port; u16 queryPort; u64 lobby } (24 bytes).
+unsafe extern "C" fn slot_8(_this: *mut c_void, id: u64, info: *mut u8) -> bool {
+    let Some(user) = known_user(id).filter(|u| u.game_id != 0) else {
+        return false;
+    };
+    if !info.is_null() {
+        let mut block = [0u8; 24];
+        block[..8].copy_from_slice(&user.game_id.to_le_bytes());
+        block[8..12].copy_from_slice(&user.game_ip.to_le_bytes());
+        block[12..14].copy_from_slice(&user.game_port.to_le_bytes());
+        block[14..16].copy_from_slice(&user.query_port.to_le_bytes());
+        block[16..].copy_from_slice(&user.lobby.to_le_bytes());
+        // SAFETY: the caller supplied a FriendGameInfo_t.
+        unsafe { ptr::copy_nonoverlapping(block.as_ptr(), info, block.len()) };
+    }
+    true
 }
 unsafe extern "C" fn slot_9() -> *const c_char {
     trace("friends.GetFriendPersonaNameHistory (not supported)");
@@ -94,9 +240,10 @@ unsafe extern "C" fn slot_15() -> i32 {
 unsafe extern "C" fn slot_16() {
     trace("friends.GetFriendsGroupMembersList (not supported)");
 }
-unsafe extern "C" fn slot_17() -> bool {
-    trace("friends.HasFriend (no social graph)");
-    false
+unsafe extern "C" fn slot_17(_this: *mut c_void, id: u64, flags: i32) -> bool {
+    social()
+        .iter()
+        .any(|f| f.steam_id == id && relationship_flag(f.relationship) & flags != 0)
 }
 unsafe extern "C" fn slot_18() -> i32 {
     trace("friends.GetClanCount (no social graph)");
@@ -122,17 +269,21 @@ unsafe extern "C" fn slot_23() -> u64 {
     trace("friends.DownloadClanActivityCounts (not supported)");
     0
 }
-unsafe extern "C" fn slot_24() -> i32 {
-    trace("friends.GetFriendCountFromSource (no social graph)");
-    0
+// Sources are lobbies here: their members, once we are in them.
+unsafe extern "C" fn slot_24(_this: *mut c_void, source: u64) -> i32 {
+    matchmaking::info(source).map_or(0, |l| l.members.len() as i32)
 }
-unsafe extern "C" fn slot_25() -> u64 {
-    trace("friends.GetFriendFromSourceByIndex (not supported)");
-    0
+unsafe extern "C" fn slot_25(_this: *mut c_void, source: u64, index: i32) -> u64 {
+    matchmaking::info(source)
+        .and_then(|l| {
+            l.members
+                .get(usize::try_from(index).ok()?)
+                .map(|m| m.steam_id)
+        })
+        .unwrap_or(0)
 }
-unsafe extern "C" fn slot_26() -> bool {
-    trace("friends.IsUserInSource (no social graph)");
-    false
+unsafe extern "C" fn slot_26(_this: *mut c_void, user: u64, source: u64) -> bool {
+    matchmaking::info(source).is_some_and(|l| l.members.iter().any(|m| m.steam_id == user))
 }
 unsafe extern "C" fn slot_27() {
     trace("friends.SetInGameVoiceSpeaking (no social graph)");
@@ -149,8 +300,16 @@ unsafe extern "C" fn slot_30() {
 unsafe extern "C" fn slot_31() {
     trace("friends.ActivateGameOverlayToStore (no social graph)");
 }
-unsafe extern "C" fn slot_32() {
-    trace("friends.SetPlayedWith (no social graph)");
+unsafe extern "C" fn slot_32(_this: *mut c_void, user: u64) {
+    if (user >> 52) & 0xF != 1 || user == own_id() {
+        return;
+    }
+    let mut coplay = COPLAY.lock().unwrap_or_else(|e| e.into_inner());
+    coplay.retain(|(id, _, _)| *id != user);
+    if coplay.len() >= 1024 {
+        coplay.remove(0);
+    }
+    coplay.push((user, unix_now(), current_app_id()));
 }
 unsafe extern "C" fn slot_33() {
     trace("friends.ActivateGameOverlayInviteDialog (no social graph)");
@@ -167,9 +326,25 @@ unsafe extern "C" fn slot_36() -> i32 {
     trace("friends.GetLargeFriendAvatar (no social graph)");
     0
 }
-unsafe extern "C" fn slot_37() -> bool {
-    trace("friends.RequestUserInformation (no social graph)");
-    false
+// True while Steam is being asked; PersonaStateChange_t follows.
+unsafe extern "C" fn slot_37(_this: *mut c_void, id: u64, _name_only: bool) -> bool {
+    if known_user(id).is_some_and(|u| !u.name.is_empty()) {
+        return false;
+    }
+    let pending = matches!(
+        bridge::request(
+            current_app_id(),
+            Operation::Friends(FriendsOp::User {
+                steam_id: id,
+                request: true
+            }),
+        ),
+        Ok(Response::User(None))
+    );
+    trace(format_args!(
+        "friends.RequestUserInformation({id}) = {pending}"
+    ));
+    pending
 }
 unsafe extern "C" fn slot_38() -> u64 {
     trace("friends.RequestClanOfficerList (not supported)");
@@ -191,47 +366,116 @@ unsafe extern "C" fn slot_42() -> i32 {
     trace("friends.GetUserRestrictions (no social graph)");
     0
 }
-unsafe extern "C" fn slot_43() -> bool {
-    trace("friends.SetRichPresence (no social graph)");
-    false
+unsafe extern "C" fn slot_43(_this: *mut c_void, key: *const c_char, value: *const c_char) -> bool {
+    if key.is_null() {
+        return false;
+    }
+    // SAFETY: game-supplied NUL-terminated strings.
+    let Ok(key) = unsafe { CStr::from_ptr(key) }.to_str() else {
+        return false;
+    };
+    let value = if value.is_null() {
+        Ok("")
+    } else {
+        unsafe { CStr::from_ptr(value) }.to_str()
+    };
+    let Ok(value) = value else {
+        return false;
+    };
+    let mut own = OWN_RICH_PRESENCE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut next = own.clone();
+    next.retain(|(k, _)| !k.eq_ignore_ascii_case(key));
+    // An empty value deletes the key.
+    if !value.is_empty() {
+        next.push((key.to_owned(), value.to_owned()));
+    }
+    if key.is_empty() || !steam_ipc::valid_rich_presence(&next) {
+        trace(format_args!("friends.SetRichPresence({key}) rejected"));
+        return false;
+    }
+    let ok = matches!(
+        bridge::request(
+            current_app_id(),
+            Operation::Friends(FriendsOp::SetRichPresence {
+                pairs: next.clone()
+            }),
+        ),
+        Ok(Response::FriendsFlag(true))
+    );
+    if ok {
+        *own = next;
+    }
+    ok
 }
-unsafe extern "C" fn slot_44() {
-    trace("friends.ClearRichPresence (no social graph)");
+unsafe extern "C" fn slot_44(_this: *mut c_void) {
+    let mut own = OWN_RICH_PRESENCE.lock().unwrap_or_else(|e| e.into_inner());
+    if matches!(
+        bridge::request(
+            current_app_id(),
+            Operation::Friends(FriendsOp::SetRichPresence { pairs: Vec::new() }),
+        ),
+        Ok(Response::FriendsFlag(true))
+    ) {
+        own.clear();
+    }
 }
-unsafe extern "C" fn slot_45() -> *const c_char {
-    trace("friends.GetFriendRichPresence (no social graph)");
-    c"".as_ptr()
+unsafe extern "C" fn slot_45(_this: *mut c_void, id: u64, key: *const c_char) -> *const c_char {
+    if key.is_null() {
+        return c"".as_ptr();
+    }
+    // SAFETY: game-supplied NUL-terminated string.
+    let key = unsafe { CStr::from_ptr(key) }.to_string_lossy();
+    let value = rich_presence(id)
+        .into_iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+        .map(|(_, v)| v)
+        .unwrap_or_default();
+    intern(id, &format!("rp:{}", key.to_ascii_lowercase()), &value)
 }
-unsafe extern "C" fn slot_46() -> i32 {
-    trace("friends.GetFriendRichPresenceKeyCount (no social graph)");
-    0
+unsafe extern "C" fn slot_46(_this: *mut c_void, id: u64) -> i32 {
+    rich_presence(id).len() as i32
 }
-unsafe extern "C" fn slot_47() -> *const c_char {
-    trace("friends.GetFriendRichPresenceKeyByIndex (not supported)");
-    c"".as_ptr()
+unsafe extern "C" fn slot_47(_this: *mut c_void, id: u64, index: i32) -> *const c_char {
+    let pairs = rich_presence(id);
+    match usize::try_from(index).ok().and_then(|i| pairs.get(i)) {
+        Some((key, _)) => intern(id, &format!("rpkey:{index}"), key),
+        None => c"".as_ptr(),
+    }
 }
-unsafe extern "C" fn slot_48() {
-    trace("friends.RequestFriendRichPresence (not supported)");
+unsafe extern "C" fn slot_48(_this: *mut c_void, id: u64) {
+    bridge::request(
+        current_app_id(),
+        Operation::Friends(FriendsOp::RequestRichPresence { steam_id: id }),
+    )
+    .ok();
 }
 unsafe extern "C" fn slot_49() -> bool {
     trace("friends.InviteUserToGame (not supported)");
     false
 }
-unsafe extern "C" fn slot_50() -> i32 {
-    trace("friends.GetCoplayFriendCount (no social graph)");
-    0
+unsafe extern "C" fn slot_50(_this: *mut c_void) -> i32 {
+    COPLAY.lock().unwrap_or_else(|e| e.into_inner()).len() as i32
 }
-unsafe extern "C" fn slot_51() -> u64 {
-    trace("friends.GetCoplayFriend (not supported)");
-    0
+unsafe extern "C" fn slot_51(_this: *mut c_void, index: i32) -> u64 {
+    let coplay = COPLAY.lock().unwrap_or_else(|e| e.into_inner());
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| coplay.get(i).map(|(id, _, _)| *id))
+        .unwrap_or(0)
 }
-unsafe extern "C" fn slot_52() -> i32 {
-    trace("friends.GetFriendCoplayTime (not supported)");
-    0
+unsafe extern "C" fn slot_52(_this: *mut c_void, id: u64) -> i32 {
+    let coplay = COPLAY.lock().unwrap_or_else(|e| e.into_inner());
+    coplay
+        .iter()
+        .find(|(u, _, _)| *u == id)
+        .map_or(0, |(_, t, _)| *t as i32)
 }
-unsafe extern "C" fn slot_53() -> u32 {
-    trace("friends.GetFriendCoplayGame (not supported)");
-    0
+unsafe extern "C" fn slot_53(_this: *mut c_void, id: u64) -> u32 {
+    let coplay = COPLAY.lock().unwrap_or_else(|e| e.into_inner());
+    coplay
+        .iter()
+        .find(|(u, _, _)| *u == id)
+        .map_or(0, |(_, _, app)| *app)
 }
 unsafe extern "C" fn slot_54() -> u64 {
     trace("friends.JoinClanChatRoom (not supported)");

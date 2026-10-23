@@ -9,14 +9,36 @@ pub(super) const STATUS: u32 = 1;
 pub(super) const PLAYER_NAME: u32 = 2;
 pub(super) const PRESENCE: u32 = 16;
 pub(super) const GAME_EXTRA: u32 = 256;
+pub(super) const RICH_PRESENCE: u32 = 4096;
+const FRIEND: u32 = 3;
 
 #[derive(Default)]
 struct Persona {
     name: Option<String>,
     state: Option<Presence>,
+    /// `EPersonaState` as sent, including values `Presence` folds together.
+    raw_state: u32,
     app_id: u32,
     game_id: u64,
     game_name: Option<String>,
+    game_ip: u32,
+    game_port: u16,
+    query_port: u16,
+    lobby: u64,
+    rich_presence: Vec<(String, String)>,
+}
+
+impl Persona {
+    fn clear_game(&mut self) {
+        self.app_id = 0;
+        self.game_id = 0;
+        self.game_name = None;
+        self.game_ip = 0;
+        self.game_port = 0;
+        self.query_port = 0;
+        self.lobby = 0;
+        self.rich_presence.clear();
+    }
 }
 
 #[derive(Default)]
@@ -24,8 +46,12 @@ pub(super) struct State {
     pub complete: bool,
     owner: Option<u64>,
     friends: BTreeSet<u64>,
+    /// Relationships other than Friend (blocked, pending requests, ignored).
+    others: BTreeMap<u64, u32>,
     personas: BTreeMap<u64, Persona>,
     pub names: BTreeMap<u32, Option<String>>,
+    /// Bumped on every change, so readers can skip unchanged snapshots.
+    generation: u64,
 }
 
 fn individual(id: u64) -> bool {
@@ -55,8 +81,10 @@ impl State {
         }
         let full = !message.bincremental.unwrap_or(false);
         let mut added = BTreeSet::new();
+        self.generation += 1;
         if full {
             self.friends.clear();
+            self.others.clear();
             self.complete = true;
         }
         for friend in message.friends {
@@ -68,13 +96,20 @@ impl State {
             };
             // Only the actual Friend relationship (3), not invitations,
             // blocked users, or ignored users, belongs in the displayed list.
-            if friend.efriendrelationship == Some(3) {
+            let relationship = friend.efriendrelationship.unwrap_or(0);
+            if relationship == FRIEND {
+                self.others.remove(&id);
                 if self.friends.insert(id) && !full {
                     added.insert(id);
                 }
             } else {
                 self.friends.remove(&id);
                 self.personas.remove(&id);
+                if relationship == 0 {
+                    self.others.remove(&id);
+                } else if self.others.len() < MAX_FRIENDS || self.others.contains_key(&id) {
+                    self.others.insert(id, relationship);
+                }
             }
         }
         if self.friends.len() > MAX_FRIENDS {
@@ -101,6 +136,7 @@ impl State {
             ));
         }
         let flags = message.status_flags.unwrap_or(0);
+        self.generation += 1;
         for friend in message.friends {
             let Some(id) = friend.friendid.filter(|id| individual(*id)) else {
                 continue;
@@ -121,10 +157,12 @@ impl State {
             }
             if let Some(state) = friend.persona_state {
                 persona.state = Some(Presence::from_protocol(state));
+                persona.raw_state = state;
             } else if flags & PRESENCE != 0 {
                 // Persona state belongs to Presence, not the Status/game group.
                 // Default zero in an authoritative Presence update is Offline.
                 persona.state = Some(Presence::Offline);
+                persona.raw_state = 0;
             }
             if friend.game_played_app_id.is_some() || flags & STATUS != 0 {
                 let app_id = friend.game_played_app_id.unwrap_or(0);
@@ -158,10 +196,30 @@ impl State {
             if friend.game_name.is_some() || flags & GAME_EXTRA != 0 {
                 persona.game_name = friend.game_name.filter(|name| !name.is_empty());
             }
+            if friend.game_server_ip.is_some() || flags & STATUS != 0 {
+                persona.game_ip = friend.game_server_ip.unwrap_or(0);
+                persona.game_port = friend.game_server_port.unwrap_or(0) as u16;
+                persona.query_port = friend.query_port.unwrap_or(0) as u16;
+            }
+            if friend.game_lobby_id.is_some() || flags & (STATUS | GAME_EXTRA) != 0 {
+                persona.lobby = friend.game_lobby_id.unwrap_or(0);
+            }
+            if !friend.rich_presence.is_empty() || flags & RICH_PRESENCE != 0 {
+                persona.rich_presence = friend
+                    .rich_presence
+                    .into_iter()
+                    .filter_map(|kv| Some((kv.key?, kv.value.unwrap_or_default())))
+                    .filter(|(key, _)| !key.is_empty())
+                    .collect();
+            }
+            if persona.game_id == 0 && persona.app_id == 0 {
+                persona.game_ip = 0;
+                persona.game_port = 0;
+                persona.query_port = 0;
+                persona.lobby = 0;
+            }
             if persona.state == Some(Presence::Offline) {
-                persona.app_id = 0;
-                persona.game_id = 0;
-                persona.game_name = None;
+                persona.clear_game();
             }
         }
         Ok(())
@@ -175,6 +233,7 @@ impl State {
     /// online friends. The full relationship roster supplies the Offline
     /// baseline; preserve any live state already received before confirmation.
     pub fn establish_social_baseline(&mut self) {
+        self.generation += 1;
         if self.complete {
             for &id in &self.friends {
                 self.personas
@@ -187,12 +246,43 @@ impl State {
     }
 
     pub fn invalidate_presence(&mut self) {
+        self.generation += 1;
         for persona in self.personas.values_mut() {
             persona.state = None;
-            persona.app_id = 0;
-            persona.game_id = 0;
-            persona.game_name = None;
+            persona.raw_state = 0;
+            persona.clear_game();
         }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Everyone with a relationship, as ISteamFriends reports them.
+    pub fn social(&self) -> Vec<steam_ipc::FriendInfo> {
+        let friends = self.friends.iter().map(|&id| (id, FRIEND));
+        let others = self
+            .others
+            .iter()
+            .map(|(&id, &relationship)| (id, relationship));
+        friends
+            .chain(others)
+            .map(|(id, relationship)| {
+                let persona = self.personas.get(&id);
+                steam_ipc::FriendInfo {
+                    steam_id: id,
+                    relationship: relationship as i32,
+                    name: persona.and_then(|p| p.name.clone()).unwrap_or_default(),
+                    state: persona.map_or(0, |p| p.raw_state) as i32,
+                    game_id: persona.map_or(0, |p| p.game_id),
+                    game_ip: persona.map_or(0, |p| p.game_ip),
+                    game_port: persona.map_or(0, |p| p.game_port),
+                    query_port: persona.map_or(0, |p| p.query_port),
+                    lobby: persona.map_or(0, |p| p.lobby),
+                    rich_presence: persona.map(|p| p.rich_presence.clone()).unwrap_or_default(),
+                }
+            })
+            .collect()
     }
 
     pub fn ready(&self) -> bool {
@@ -277,6 +367,81 @@ mod tests {
             friends: vec![friend],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn social_reports_relationships_lobby_server_and_rich_presence() {
+        const C: u64 = 76561198000000003;
+        let mut state = State::with_owner(A);
+        let before = state.generation();
+        state.relationships(list(false, &[(B, 3), (C, 2)])).unwrap();
+        assert!(state.generation() > before);
+        state
+            .personas(persona(
+                STATUS | PLAYER_NAME | PRESENCE | GAME_EXTRA | RICH_PRESENCE,
+                cmsg_client_persona_state::Friend {
+                    friendid: Some(B),
+                    player_name: Some("host".into()),
+                    persona_state: Some(1),
+                    game_played_app_id: Some(3247750),
+                    gameid: Some(3247750),
+                    game_server_ip: Some(0x0a00_0001),
+                    game_server_port: Some(27015),
+                    query_port: Some(27016),
+                    game_lobby_id: Some(109775241977792940),
+                    rich_presence: vec![cmsg_client_persona_state::friend::KV {
+                        key: Some("steam_display".into()),
+                        value: Some("#HubStatus".into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        let social = state.social();
+        assert_eq!(social.len(), 2);
+        let host = social.iter().find(|f| f.steam_id == B).unwrap();
+        assert_eq!(
+            (host.relationship, host.state, host.name.as_str()),
+            (3, 1, "host")
+        );
+        assert_eq!(host.game_id, 3247750);
+        assert_eq!(
+            (host.game_ip, host.game_port, host.query_port),
+            (0x0a00_0001, 27015, 27016)
+        );
+        assert_eq!(host.lobby, 109775241977792940);
+        assert_eq!(
+            host.rich_presence,
+            vec![("steam_display".into(), "#HubStatus".into())]
+        );
+        let request = social.iter().find(|f| f.steam_id == C).unwrap();
+        assert_eq!((request.relationship, request.state), (2, 0));
+
+        // Leaving the game clears its lobby, server and rich presence.
+        state
+            .personas(persona(
+                STATUS | GAME_EXTRA | RICH_PRESENCE,
+                cmsg_client_persona_state::Friend {
+                    friendid: Some(B),
+                    game_played_app_id: Some(0),
+                    gameid: Some(0),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        let host = state
+            .social()
+            .into_iter()
+            .find(|f| f.steam_id == B)
+            .unwrap();
+        assert_eq!((host.game_id, host.lobby, host.game_port), (0, 0, 0));
+        assert!(host.rich_presence.is_empty());
+        assert_eq!(host.state, 1);
+
+        // A relationship of None removes the pending request.
+        state.relationships(list(true, &[(B, 3), (C, 0)])).unwrap();
+        assert_eq!(state.social().len(), 1);
     }
 
     #[test]

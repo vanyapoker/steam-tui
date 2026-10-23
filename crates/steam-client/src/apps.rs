@@ -75,9 +75,15 @@ unsafe extern "C" fn slot_7(_this: *mut c_void, app_id: u32) -> bool {
     snapshot().is_some_and(|s| s.dlc.iter().any(|d| d.app_id == app_id && d.installed))
         && bridge::subscribed_app(current_app_id(), app_id)
 }
-unsafe extern "C" fn slot_8(_this: *mut c_void, _app_id: u32) -> u32 {
-    trace("apps.GetEarliestPurchaseUnixTime = 0 (unknown)");
-    0
+unsafe extern "C" fn slot_8(_this: *mut c_void, app_id: u32) -> u32 {
+    let time = match bridge::request(current_app_id(), Operation::PurchaseTime { app_id }) {
+        Ok(Response::PurchaseTime(time)) => time,
+        _ => 0,
+    };
+    trace(format_args!(
+        "apps.GetEarliestPurchaseUnixTime({app_id}) = {time}"
+    ));
+    time
 }
 unsafe extern "C" fn slot_9(_this: *mut c_void) -> bool {
     trace("apps.BIsSubscribedFromFreeWeekend = false");

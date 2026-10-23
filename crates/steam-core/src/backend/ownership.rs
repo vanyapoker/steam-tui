@@ -4,11 +4,15 @@ use super::*;
 use std::collections::BTreeMap;
 
 const MAX_APPS: usize = 128;
-const TTL: Duration = Duration::from_secs(2);
+/// Ownership only changes with the license list, which clears the cache
+/// (`query`); the age limit bounds anything that goes unnoticed.
+const TTL: Duration = Duration::from_secs(600);
 
 #[derive(Default)]
 pub(super) struct Service {
     entries: BTreeMap<u32, (Instant, bool)>,
+    /// License list generation the entries were answered under.
+    licenses: u64,
 }
 
 impl Service {
@@ -38,6 +42,34 @@ impl Service {
         self.entries.insert(app_id, (now, owned));
     }
 
+    /// Ownership for the game's API calls (BIsSubscribedApp and friends): the
+    /// session's license list from Steam, which Valve's client answers from
+    /// too, proves ownership at once; an absent app is asked with a CM ticket.
+    /// Answers hold until Steam sends a new license list (`licenses` changes).
+    pub(super) async fn answer(
+        &mut self,
+        connection: &Connection,
+        running_app: u32,
+        target_app: u32,
+        events: &Option<EventSender>,
+        licenses: u64,
+    ) -> Response {
+        if licenses != self.licenses {
+            self.clear();
+            self.licenses = licenses;
+        }
+        if target_app != 0
+            && self.cached(target_app, Instant::now()).is_none()
+            && crate::library::cached_ownership(connection)
+                .is_some_and(|(apps, _)| apps.contains(&target_app))
+        {
+            self.record(target_app, true, Instant::now());
+        }
+        self.query(connection, running_app, target_app, events)
+            .await
+    }
+
+    /// Ownership from a CM ownership ticket (or this service's cache).
     pub(super) async fn query(
         &mut self,
         connection: &Connection,

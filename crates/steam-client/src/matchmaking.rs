@@ -10,6 +10,7 @@ use steam_ipc::{LobbyFilter, LobbyInfo, LobbyOp, Operation, Response};
 const LOBBY_MATCH_LIST: i32 = 510;
 const LOBBY_CREATED: i32 = 513;
 const LOBBY_ENTER: i32 = 504;
+const LOBBY_KICKED: i32 = 512;
 const RESULT_NO_CONNECTION: i32 = 3;
 const ENTER_ERROR: u32 = 5;
 
@@ -44,29 +45,107 @@ fn keep(value: &str) -> *const c_char {
     ring.back().map_or(c"".as_ptr(), |c| c.as_ptr())
 }
 
-/// Short-lived snapshot cache: games poll lobby data every frame.
+/// Lobby snapshots: games read lobby data every frame. Every change Steam
+/// reports arrives as a lobby callback, which drops the entry (`observe`), as
+/// do our own writes (`forget`); the age limit only bounds anything missed.
 type InfoCache = Mutex<Option<HashMap<u64, (Instant, Option<LobbyInfo>)>>>;
 static CACHE: InfoCache = Mutex::new(None);
+const CACHE_AGE: Duration = Duration::from_secs(2);
 
-fn info(lobby: u64) -> Option<LobbyInfo> {
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let map = cache.get_or_insert_with(HashMap::new);
-    if let Some((at, found)) = map.get(&lobby)
-        && at.elapsed() < Duration::from_millis(100)
+pub(super) fn info(lobby: u64) -> Option<LobbyInfo> {
     {
-        return found.clone();
+        let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, found)) = cache.as_ref().and_then(|map| map.get(&lobby))
+            && at.elapsed() < CACHE_AGE
+        {
+            return found.clone();
+        }
     }
+    // Not holding the lock across the round trip keeps other threads' reads
+    // and invalidations from waiting on it.
+    let requested = Instant::now();
     let found = match op(LobbyOp::Get { lobby }) {
         Some(Response::LobbyInfo(found)) => found,
         _ => None,
     };
-    map.insert(lobby, (Instant::now(), found.clone()));
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let map = cache.get_or_insert_with(HashMap::new);
+    // A change announced while this read was in flight wins over the read.
+    if INVALIDATED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|invalidated| invalidated.get(&lobby))
+        .is_none_or(|at| *at < requested)
+    {
+        if map.len() >= 1024 {
+            map.clear();
+        }
+        map.insert(lobby, (Instant::now(), found.clone()));
+    }
     found
 }
+static INVALIDATED: Mutex<Option<HashMap<u64, Instant>>> = Mutex::new(None);
 fn forget(lobby: u64) {
     // Writes must be visible to the very next read.
+    {
+        let mut invalidated = INVALIDATED.lock().unwrap_or_else(|e| e.into_inner());
+        let invalidated = invalidated.get_or_insert_with(HashMap::new);
+        if invalidated.len() >= 1024 {
+            invalidated.retain(|_, at| at.elapsed() < CACHE_AGE);
+        }
+        invalidated.insert(lobby, Instant::now());
+    }
     if let Some(map) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         map.remove(&lobby);
+    }
+}
+fn forget_all() {
+    let lobbies: Vec<u64> = CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|map| map.keys().copied().collect())
+        .unwrap_or_default();
+    for lobby in lobbies {
+        forget(lobby);
+    }
+}
+/// Lobby callbacks (LobbyEnter_t through LobbyKicked_t) start with the lobby id.
+pub(super) fn observe(id: i32, data: &[u8]) {
+    if (LOBBY_ENTER..=LOBBY_KICKED).contains(&id)
+        && let Some(lobby) = data.get(..8)
+    {
+        forget(u64::from_le_bytes(lobby.try_into().unwrap_or_default()));
+    }
+}
+
+/// Asynchronous matchmaking calls (list requests, create, join, leave) run here
+/// in the order the game made them, so a Steam round trip never blocks the game
+/// thread and a leave always reaches Steam before a later join.
+fn in_order(job: impl FnOnce() + Send + 'static) {
+    type Job = Box<dyn FnOnce() + Send>;
+    static QUEUE: OnceLock<Mutex<std::sync::mpsc::Sender<Job>>> = OnceLock::new();
+    let sender = QUEUE.get_or_init(|| {
+        let (sender, jobs) = std::sync::mpsc::channel::<Job>();
+        let spawned = std::thread::Builder::new()
+            .name("steam-matchmaking".into())
+            .spawn(move || {
+                for job in jobs {
+                    job();
+                }
+            });
+        if spawned.is_err() {
+            trace("matchmaking worker thread could not start");
+        }
+        Mutex::new(sender)
+    });
+    let job: Job = Box::new(job);
+    if let Err(std::sync::mpsc::SendError(job)) =
+        sender.lock().unwrap_or_else(|e| e.into_inner()).send(job)
+    {
+        // No worker: run inline rather than drop the call.
+        job();
     }
 }
 
@@ -109,16 +188,22 @@ unsafe extern "C" fn request_list(_this: *mut c_void) -> u64 {
         "matchmaking.RequestLobbyList ({} filters)",
         filters.len()
     ));
-    let ids = match op(LobbyOp::RequestList {
-        filters,
-        max_results: if max_results > 0 { max_results } else { 50 },
-    }) {
-        Some(Response::LobbyIds(ids)) => ids,
-        _ => Vec::new(),
-    };
-    let count = ids.len() as u32;
-    *LIST.lock().unwrap_or_else(|e| e.into_inner()) = ids;
-    callresults::complete(LOBBY_MATCH_LIST, count.to_le_bytes().to_vec())
+    let call = callresults::reserve();
+    in_order(move || {
+        let ids = match op(LobbyOp::RequestList {
+            filters,
+            max_results: if max_results > 0 { max_results } else { 50 },
+        }) {
+            Some(Response::LobbyIds(ids)) => ids,
+            _ => Vec::new(),
+        };
+        let count = ids.len() as u32;
+        *LIST.lock().unwrap_or_else(|e| e.into_inner()) = ids;
+        // The results refreshed every listed lobby's data.
+        forget_all();
+        callresults::complete_for(call, LOBBY_MATCH_LIST, count.to_le_bytes().to_vec());
+    });
+    call
 }
 unsafe extern "C" fn filter_string(
     _this: *mut c_void,
@@ -163,55 +248,65 @@ unsafe extern "C" fn create(_this: *mut c_void, kind: i32, max_members: i32) -> 
     trace(format_args!(
         "matchmaking.CreateLobby(type {kind}, max {max_members})"
     ));
-    let (result, lobby, callbacks) = match op(LobbyOp::Create { kind, max_members }) {
-        Some(Response::LobbyResult {
-            result,
-            lobby,
-            callbacks,
-        }) => (result, lobby, callbacks),
-        _ => (RESULT_NO_CONNECTION, 0, Vec::new()),
-    };
-    // LobbyCreated_t { i32 result; u64 lobby } (pack 4 => 12 bytes).
-    let mut payload = result.to_le_bytes().to_vec();
-    payload.extend(lobby.to_le_bytes());
-    let call = callresults::complete(LOBBY_CREATED, payload);
-    for (id, hex) in callbacks {
-        if let Some(data) = steam_ipc::hex_decode(&hex) {
-            auth::push_callback(id, data);
+    let call = callresults::reserve();
+    in_order(move || {
+        let (result, lobby, callbacks) = match op(LobbyOp::Create { kind, max_members }) {
+            Some(Response::LobbyResult {
+                result,
+                lobby,
+                callbacks,
+            }) => (result, lobby, callbacks),
+            _ => (RESULT_NO_CONNECTION, 0, Vec::new()),
+        };
+        forget(lobby);
+        // LobbyCreated_t { i32 result; u64 lobby } (pack 4 => 12 bytes).
+        let mut payload = result.to_le_bytes().to_vec();
+        payload.extend(lobby.to_le_bytes());
+        callresults::complete_for(call, LOBBY_CREATED, payload);
+        for (id, hex) in callbacks {
+            if let Some(data) = steam_ipc::hex_decode(&hex) {
+                auth::push_callback(id, data);
+            }
         }
-    }
+    });
     call
 }
 unsafe extern "C" fn join(_this: *mut c_void, lobby: u64) -> u64 {
     trace(format_args!("matchmaking.JoinLobby({lobby})"));
-    let (result, callbacks) = match op(LobbyOp::Join { lobby }) {
-        Some(Response::LobbyResult {
-            result, callbacks, ..
-        }) => (result, callbacks),
-        _ => (ENTER_ERROR as i32, Vec::new()),
-    };
-    let mut call = 0;
-    // The enter payload is both the call result and a regular callback.
-    let enter = callbacks
-        .iter()
-        .find(|(id, _)| *id == LOBBY_ENTER)
-        .and_then(|(_, hex)| steam_ipc::hex_decode(hex))
-        .unwrap_or_else(|| {
-            let mut v = lobby.to_le_bytes().to_vec();
-            v.extend(0u32.to_le_bytes());
-            v.extend([0, 0, 0, 0]);
-            v.extend((result as u32).to_le_bytes());
-            v
-        });
-    call = callresults::complete(LOBBY_ENTER, enter.clone()).max(call);
-    auth::push_callback(LOBBY_ENTER, enter);
-    forget(lobby);
+    let call = callresults::reserve();
+    in_order(move || {
+        let (result, callbacks) = match op(LobbyOp::Join { lobby }) {
+            Some(Response::LobbyResult {
+                result, callbacks, ..
+            }) => (result, callbacks),
+            _ => (ENTER_ERROR as i32, Vec::new()),
+        };
+        forget(lobby);
+        // The enter payload is both the call result and a regular callback.
+        let enter = callbacks
+            .iter()
+            .find(|(id, _)| *id == LOBBY_ENTER)
+            .and_then(|(_, hex)| steam_ipc::hex_decode(hex))
+            .unwrap_or_else(|| {
+                let mut v = lobby.to_le_bytes().to_vec();
+                v.extend(0u32.to_le_bytes());
+                v.extend([0, 0, 0, 0]);
+                v.extend((result as u32).to_le_bytes());
+                v
+            });
+        callresults::complete_for(call, LOBBY_ENTER, enter.clone());
+        auth::push_callback(LOBBY_ENTER, enter);
+    });
     call
 }
 unsafe extern "C" fn leave(_this: *mut c_void, lobby: u64) {
     trace(format_args!("matchmaking.LeaveLobby({lobby})"));
-    op(LobbyOp::Leave { lobby });
+    // Leaving is immediate for the game; Steam hears about it in order.
     forget(lobby);
+    in_order(move || {
+        op(LobbyOp::Leave { lobby });
+        forget(lobby);
+    });
 }
 unsafe extern "C" fn invite(_this: *mut c_void, lobby: u64, user: u64) -> bool {
     flag(op(LobbyOp::Invite { lobby, user }))

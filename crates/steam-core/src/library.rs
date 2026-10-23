@@ -121,6 +121,25 @@ pub(crate) fn cached_ownership(connection: &Connection) -> Option<(BTreeSet<u32>
     })
 }
 
+/// `GetEarliestPurchaseUnixTime`: the oldest license grant whose package
+/// contains `app_id`, from this session's license list and package membership.
+pub(crate) fn earliest_purchase(connection: &Connection, app_id: u32) -> Option<u32> {
+    with_cache(connection, |cache| {
+        cache
+            .licenses
+            .as_ref()?
+            .licenses
+            .iter()
+            .filter(|l| {
+                l.package_id
+                    .and_then(|id| cache.packages.get(&id))
+                    .is_some_and(|apps| apps.contains(&app_id))
+            })
+            .filter_map(|l| l.time_created.filter(|t| *t != 0))
+            .min()
+    })
+}
+
 /// Resolve session license membership and refresh PICS. Repeated calls retain
 /// the initial license push and last known membership, while fetching fresh app
 /// documents. Buffered license changes replace the grants on the next load.

@@ -400,6 +400,17 @@ impl Lobbies {
         }
     }
 
+    /// Persona name of a user seen in one of our lobbies, for users who are
+    /// not friends (Valve's client resolves those names the same way).
+    pub fn member_name(&self, user: u64) -> Option<String> {
+        let s = lock(&self.state);
+        s.lobbies
+            .values()
+            .flat_map(|l| l.members.iter())
+            .find(|(id, m)| *id == user && !m.name.is_empty())
+            .map(|(_, m)| m.name.clone())
+    }
+
     pub fn poll(&self) -> Vec<(i32, Vec<u8>)> {
         lock(&self.state).callbacks.drain(..).collect()
     }

@@ -2,8 +2,10 @@
 //! Credentials remain in the parent process. Normal launches do not use this.
 pub(crate) mod apps;
 mod events;
+mod friends;
 mod gc;
 pub mod images;
+mod licenses;
 mod lobby;
 mod networking;
 mod ownership;
@@ -161,7 +163,7 @@ impl Endpoint {
         let session = Session {
             connection,
             app_id,
-            alive: Mutex::new(None),
+            alive: std::sync::Arc::default(),
             ownership: Mutex::new(ownership::Service::default()),
             apps: Mutex::new(apps::Service::new(
                 connection,
@@ -183,6 +185,8 @@ impl Endpoint {
                 events.clone(),
             ),
             stats: Mutex::new(stats::Stats::new(app_id, events.clone())),
+            friends: friends::Friends::start(connection, app_id, events.clone()),
+            licenses: licenses::Licenses::start(connection, app_id, events.clone()),
             workshop: workshop::Service::new(
                 connection,
                 app_id,
@@ -285,10 +289,28 @@ async fn persona_name(connection: &Connection) -> String {
     steam_id.to_string()
 }
 
+/// Last CM liveness probe. The backend starts after a successful login, so
+/// the session counts as alive until a probe says otherwise.
+struct Liveness {
+    alive: bool,
+    checked: Option<Instant>,
+    probing: bool,
+}
+
+impl Default for Liveness {
+    fn default() -> Self {
+        Self {
+            alive: true,
+            checked: None,
+            probing: false,
+        }
+    }
+}
+
 struct Session<'a> {
     connection: &'a Connection,
     app_id: u32,
-    alive: Mutex<Option<(Instant, bool)>>,
+    alive: std::sync::Arc<std::sync::Mutex<Liveness>>,
     ownership: Mutex<ownership::Service>,
     apps: Mutex<apps::Service>,
     networking: Mutex<networking::Networking>,
@@ -297,6 +319,8 @@ struct Session<'a> {
     pops: std::sync::Arc<std::sync::Mutex<Option<Vec<(String, i32)>>>>,
     lobbies: lobby::Lobbies,
     stats: Mutex<stats::Stats>,
+    friends: friends::Friends,
+    licenses: licenses::Licenses,
     workshop: workshop::Service,
     events: Option<EventSender>,
 }
@@ -397,17 +421,30 @@ impl Session<'_> {
         }
     }
 
-    /// Whether the CM session answers. Probed at most every two seconds, and only
-    /// by operations that need the account connection.
+    /// Whether the CM session answers, as last probed. Requests never wait for a
+    /// probe: a stale result starts one in the background (at most every two
+    /// seconds, one at a time) and callers get the latest known state.
     async fn alive(&self) -> bool {
-        let mut cached = self.alive.lock().await;
-        if let Some((at, alive)) = *cached
-            && at.elapsed() < Duration::from_secs(2)
-        {
-            return alive;
+        let (alive, start) = {
+            let mut state = self.alive.lock().unwrap_or_else(|e| e.into_inner());
+            let stale = state
+                .checked
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(2));
+            let start = stale && !state.probing;
+            state.probing |= start;
+            (state.alive, start)
+        };
+        if start {
+            let state = self.alive.clone();
+            let connection = self.connection.clone();
+            tokio::spawn(async move {
+                let alive = crate::liveness::probe(&connection, Duration::from_secs(3)).await;
+                let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                state.alive = alive;
+                state.checked = Some(Instant::now());
+                state.probing = false;
+            });
         }
-        let alive = crate::liveness::probe(self.connection, Duration::from_secs(3)).await;
-        *cached = Some((Instant::now(), alive));
         if !alive {
             self.ownership.lock().await.clear();
         }
@@ -427,6 +464,8 @@ impl Session<'_> {
                 | Operation::Country
                 | Operation::Image(_)
                 | Operation::CancelAuthTicket { .. }
+                | Operation::PurchaseTime { .. }
+                | Operation::Friends(steam_ipc::FriendsOp::Snapshot)
         ) {
             true
         } else {
@@ -476,14 +515,26 @@ impl Session<'_> {
                 self.ownership
                     .lock()
                     .await
-                    .query(self.connection, self.app_id, self.app_id, &self.events)
+                    .answer(
+                        self.connection,
+                        self.app_id,
+                        self.app_id,
+                        &self.events,
+                        self.licenses.generation(),
+                    )
                     .await
             }
             Operation::AppOwnership { app_id } => {
                 self.ownership
                     .lock()
                     .await
-                    .query(self.connection, self.app_id, app_id, &self.events)
+                    .answer(
+                        self.connection,
+                        self.app_id,
+                        app_id,
+                        &self.events,
+                        self.licenses.generation(),
+                    )
                     .await
             }
             Operation::Apps(op) => {
@@ -595,6 +646,18 @@ impl Session<'_> {
             ) => self.workshop.handle(op).await,
             Operation::Ugc(op) => ugc::handle(self.connection, self.app_id, op).await,
             Operation::Image(op) => images::handle(op).await,
+            Operation::Friends(op) => {
+                let lobby_name = match op {
+                    steam_ipc::FriendsOp::User { steam_id, .. } => {
+                        self.lobbies.member_name(steam_id)
+                    }
+                    _ => None,
+                };
+                self.friends.handle(op, lobby_name).await
+            }
+            Operation::PurchaseTime { app_id } => Response::PurchaseTime(
+                crate::library::earliest_purchase(self.connection, app_id).unwrap_or(0),
+            ),
             Operation::WebAuthTicket { identity } => {
                 match self.tickets.lock().await.web(identity) {
                     Ok(handle) => Response::AuthTicketPending { handle },
@@ -610,6 +673,8 @@ impl Session<'_> {
                     callbacks.extend(tickets.poll());
                 }
                 callbacks.extend(self.workshop.poll());
+                callbacks.extend(self.friends.poll());
+                callbacks.extend(self.licenses.poll());
                 if let Ok(apps) = self.apps.try_lock() {
                     callbacks.extend(apps.poll());
                 }

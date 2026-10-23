@@ -4,10 +4,11 @@
 mod state;
 
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::io;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use steam_vent::{Connection, ConnectionTrait, NetworkError};
 use steam_vent_proto_steam::enums_clientserver::EMsg;
@@ -95,6 +96,73 @@ pub struct Friend {
     pub game: Option<String>,
 }
 
+/// Live relationships and personas, shared with per-launch game backends so
+/// ISteamFriends answers from the same social session the TUI shows.
+#[derive(Clone, Default)]
+pub struct Social(Arc<Mutex<SocialData>>);
+
+/// The running friends loop of each signed-in account.
+static REGISTRY: Mutex<BTreeMap<u64, Social>> = Mutex::new(BTreeMap::new());
+
+/// The live social graph of `steam_id`, if a friends loop runs for it.
+pub fn social(steam_id: u64) -> Option<Social> {
+    REGISTRY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&steam_id)
+        .cloned()
+}
+
+/// Removes this loop's registration when the loop ends, unless a newer loop
+/// for the same account replaced it.
+struct Registration {
+    steam_id: u64,
+    social: Social,
+}
+
+impl Registration {
+    fn new(steam_id: u64) -> Self {
+        let social = Social::default();
+        REGISTRY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(steam_id, social.clone());
+        Self { steam_id, social }
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        let mut registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        if registry
+            .get(&self.steam_id)
+            .is_some_and(|current| Arc::ptr_eq(&current.0, &self.social.0))
+        {
+            registry.remove(&self.steam_id);
+        }
+    }
+}
+
+#[derive(Default)]
+struct SocialData {
+    generation: u64,
+    friends: Arc<Vec<steam_ipc::FriendInfo>>,
+}
+
+impl Social {
+    /// Change counter and the current list; the list is shared, not copied.
+    pub fn snapshot(&self) -> (u64, Arc<Vec<steam_ipc::FriendInfo>>) {
+        let data = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        (data.generation, data.friends.clone())
+    }
+
+    fn publish(&self, friends: Vec<steam_ipc::FriendInfo>) {
+        let mut data = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        data.generation += 1;
+        data.friends = Arc::new(friends);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum FriendEvent {
     /// Complete membership snapshot, in ascending SteamID order. Metadata not
@@ -143,6 +211,17 @@ fn queue_status(statuses: &mut VecDeque<String>, message: impl Into<String>) {
     statuses.push_back(message.into());
 }
 
+/// Keeps the social graph available to a game backend when no friends loop
+/// runs for this account (a launch without the TUI). Ends when dropped.
+pub async fn run_for_games(connection: Connection) -> Result<()> {
+    let (updates, mut events) = mpsc::channel(16);
+    let drain = async move { while events.recv().await.is_some() {} };
+    tokio::select! {
+        result = run(connection, updates) => result,
+        () = drain => Ok(()),
+    }
+}
+
 async fn run_inner(
     connection: Connection,
     updates: &mpsc::Sender<FriendEvent>,
@@ -155,6 +234,8 @@ async fn run_inner(
     let logged_off = connection.on::<CMsgClientLoggedOff>();
     futures_util::pin_mut!(lists, personas, logged_off);
     let own_id = connection.steam_id().steam64();
+    let registration = Registration::new(own_id);
+    let social = &registration.social;
     let mut state = State::with_owner(own_id);
     let mut requested = BTreeSet::from([own_id]);
     for raw in connection
@@ -232,9 +313,14 @@ async fn run_inner(
     let mut poll = interval_at(Instant::now() + POLL_INTERVAL, POLL_INTERVAL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    let mut shared_generation = None;
     loop {
         if updates.is_closed() {
             return Ok(());
+        }
+        if shared_generation != Some(state.generation()) {
+            shared_generation = Some(state.generation());
+            social.publish(state.social());
         }
         if !persona_in_flight && awaiting_personas.is_empty() && !requested.is_empty() {
             let ids: Vec<_> = requested.iter().copied().take(BATCH_SIZE).collect();

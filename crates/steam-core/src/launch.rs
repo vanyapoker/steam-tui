@@ -1233,9 +1233,19 @@ pub async fn run_with_backend(
         let backend_events = events.clone();
         tokio::task::spawn_local(async move {
             let _sandbox = sandbox;
+            // ISteamFriends needs the live social graph. The TUI keeps one per
+            // account; a launch without it runs its own for the game's lifetime.
+            let own_social = crate::friends::social(connection.steam_id().steam64()).is_none();
+            let social = async {
+                if own_social {
+                    let _ = crate::friends::run_for_games(connection.clone()).await;
+                }
+                std::future::pending::<()>().await
+            };
             tokio::select! {
                 _ = endpoint.run_with_events(&connection, app_id, backend_events) => {}
                 _ = done_rx => {}
+                () = social => {}
             }
         });
     }

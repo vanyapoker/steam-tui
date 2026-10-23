@@ -6,6 +6,14 @@ use steam_ipc::{Operation, Reply, Request, Response, VERSION};
 /// The path is a capability passed explicitly by the experimental launcher.
 /// Refresh tokens, passwords and guard data never enter the game process.
 pub(super) fn request(app_id: u32, operation: Operation) -> io::Result<Response> {
+    // Our own worker threads are all named "steam-…"; their waits never
+    // reach the game, so only the game's threads are measured.
+    let ours = std::thread::current()
+        .name()
+        .is_some_and(|name| name.starts_with("steam-"));
+    if ours {
+        return request_inner(app_id, operation);
+    }
     let name = operation_name(&operation);
     let started = Instant::now();
     let result = request_inner(app_id, operation);
@@ -21,8 +29,8 @@ fn operation_name(operation: &Operation) -> String {
         .to_owned()
 }
 
-/// Backend round trips block the calling (often game) thread. Every ten seconds
-/// the time spent is summarized in the game log when it is large enough to be
+/// Backend round trips block the calling game thread. Every ten seconds the
+/// time spent is summarized in the game log when it is large enough to be
 /// felt, so a stalling call can be named instead of guessed.
 fn record(name: String, elapsed: Duration) {
     use std::collections::BTreeMap;
@@ -46,7 +54,7 @@ fn record(name: String, elapsed: Duration) {
             .map(|(n, (count, d))| format!("{n} {count}x {}ms", d.as_millis()))
             .collect();
         crate::trace(format_args!(
-            "backend calls blocked the caller {}ms in 10s: {}",
+            "backend calls blocked game threads {}ms in 10s: {}",
             total.as_millis(),
             detail.join(", ")
         ));

@@ -77,6 +77,12 @@ pub enum Operation {
     Ugc(UgcOp),
     /// Fetch and decode one image from Valve's CDN (achievement icons, avatars).
     Image(ImageOp),
+    /// Friends, personas and rich presence (ISteamFriends).
+    Friends(FriendsOp),
+    /// `GetEarliestPurchaseUnixTime`: earliest license grant covering the app.
+    PurchaseTime {
+        app_id: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +90,54 @@ pub enum AppsOp {
     Snapshot,
     InstallDlc { app_id: u32 },
     UninstallDlc { app_id: u32 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FriendsOp {
+    /// Every user with a relationship to this account, with live persona data.
+    Snapshot,
+    /// Persona of any user; `Response::User`. With `request`, an unknown user
+    /// is fetched in the background and announced by `PersonaStateChange_t`
+    /// (`RequestUserInformation`).
+    User { steam_id: u64, request: bool },
+    /// Replace this account's rich presence for the running app.
+    SetRichPresence { pairs: Vec<(String, String)> },
+    /// `RequestFriendRichPresence`; the answer posts `FriendRichPresenceUpdate_t`.
+    RequestRichPresence { steam_id: u64 },
+}
+
+/// Valve's limits for SetRichPresence.
+pub const MAX_RICH_PRESENCE_KEYS: usize = 30;
+pub const MAX_RICH_PRESENCE_KEY: usize = 64;
+pub const MAX_RICH_PRESENCE_VALUE: usize = 256;
+
+/// Whether `pairs` is a rich presence set Valve's client would accept.
+pub fn valid_rich_presence(pairs: &[(String, String)]) -> bool {
+    pairs.len() <= MAX_RICH_PRESENCE_KEYS
+        && pairs.iter().all(|(key, value)| {
+            !key.is_empty()
+                && key.len() <= MAX_RICH_PRESENCE_KEY
+                && value.len() <= MAX_RICH_PRESENCE_VALUE
+                && !key.contains('\0')
+                && !value.contains('\0')
+        })
+}
+
+/// One user as ISteamFriends reports them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FriendInfo {
+    pub steam_id: u64,
+    /// `EFriendRelationship` (3 = friend).
+    pub relationship: i32,
+    pub name: String,
+    /// `EPersonaState`.
+    pub state: i32,
+    pub game_id: u64,
+    pub game_ip: u32,
+    pub game_port: u16,
+    pub query_port: u16,
+    pub lobby: u64,
+    pub rich_presence: Vec<(String, String)>,
 }
 
 /// Public metadata and local content state. `installed` does not confer an
@@ -493,6 +547,11 @@ pub enum Response {
         name: String,
         state: Option<i32>,
     },
+    Friends(Vec<FriendInfo>),
+    FriendsFlag(bool),
+    /// `None` until Steam has answered for this user.
+    User(Option<FriendInfo>),
+    PurchaseTime(u32),
     Error {
         message: String,
     },

@@ -81,13 +81,25 @@ fn backend_callbacks() -> Vec<Callback> {
                     if let Ok(Response::Callbacks(callbacks)) =
                         bridge::request(current_app_id(), Operation::PollCallbacks)
                     {
-                        let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                        queue.extend(callbacks.into_iter().filter_map(|(id, hex)| {
-                            Some(Callback {
-                                id,
-                                data: steam_ipc::hex_decode(&hex)?,
+                        let callbacks: Vec<_> = callbacks
+                            .into_iter()
+                            .filter_map(|(id, hex)| {
+                                Some(Callback {
+                                    id,
+                                    data: steam_ipc::hex_decode(&hex)?,
+                                })
                             })
-                        }));
+                            .collect();
+                        // Drop cached state a callback announces as changed
+                        // before the game can react to it.
+                        for callback in &callbacks {
+                            matchmaking::observe(callback.id, &callback.data);
+                            friends::observe(callback.id);
+                        }
+                        QUEUE
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend(callbacks);
                     }
                 }
             });
