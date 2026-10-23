@@ -228,6 +228,8 @@ mod tests {
             display_name: name.into(),
             description: String::new(),
             hidden: false,
+            icon: String::new(),
+            icon_gray: String::new(),
             unlocked,
             unlock_time: time,
             percent,

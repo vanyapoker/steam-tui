@@ -119,6 +119,7 @@ enum JobEvent {
     },
     LibraryIcon(library_icons::Loaded),
     LibraryIconEncoded(chat_images::Loaded),
+    AchievementImage(chat_images::Loaded),
     Clipboard {
         friend: u64,
         result: Result<clipboard::Content, String>,
@@ -1063,6 +1064,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
         .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
     model.library_icons.images.picker = model.chat.images.picker.clone();
     model.news_images.picker = model.chat.images.picker.clone();
+    model.achievement_images.picker = model.chat.images.picker.clone();
     let mut terminal: Terminal<CrosstermBackend<Stdout>> =
         Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
@@ -1228,6 +1230,15 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                 workers.push(tokio::task::spawn_local(async move {
                     let loaded = chat_images::load(request).await;
                     let _ = updates.send(JobEvent::NewsImage(loaded)).await;
+                }));
+            }
+            while model.achievement_images.active < 4 {
+                let Some(request) = model.achievement_images.pending.pop_front() else { break; };
+                model.achievement_images.active += 1;
+                let updates = job_tx.clone();
+                workers.push(tokio::task::spawn_local(async move {
+                    let loaded = chat_images::load(request).await;
+                    let _ = updates.send(JobEvent::AchievementImage(loaded)).await;
                 }));
             }
             while model.library_icons.active < 2 {
@@ -1614,6 +1625,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                         JobEvent::DownloadNames(names) => model.queue_names.extend(names),
                         JobEvent::ChatImage(loaded) => model.chat.images.loaded(loaded),
                         JobEvent::NewsImage(loaded) => model.news_images.loaded(loaded),
+                        JobEvent::AchievementImage(loaded) => model.achievement_images.loaded(loaded),
                         JobEvent::NewsLinkOpened { request, result } => {
                             if let Some(news) = &mut model.news && news.request == request { news.link_error = result.err(); }
                         },

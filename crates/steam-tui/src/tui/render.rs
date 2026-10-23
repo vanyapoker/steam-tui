@@ -2391,7 +2391,9 @@ fn achievements_overlay(frame: &mut Frame<'_>, model: &mut Model) {
     }
     // Right column: rarity and unlock date.
     let right_width = 20usize;
-    let left_width = width.saturating_sub(right_width + 4).max(10);
+    let left_width = width
+        .saturating_sub(right_width + 4 + ICON_COLUMNS as usize + 1)
+        .max(10);
     let rows_visible = (list_area.height as usize / 2).max(1);
     let selected = view.selected.min(visible.len() - 1);
     let mut offset = view.offset.min(visible.len() - 1);
@@ -2442,14 +2444,18 @@ fn achievements_overlay(frame: &mut Frame<'_>, model: &mut Model) {
             };
             let first = Line::from(vec![
                 Span::styled(format!(" {mark} "), mark_style),
+                Span::raw(" ".repeat(ICON_COLUMNS as usize + 1)),
                 Span::styled(name, name_style),
                 Span::raw(" ".repeat(pad + 1)),
                 Span::styled(percent, item.percent.map_or_else(dim, rarity_style)),
                 Span::styled(format!("  {date:>10}"), dim()),
             ]);
             let second = Line::from(vec![
-                Span::raw("     "),
-                Span::styled(fit(&description, width.saturating_sub(6)), dim()),
+                Span::raw(" ".repeat(5 + ICON_COLUMNS as usize)),
+                Span::styled(
+                    fit(&description, width.saturating_sub(6 + ICON_COLUMNS as usize)),
+                    dim(),
+                ),
             ]);
             let item = ListItem::new(vec![first, second]);
             if index == selected {
@@ -2459,9 +2465,40 @@ fn achievements_overlay(frame: &mut Frame<'_>, model: &mut Model) {
             }
         })
         .collect();
+    let app_id = view.app_id;
+    let wanted: Vec<(usize, String)> = visible
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(rows_visible)
+        .filter_map(|(index, item)| item.icon_url(app_id).map(|url| (index - offset, url)))
+        .collect();
     view.offset = offset;
     frame.render_widget(List::new(items), list_area);
+    // Icons sit left of the two-line rows. Graphics are only sent while this
+    // modal is the topmost layer; otherwise text cells keep them from leaking.
+    let native = model.cloud_conflicts.is_none() && model.modal.is_none() && model.chat.active.is_none();
+    for (row, url) in wanted {
+        let rect = Rect::new(
+            list_area.x + 4,
+            list_area.y + row as u16 * 2,
+            ICON_COLUMNS,
+            2,
+        );
+        if rect.right() > list_area.right() || rect.bottom() > list_area.bottom() {
+            continue;
+        }
+        model.achievement_images.prepare(&url, (ICON_COLUMNS, 2));
+        if native {
+            model.achievement_images.render(&url, rect, 0, 2, frame.buffer_mut());
+        } else {
+            model.achievement_images.render_fallback(&url, rect, frame.buffer_mut());
+        }
+    }
 }
+
+/// Width of an achievement icon in cells; two rows tall, so roughly square.
+const ICON_COLUMNS: u16 = 4;
 
 fn cloud_conflicts(frame: &mut Frame<'_>, model: &Model) {
     use steam_core::cloud::Choice;
@@ -3593,6 +3630,8 @@ mod tests {
                     display_name: format!("{name} title"),
                     description: format!("{name} description\u{1b}"),
                     hidden,
+                    icon: "0123abcd.jpg".into(),
+                    icon_gray: "4567abcd.jpg".into(),
                     unlocked,
                     unlock_time: time,
                     percent,
@@ -3613,6 +3652,16 @@ mod tests {
         assert!(output.contains("Rare title") && output.contains("2023-11-14"));
         assert!(output.contains("Hidden achievement") && !output.contains("Secret description"));
         assert!(!output.contains('\u{1b}'));
+        // Visible rows request their state's icon: colour when unlocked, gray when locked.
+        let app_id = model.achievements.as_ref().unwrap().app_id;
+        let requested: Vec<_> = model
+            .achievement_images
+            .pending
+            .iter()
+            .map(|request| request.url())
+            .collect();
+        assert!(requested.iter().any(|url| url.ends_with(&format!("/apps/{app_id}/0123abcd.jpg"))));
+        assert!(requested.iter().any(|url| url.ends_with(&format!("/apps/{app_id}/4567abcd.jpg"))));
         // Status order lists the unlocked one first; sorting by name flips the first row's owner.
         assert_eq!(
             model.achievements.as_ref().unwrap().visible()[0].name,

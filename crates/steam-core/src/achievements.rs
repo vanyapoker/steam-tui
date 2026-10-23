@@ -20,6 +20,9 @@ pub struct Achievement {
     pub display_name: String,
     pub description: String,
     pub hidden: bool,
+    /// Image file names on Valve's CDN: unlocked and locked (gray) icon.
+    pub icon: String,
+    pub icon_gray: String,
     pub unlocked: bool,
     /// Unix seconds, when unlocked and known.
     pub unlock_time: Option<u32>,
@@ -32,6 +35,28 @@ pub struct Achievements {
     pub items: Vec<Achievement>,
     /// False when the global percentages could not be fetched.
     pub has_percentages: bool,
+}
+
+impl Achievement {
+    /// The icon matching the unlock state; locked ones fall back to the colour
+    /// icon when the schema has no gray one.
+    pub fn icon_url(&self, app_id: u32) -> Option<String> {
+        let file = if self.unlocked || self.icon_gray.is_empty() {
+            &self.icon
+        } else {
+            &self.icon_gray
+        };
+        let hash = file.strip_suffix(".jpg").unwrap_or(file);
+        let safe = !hash.is_empty()
+            && hash.len() <= 64
+            && app_id != 0
+            && hash.bytes().all(|b| b.is_ascii_alphanumeric());
+        safe.then(|| {
+            format!(
+                "https://cdn.fastly.steamstatic.com/steamcommunity/public/images/apps/{app_id}/{hash}.jpg"
+            )
+        })
+    }
 }
 
 impl Achievements {
@@ -68,6 +93,8 @@ pub fn assemble(
                 },
                 description: ach.description.clone(),
                 hidden: ach.hidden,
+                icon: ach.icon.clone(),
+                icon_gray: ach.icon_gray.clone(),
                 unlocked,
                 unlock_time: time,
                 percent: percent.get(ach.name.as_str()).copied(),
@@ -131,6 +158,31 @@ pub async fn fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_urls_follow_unlock_state_and_reject_unsafe_names() {
+        let mut item = Achievement {
+            name: "A".into(),
+            display_name: "A".into(),
+            description: String::new(),
+            hidden: false,
+            icon: "aa11.jpg".into(),
+            icon_gray: "bb22".into(),
+            unlocked: true,
+            unlock_time: None,
+            percent: None,
+        };
+        let base = "https://cdn.fastly.steamstatic.com/steamcommunity/public/images/apps/7/";
+        assert_eq!(item.icon_url(7), Some(format!("{base}aa11.jpg")));
+        item.unlocked = false;
+        assert_eq!(item.icon_url(7), Some(format!("{base}bb22.jpg")));
+        item.icon_gray.clear();
+        assert_eq!(item.icon_url(7), Some(format!("{base}aa11.jpg")));
+        item.icon = "../x/y".into();
+        assert_eq!(item.icon_url(7), None);
+        item.icon.clear();
+        assert_eq!(item.icon_url(7), None);
+    }
     use steam_ipc::schema::{Achievement as Entry, Stat, StatKind};
 
     fn schema() -> Schema {

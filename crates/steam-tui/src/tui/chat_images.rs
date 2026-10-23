@@ -68,6 +68,13 @@ pub(super) struct Request {
     source: Option<Arc<DynamicImage>>,
 }
 
+impl Request {
+    #[cfg(test)]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
 pub(super) struct Loaded {
     url: String,
     size: (u16, u16),
