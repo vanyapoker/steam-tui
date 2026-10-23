@@ -3,7 +3,7 @@
 //! callback payloads that the game polls (`PollCallbacks`).
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 mod updates;
 
@@ -11,13 +11,14 @@ use futures_util::StreamExt;
 use steam_ipc::{LobbyFilter, LobbyInfo, LobbyMember, LobbyOp, Response};
 use steam_vent::{Connection, ConnectionTrait};
 use steam_vent_proto_steam::steammessages_clientserver_mms::{
-    CMsgClientMMSCreateLobby, CMsgClientMMSCreateLobbyResponse, CMsgClientMMSGetLobbyList,
-    CMsgClientMMSGetLobbyListResponse, CMsgClientMMSInviteToLobby, CMsgClientMMSJoinLobby,
-    CMsgClientMMSJoinLobbyResponse, CMsgClientMMSLeaveLobby, CMsgClientMMSLobbyChatMsg,
-    CMsgClientMMSLobbyData, CMsgClientMMSLobbyGameServerSet, CMsgClientMMSSendLobbyChatMsg,
-    CMsgClientMMSSetLobbyData, CMsgClientMMSSetLobbyDataResponse, CMsgClientMMSSetLobbyGameServer,
-    CMsgClientMMSSetLobbyOwner, CMsgClientMMSSetLobbyOwnerResponse, CMsgClientMMSUserJoinedLobby,
-    CMsgClientMMSUserLeftLobby, cmsg_client_mmsget_lobby_list::Filter,
+    CMsgClientMMSCreateLobby, CMsgClientMMSCreateLobbyResponse, CMsgClientMMSGetLobbyData,
+    CMsgClientMMSGetLobbyList, CMsgClientMMSGetLobbyListResponse, CMsgClientMMSInviteToLobby,
+    CMsgClientMMSJoinLobby, CMsgClientMMSJoinLobbyResponse, CMsgClientMMSLeaveLobby,
+    CMsgClientMMSLobbyChatMsg, CMsgClientMMSLobbyData, CMsgClientMMSLobbyGameServerSet,
+    CMsgClientMMSSendLobbyChatMsg, CMsgClientMMSSetLobbyData, CMsgClientMMSSetLobbyDataResponse,
+    CMsgClientMMSSetLobbyGameServer, CMsgClientMMSSetLobbyOwner,
+    CMsgClientMMSSetLobbyOwnerResponse, CMsgClientMMSUserJoinedLobby, CMsgClientMMSUserLeftLobby,
+    cmsg_client_mmsget_lobby_list::Filter,
 };
 
 use super::events::{Direction, EventSender, emit};
@@ -36,6 +37,9 @@ const ENTER_SUCCESS: i32 = 1;
 const MAX_CHAT: usize = 256;
 const MAX_QUEUED: usize = 4096;
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// `RequestLobbyData` right after Steam told us about the lobby is answered
+/// from what we have instead of asking again.
+const FRESH: Duration = Duration::from_secs(1);
 
 // ---- binary KeyValues (lobby metadata) ------------------------------------
 
@@ -110,6 +114,10 @@ struct Lobby {
     kind: i32,
     flags: i32,
     max_members: i32,
+    /// Member count from list results and data pushes, for lobbies we are not in.
+    num_members: i32,
+    /// When Steam last sent this lobby's metadata.
+    received: Option<Instant>,
     data: Vec<(String, String)>,
     members: Vec<(u64, Member)>,
     game_server: Option<(u64, u32, u16)>,
@@ -124,6 +132,14 @@ struct State {
     callbacks: VecDeque<(i32, Vec<u8>)>,
     updates: updates::Pending,
     left: std::collections::HashSet<u64>,
+    /// In-flight `RequestLobbyData` calls and when each was sent.
+    requested: HashMap<u64, Instant>,
+}
+
+impl Lobby {
+    fn has_member(&self, id: u64) -> bool {
+        self.members.iter().any(|(member, _)| *member == id)
+    }
 }
 
 pub struct Lobbies {
@@ -157,10 +173,19 @@ fn push(state: &Mutex<State>, id: i32, data: Vec<u8>) {
 
 /// LobbyDataUpdate_t { u64 lobby; u64 member; u8 success } (pack 4 => 20 bytes).
 fn data_update(lobby: u64, member: u64) -> Vec<u8> {
+    data_result(lobby, member, true)
+}
+
+fn data_result(lobby: u64, member: u64, success: bool) -> Vec<u8> {
     let mut v = u64b(lobby).to_vec();
     v.extend(u64b(member));
-    v.extend([1, 0, 0, 0]);
+    v.extend([u8::from(success), 0, 0, 0]);
     v
+}
+
+/// Lobbies are chat-type Steam IDs (account type 8).
+fn is_lobby_id(id: u64) -> bool {
+    id >> 52 & 0xF == 8 && id & 0xFFFF_FFFF != 0
 }
 
 /// LobbyEnter_t { u64 lobby; u32 permissions; bool locked; u32 response } (20 bytes).
@@ -392,6 +417,11 @@ impl Lobbies {
             kind: l.kind,
             flags: l.flags,
             max_members: l.max_members,
+            num_members: if l.members.is_empty() {
+                l.num_members
+            } else {
+                l.members.len() as i32
+            },
             data: l.data.clone(),
             members: l
                 .members
@@ -540,6 +570,7 @@ impl Lobbies {
                         kind: reply.lobby_type(),
                         flags: reply.lobby_flags(),
                         max_members: reply.max_members(),
+                        received: Some(Instant::now()),
                         data: kv_decode(reply.metadata()),
                         members,
                         ..Default::default()
@@ -775,23 +806,91 @@ impl Lobbies {
                     "MMSGetLobbyListResponse",
                     format!("{} lobbies", reply.lobbies.len()),
                 );
-                // Remember what the list told us so GetLobbyData works on results.
+                // Remember what the list told us so GetLobbyData and
+                // GetNumLobbyMembers work on results. Lobbies we are in keep
+                // the state their own pushes maintain.
                 let mut s = lock(&self.state);
                 let mut ids = Vec::new();
                 for found in &reply.lobbies {
                     let id = found.steam_id();
                     ids.push(id);
-                    s.lobbies.entry(id).or_insert_with(|| Lobby {
-                        kind: found.lobby_type(),
-                        flags: found.lobby_flags(),
-                        max_members: found.max_members(),
-                        data: kv_decode(found.metadata()),
-                        ..Default::default()
-                    });
+                    let entry = s.lobbies.entry(id).or_default();
+                    if entry.has_member(self.own) {
+                        continue;
+                    }
+                    entry.kind = found.lobby_type();
+                    entry.flags = found.lobby_flags();
+                    entry.max_members = found.max_members();
+                    entry.num_members = found.num_members();
+                    entry.data = kv_decode(found.metadata());
+                    entry.received = Some(Instant::now());
                 }
                 Response::LobbyIds(ids)
             }
+            LobbyOp::RequestData { lobby } => self.request_data(lobby).await,
         }
+    }
+
+    /// `RequestLobbyData`: asks Steam for the lobby's metadata. Steam answers
+    /// with a `ClientMMSLobbyData` push, which posts `LobbyDataUpdate_t`.
+    async fn request_data(&self, lobby: u64) -> Response {
+        if !is_lobby_id(lobby) {
+            return Response::LobbyFlag(false);
+        }
+        let sent_at = {
+            let mut s = lock(&self.state);
+            let current = s.lobbies.get(&lobby).is_some_and(|l| {
+                l.has_member(self.own) || l.received.is_some_and(|at| at.elapsed() < FRESH)
+            });
+            if current {
+                drop(s);
+                push(&self.state, LOBBY_DATA_UPDATE, data_update(lobby, lobby));
+                return Response::LobbyFlag(true);
+            }
+            if s.requested.contains_key(&lobby) {
+                return Response::LobbyFlag(true);
+            }
+            // An explicit request wants the answer even for a lobby we left.
+            s.left.remove(&lobby);
+            let now = Instant::now();
+            s.requested.insert(lobby, now);
+            now
+        };
+        self.note(
+            Direction::ToSteam,
+            "MMSGetLobbyData",
+            format!("lobby {lobby}"),
+        );
+        let sent = tokio::time::timeout(
+            TIMEOUT,
+            self.connection.send(CMsgClientMMSGetLobbyData {
+                app_id: Some(self.app_id),
+                steam_id_lobby: Some(lobby),
+                ..Default::default()
+            }),
+        )
+        .await
+        .is_ok_and(|r| r.is_ok());
+        if !sent {
+            lock(&self.state).requested.remove(&lobby);
+            return Response::LobbyFlag(false);
+        }
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(TIMEOUT).await;
+            let expired = {
+                let mut s = lock(&state);
+                let expired = s.requested.get(&lobby) == Some(&sent_at);
+                if expired {
+                    s.requested.remove(&lobby);
+                }
+                expired
+            };
+            if expired {
+                push(&state, LOBBY_DATA_UPDATE, data_result(lobby, lobby, false));
+            }
+        });
+        Response::LobbyFlag(true)
     }
 
     /// Applies `change` to the stored lobby and pushes the full state to Steam
@@ -883,7 +982,15 @@ fn apply_lobby_data(
     let mut changed_members = Vec::new();
     {
         let mut s = lock(state);
+        let requested = s.requested.remove(&lobby).is_some();
         if s.left.contains(&lobby) {
+            return;
+        }
+        // A lobby without an owner no longer exists.
+        if requested && m.steam_id_owner() == 0 {
+            s.lobbies.remove(&lobby);
+            drop(s);
+            push(state, LOBBY_DATA_UPDATE, data_result(lobby, lobby, false));
             return;
         }
         let owner_pending = s.updates.contains((lobby, 0));
@@ -896,6 +1003,12 @@ fn apply_lobby_data(
             }
         }
         entry.owner = m.steam_id_owner();
+        entry.received = Some(Instant::now());
+        entry.num_members = if m.has_num_members() {
+            m.num_members()
+        } else {
+            members.len() as i32
+        };
         if !owner_pending {
             entry.kind = m.lobby_type();
             entry.flags = m.lobby_flags();
@@ -1004,6 +1117,61 @@ mod tests {
         apply_lobby_data(&state, &None, 480, &old);
         assert!(lock(&state).lobbies.is_empty());
         assert!(lock(&state).callbacks.is_empty());
+    }
+
+    #[test]
+    fn requested_data_reports_counts_and_missing_lobbies() {
+        let lobby = 0x0186_0000_0000_0007;
+        assert!(is_lobby_id(lobby));
+        assert!(!is_lobby_id(0x0110_0001_0000_0007));
+        assert!(!is_lobby_id(0x0186_0000_0000_0000));
+
+        let state = Mutex::new(State::default());
+        lock(&state).requested.insert(lobby, Instant::now());
+        let found = CMsgClientMMSLobbyData {
+            app_id: Some(480),
+            steam_id_lobby: Some(lobby),
+            steam_id_owner: Some(10),
+            num_members: Some(3),
+            max_members: Some(4),
+            metadata: Some(kv_encode(&[("buildID".into(), "26120128".into())])),
+            ..Default::default()
+        };
+        apply_lobby_data(&state, &None, 480, &found);
+        {
+            let s = lock(&state);
+            assert!(s.requested.is_empty());
+            let l = &s.lobbies[&lobby];
+            assert_eq!((l.num_members, l.max_members), (3, 4));
+            assert_eq!(
+                l.data,
+                vec![("buildID".to_string(), "26120128".to_string())]
+            );
+            assert!(l.received.is_some());
+            assert_eq!(
+                s.callbacks.back().unwrap().1,
+                data_result(lobby, lobby, true)
+            );
+        }
+
+        let gone = 0x0186_0000_0000_0008;
+        lock(&state).requested.insert(gone, Instant::now());
+        apply_lobby_data(
+            &state,
+            &None,
+            480,
+            &CMsgClientMMSLobbyData {
+                app_id: Some(480),
+                steam_id_lobby: Some(gone),
+                ..Default::default()
+            },
+        );
+        let s = lock(&state);
+        assert!(!s.lobbies.contains_key(&gone));
+        assert_eq!(
+            s.callbacks.back().unwrap().1,
+            data_result(gone, gone, false)
+        );
     }
 
     #[test]

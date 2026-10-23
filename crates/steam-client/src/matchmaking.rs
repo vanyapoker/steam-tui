@@ -10,7 +10,6 @@ use steam_ipc::{LobbyFilter, LobbyInfo, LobbyOp, Operation, Response};
 const LOBBY_MATCH_LIST: i32 = 510;
 const LOBBY_CREATED: i32 = 513;
 const LOBBY_ENTER: i32 = 504;
-const LOBBY_DATA_UPDATE: i32 = 505;
 const RESULT_NO_CONNECTION: i32 = 3;
 const ENTER_ERROR: u32 = 5;
 
@@ -218,7 +217,7 @@ unsafe extern "C" fn invite(_this: *mut c_void, lobby: u64, user: u64) -> bool {
     flag(op(LobbyOp::Invite { lobby, user }))
 }
 unsafe extern "C" fn member_count(_this: *mut c_void, lobby: u64) -> i32 {
-    info(lobby).map_or(0, |l| l.members.len() as i32)
+    info(lobby).map_or(0, |l| l.num_members)
 }
 unsafe extern "C" fn member_by_index(_this: *mut c_void, lobby: u64, index: i32) -> u64 {
     info(lobby)
@@ -354,14 +353,10 @@ unsafe extern "C" fn chat_entry(
     }
 }
 unsafe extern "C" fn request_data(_this: *mut c_void, lobby: u64) -> bool {
-    // Lobby state is pushed to us; answer with what we have so the game's
-    // LobbyDataUpdate_t handler runs.
-    let known = info(lobby).is_some();
-    let mut v = lobby.to_le_bytes().to_vec();
-    v.extend(lobby.to_le_bytes());
-    v.extend([u8::from(known), 0, 0, 0]);
-    auth::push_callback(LOBBY_DATA_UPDATE, v);
-    known
+    // The backend asks Steam and posts LobbyDataUpdate_t when the answer lands.
+    let ok = flag(op(LobbyOp::RequestData { lobby }));
+    forget(lobby);
+    ok
 }
 unsafe extern "C" fn set_game_server(
     _this: *mut c_void,

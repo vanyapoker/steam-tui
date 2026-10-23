@@ -404,6 +404,11 @@ pub enum LobbyOp {
     Get {
         lobby: u64,
     },
+    /// Asks Steam for a lobby's current metadata (`RequestLobbyData`); the
+    /// answer arrives as `LobbyDataUpdate_t`.
+    RequestData {
+        lobby: u64,
+    },
     RequestList {
         filters: Vec<LobbyFilter>,
         max_results: i32,
@@ -424,6 +429,10 @@ pub struct LobbyInfo {
     pub kind: i32,
     pub flags: i32,
     pub max_members: i32,
+    /// Member count as Steam reports it; also known for lobbies we are not in,
+    /// where `members` stays empty.
+    #[serde(default)]
+    pub num_members: i32,
     pub data: Vec<(String, String)>,
     pub members: Vec<LobbyMember>,
     /// (game server steam id, ip, port)
