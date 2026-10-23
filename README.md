@@ -186,6 +186,29 @@ Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK h
 - Controllers: Xbox-compatible pads, DualSense and DualShock 4 are mirrored onto one virtual Xbox 360 pad (needs write access to `/dev/uinput`; set `STEAM_TUI_NO_VIRTUAL_GAMEPAD=1` to disable), and Steam Input reports that pad as connected; see [the virtual gamepad notes](docs/virtual-gamepad.md). Remapping, action sets, gyro and touchpad are not implemented, and other pad families or a second pad are left to Wine.
 - Linux only.
 
+## Known issues
+
+### Proton game runs but never opens a window
+
+The game shows as running, the process exists, yet no window ever appears and Unity/Unreal write no log. Wine cannot reach the X server, so it waits forever instead of failing. Check with:
+
+```sh
+xrandr --listmonitors        # "Can't open display :0" confirms it
+ls -la /tmp/.X11-unix/       # X0 is missing
+```
+
+Something outside steam-tui (a `/tmp` cleaner, a script running `rm -rf /tmp/*`, a short-lived X server) deleted the `/tmp/.X11-unix/X0` socket while Xwayland kept running. Every X11/Proton app in the session is affected, not only games started by steam-tui.
+
+Fix: log out and back in, which recreates the socket. Without restarting the session, stop the stuck game and point `:0` back at the socket Xwayland still listens on (Hyprland also binds `X0_`):
+
+```sh
+pkill -x Mycopunk.exe; pkill -x wineserver   # use the stuck game's executable name
+ln -s X0_ /tmp/.X11-unix/X0
+xrandr --listmonitors                        # should list your monitors again
+```
+
+The link lasts until the next login. To find what deletes the socket, watch the directory: `sudo auditctl -w /tmp/.X11-unix -p wa -k x11sock`, then `sudo ausearch -k x11sock` after it happens.
+
 ## Not implemented yet
 
 Steam Input remapping and action sets, game invites, publishing Workshop items, store and community pages, trading.
