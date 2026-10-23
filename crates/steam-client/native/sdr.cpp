@@ -72,6 +72,19 @@ struct Relay {
   }
 };
 
+// Opt-in (STEAM_TUI_NET_TRACE=1) relay datagram trace, bounded per process.
+static bool relay_trace(int &budget) {
+  static const bool enabled = getenv("STEAM_TUI_NET_TRACE") != nullptr;
+  return enabled && budget-- > 0;
+}
+static int recv_budget = 400, drop_budget = 200;
+static void drop(uint32_t conn, const char *why, size_t size, uint8_t lead) {
+  if (relay_trace(drop_budget))
+    fprintf(stderr,
+            "[steam-tui-network] SDR drop conn=%u lead=%02x len=%zu: %s\n",
+            conn, lead, size, why);
+}
+
 static uint32_t revision;
 static std::vector<std::shared_ptr<Relay>> relays;
 class Transport;
@@ -296,30 +309,56 @@ public:
     msg.set_sdr_routes(routes.SerializeAsString());
   }
   void receive_routes(const CMsgSteamNetworkingP2PRendezvous &msg) {
-    if (msg.has_ack_peer_routes_revision() &&
-        msg.ack_peer_routes_revision() <= route_revision)
-      acked_revision = std::max(acked_revision, msg.ack_peer_routes_revision());
+    ack_routes(msg.has_ack_peer_routes_revision(),
+               msg.ack_peer_routes_revision());
+    if (msg.has_sdr_routes())
+      apply_routes(msg.sdr_routes());
+  }
+  void ack_routes(bool present, uint32_t revision) {
+    if (present && revision <= route_revision)
+      acked_revision = std::max(acked_revision, revision);
+  }
+  /// Peer routes, from signaling or forwarded by the relay in its stats.
+  void apply_routes(const std::string &wire) {
     steam_tui::sdr::CMsgSteamDatagramP2PRoutes routes;
-    if (!msg.has_sdr_routes() || msg.sdr_routes().size() > 8192 ||
-        !routes.ParseFromString(msg.sdr_routes()) ||
+    if (wire.size() > 8192 || !routes.ParseFromString(wire) ||
         routes.relay_clusters_size() > 128 || routes.routes_size() > 512 ||
         routes.revision() < peer_revision)
       return;
-    for (const auto &cluster : routes.relay_clusters()) {
+    // A peer lists every relay cluster it measured; only clusters it holds a
+    // session on carry a routing token, and only those can receive forwarded
+    // data. Keep the cluster in use while it still has a token, else take the
+    // first one that has one. Never trade a working token for an empty one:
+    // that silently stops all end-to-end data.
+    int chosen = -1, fallback = -1;
+    for (int i = 0; i < routes.relay_clusters_size(); ++i) {
+      const auto &cluster = routes.relay_clusters(i);
       if (!cluster.pop_id() || !cluster.has_ping_ms() ||
           cluster.session_relay_routing_token().size() > 256)
         continue;
-      if (peer_pop != cluster.pop_id() ||
-          peer_token != cluster.session_relay_routing_token() ||
-          peer_revision != routes.revision()) {
-        peer_pop = cluster.pop_id();
-        peer_token = cluster.session_relay_routing_token();
-        peer_revision = routes.revision();
-        if (relay && !token.empty())
-          conn.ScheduleSendSignal("SDR peer routes");
-        EnsureP2PTransportThink(k_nThinkTime_ASAP);
-      }
-      break;
+      if (fallback < 0)
+        fallback = i;
+      if (cluster.session_relay_routing_token().empty())
+        continue;
+      if (chosen < 0 || cluster.pop_id() == peer_pop)
+        chosen = i;
+    }
+    // No session token offered yet: remember the peer's preferred POP as a
+    // route hint, but keep any token we already have.
+    if (chosen < 0 && (fallback < 0 || !peer_token.empty())) {
+      peer_revision = std::max(peer_revision, routes.revision());
+      return;
+    }
+    const auto &cluster = routes.relay_clusters(chosen >= 0 ? chosen : fallback);
+    if (peer_pop != cluster.pop_id() ||
+        peer_token != cluster.session_relay_routing_token() ||
+        peer_revision != routes.revision()) {
+      peer_pop = cluster.pop_id();
+      peer_token = cluster.session_relay_routing_token();
+      peer_revision = routes.revision();
+      if (relay && !token.empty())
+        conn.ScheduleSendSignal("SDR peer routes");
+      EnsureP2PTransportThink(k_nThinkTime_ASAP);
     }
   }
   void
@@ -503,10 +542,17 @@ public:
     next_request = now + 1'000'000;
   }
   void receive_data(const uint8_t *packet, size_t size, int64_t now) {
-    if (!conn.BStateIsActive() || size < 9 ||
-        get32(packet + 5) != conn.m_unConnectionIDLocal ||
-        !BCanSendEndToEndData())
-      return;
+    uint32_t id = conn.m_unConnectionIDLocal;
+    if (!conn.BStateIsActive())
+      return drop(id, "connection not active", size, packet[0]);
+    if (size < 9 || get32(packet + 5) != id)
+      return drop(id, "short or other connection", size, packet[0]);
+    if (!BCanSendEndToEndData())
+      return drop(id,
+                  token.empty() ? "no session token"
+                                : (peer_token.empty() ? "no peer token"
+                                                      : "not admitted"),
+                  size, packet[0]);
     const uint8_t *in = packet + 9, *end = packet + size;
     steam_tui::sdr::CMsgSteamDatagramConnectionStatsP2PRouterToClient stats;
     steam_tui::sdr::CMsgSteamDatagramConnectionStatsRouterToClient hosted_stats;
@@ -514,17 +560,17 @@ public:
       uint32 length;
       in = DeserializeVarInt(in, end, length);
       if (!in || length > size_t(end - in))
-        return;
+        return drop(id, "bad stats length", size, packet[0]);
       if (hosted_ticket.empty() ? !stats.ParseFromArray(in, length)
                                 : !hosted_stats.ParseFromArray(in, length))
-        return;
+        return drop(id, "bad stats protobuf", size, packet[0]);
       in += length;
     }
     int spacing = -1;
     // Router-to-client spacing contains end-to-end and relay spacing.
     if (packet[0] & 2) {
       if (end - in < 4)
-        return;
+        return drop(id, "short spacing", size, packet[0]);
       spacing = get16(in) << 4;
       in += 4;
     }
@@ -533,14 +579,14 @@ public:
     ctx.m_pTransport = this;
     // +1 is the end-to-end sequence; +3 is the relay sequence.
     if (!conn.DecryptDataChunk(get16(packet + 1), size, in, end - in, ctx))
-      return;
+      return drop(id, "decrypt failed", size, packet[0]);
     if (recv_data++ == 0)
       fprintf(
           stderr,
           "[steam-tui-network] SDR first encrypted packet verified conn=%u\n",
           conn.m_unConnectionIDLocal);
     if (!conn.ProcessPlainTextDataChunk(spacing, ctx))
-      return;
+      return drop(id, "rejected by SNP", size, packet[0]);
     last_relay_recv = get16(packet + 3);
     P2PTransportTrackRecvEndToEndPacket(now);
     P2PTransportEndToEndConnectivityConfirmed(now);
@@ -640,7 +686,10 @@ public:
       last_received = now;
       if (msg.flags() & msg.ACK_REQUEST_RELAY)
         next_stats = 0;
-    } else if (kind == 27) {
+    } else if (kind == 26 || kind == 27) {
+      // Relays send P2P stats to clients as kind 26, the same kind clients
+      // send theirs with; Valve's client parses kind 26 from a relay as
+      // CMsgSteamDatagramConnectionStatsP2PRouterToClient.
       steam_tui::sdr::CMsgSteamDatagramConnectionStatsP2PRouterToClient msg;
       if (!msg.ParseFromArray(data, size) ||
           msg.connection_id() != conn.m_unConnectionIDLocal)
@@ -649,6 +698,32 @@ public:
       if (msg.flags() & msg.ACK_REQUEST_RELAY)
         next_stats = 0;
       last_received = now;
+      ack_routes(msg.has_ack_peer_routes_revision(),
+                 msg.ack_peer_routes_revision());
+      if (!msg.routes().empty())
+        apply_routes(msg.routes());
+      if (!BCanSendEndToEndData() || !conn.BStateIsActive())
+        return;
+      // End-to-end stats forwarded from the peer carry their own sequence
+      // number; record it so SNP sees no false loss and keeps the route.
+      if (msg.has_seq_num_e2e()) {
+        int64 number = conn.m_statsEndToEnd.ExpandWirePacketNumberAndCheck(
+            uint16(msg.seq_num_e2e()), 0);
+        if (number > 0) {
+          conn.RecvNonDataSequencedPacket(number, now);
+          P2PTransportTrackRecvEndToEndPacket(now);
+          P2PTransportEndToEndConnectivityConfirmed(now);
+        }
+      }
+      if (msg.has_quality_e2e())
+        conn.m_statsEndToEnd.ProcessMessage(msg.quality_e2e(), now);
+      if ((msg.flags() & msg.ACK_REQUEST_E2E) || msg.has_quality_e2e()) {
+        bool immediate = (msg.flags() & msg.ACK_REQUEST_IMMEDIATE) != 0;
+        conn.QueueEndToEndAck(immediate, now);
+        if (immediate || conn.m_pTransport != this)
+          SendEndToEndStatsMsg(k_EStatsReplyRequest_NothingToSend, now,
+                               "SDR peer stats ack");
+      }
     } else if (kind == 28) {
       steam_tui::sdr::CMsgSteamDatagramP2PBadRouteRouterToClient msg;
       if (!msg.ParseFromArray(data, size) ||
@@ -695,10 +770,15 @@ void pump() {
         if (n < 0)
           break;
         ++received;
+        if (n >= 1 && packet[0] != 2 && relay_trace(recv_budget))
+          fprintf(stderr,
+                  "[steam-tui-network] SDR recv pop=%u lead=%02x len=%d "
+                  "conn=%u\n",
+                  r->pop, packet[0], n, n >= 9 ? get32(packet + 5) : 0);
         if (n > int(kMaxDatagram))
           continue;
-        if (n > 1 && (packet[0] == 7 || packet[0] == 13 || packet[0] == 27 ||
-                      packet[0] == 28)) {
+        if (n > 1 && (packet[0] == 7 || packet[0] == 13 || packet[0] == 26 ||
+                      packet[0] == 27 || packet[0] == 28)) {
           for (auto &[id, transport] : transports)
             if (transport->relay == r) {
               ConnectionScopeLock connection(transport->conn, "SDR control");

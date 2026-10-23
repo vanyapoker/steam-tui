@@ -10,6 +10,8 @@
 #include <ctime>
 #include <cstdio>
 #include <map>
+#include <vector>
+#include <string>
 #include <mutex>
 #include <cstdlib>
 #include "sdr.h"
@@ -33,7 +35,25 @@ static_assert(sizeof(SteamNetworkingMessagesSessionRequest_t)==136);
 static_assert(sizeof(SteamNetworkingMessagesSessionFailed_t)==696);
 static void debug(ESteamNetworkingSocketsDebugOutputType,const char *message) { fprintf(stderr,"[steam-tui-network] %s\n",message); }
 static ISteamNetworkingSockets *native() { return SteamNetworkingSockets(); }
+static bool net_trace();
+// Connections whose detailed status is dumped in trace mode, and when next.
+static std::mutex traced_mutex;
+static std::map<HSteamNetConnection,SteamNetworkingMicroseconds> traced;
 static void changed(SteamNetConnectionStatusChangedCallback_t *info) {
+    if(net_trace()) {
+        std::lock_guard<std::mutex> lock(traced_mutex);
+        auto state=info->m_info.m_eState;
+        if(state==k_ESteamNetworkingConnectionState_Connecting ||
+           state==k_ESteamNetworkingConnectionState_FindingRoute ||
+           state==k_ESteamNetworkingConnectionState_Connected) {
+            if(traced.size()<16) traced.emplace(info->m_hConn,0);
+        } else traced.erase(info->m_hConn);
+    }
+    // State changes name why a connection never opened or was closed.
+    const SteamNetConnectionInfo_t &c=info->m_info;
+    fprintf(stderr,"[steam-tui-network] connection %u: state %d -> %d, end reason %d%s%s\n",
+        info->m_hConn,info->m_eOldState,c.m_eState,c.m_eEndReason,
+        c.m_szEndDebug[0]?", ":"",c.m_szEndDebug);
     status_callback(1221,info,sizeof(*info));
 }
 static void messages_request(SteamNetworkingMessagesSessionRequest_t *info) { status_callback(1251,info,sizeof(*info)); }
@@ -79,6 +99,41 @@ static bool set_cert(const void *data,int size,SteamNetworkingErrMsg &err) {
     return native()->SetCertificate(data,size,err);
 }
 extern "C" void steam_tui_networking_pump();
+// Opt-in (STEAM_TUI_NET_TRACE=1): size and readable text of the first game
+// messages on each connection, so a peer's rejection reason shows in the log.
+// Off by default: game messages can carry player names and chat.
+static bool net_trace() {
+    static const bool enabled=getenv("STEAM_TUI_NET_TRACE")!=nullptr;
+    return enabled;
+}
+static void trace_message(const char *direction,HSteamNetConnection conn,const void *data,uint32 size) {
+    static std::mutex mutex;
+    static std::map<HSteamNetConnection,int> counts;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if(counts.size()>256) counts.clear();
+        if(counts[conn]++>=64) return;
+    }
+    // Printable ASCII runs of four or more characters, like strings(1).
+    std::string text;
+    const auto *bytes=static_cast<const unsigned char *>(data);
+    std::string run;
+    for(uint32 i=0;i<size && text.size()<200;++i) {
+        if(bytes[i]>=0x20 && bytes[i]<0x7f) { run+=char(bytes[i]); continue; }
+        if(run.size()>=4) { text+=text.empty()?"":" | "; text+=run; }
+        run.clear();
+    }
+    if(run.size()>=4 && text.size()<200) { text+=text.empty()?"":" | "; text+=run; }
+    char head[64]={0};
+    for(uint32 i=0;i<size && i<12;++i) snprintf(head+i*3,4,"%02x ",bytes[i]);
+    fprintf(stderr,"[steam-tui-network] %s conn=%u %u bytes [%s]%s%s\n",direction,conn,size,head,
+        text.empty()?"":" text: ",text.c_str());
+}
+static void trace_received(SteamNetworkingMessage_t **messages,int count) {
+    if(!net_trace() || !messages) return;
+    for(int i=0;i<count;++i)
+        if(messages[i]) trace_message("recv",messages[i]->m_conn,messages[i]->m_pData,uint32(messages[i]->m_cbSize));
+}
 // No virtual destructor: slot zero must remain CreateListenSocketIP.
 class LegacySockets {
 public:
@@ -92,7 +147,11 @@ public:
         fprintf(stderr,"[steam-tui-network] ConnectP2P port=%d handle=%u\n",nRemoteVirtualPort,handle);
         return handle; }
     virtual EResult AcceptConnection(HSteamNetConnection hConn) { return native()->AcceptConnection(hConn); }
-    virtual bool CloseConnection(HSteamNetConnection hPeer, int nReason, const char *pszDebug, bool bEnableLinger) { return native()->CloseConnection(hPeer, nReason, pszDebug, bEnableLinger); }
+    virtual bool CloseConnection(HSteamNetConnection hPeer, int nReason, const char *pszDebug, bool bEnableLinger) {
+        // The game closing a connection is the only close with no peer reason; name it.
+        fprintf(stderr,"[steam-tui-network] game closes connection %u: reason %d%s%s%s\n",hPeer,nReason,
+            pszDebug&&*pszDebug?", ":"",pszDebug?pszDebug:"",bEnableLinger?" (linger)":"");
+        return native()->CloseConnection(hPeer, nReason, pszDebug, bEnableLinger); }
     virtual bool CloseListenSocket(HSteamListenSocket hSocket) { bool closed=native()->CloseListenSocket(hSocket);
         if(closed) { std::lock_guard<std::mutex> lock(listen_mutex); listen_ports.erase(hSocket); }
         return closed; }
@@ -100,10 +159,18 @@ public:
     virtual int64 GetConnectionUserData(HSteamNetConnection hPeer) { return native()->GetConnectionUserData(hPeer); }
     virtual void SetConnectionName(HSteamNetConnection hPeer, const char *pszName) { native()->SetConnectionName(hPeer, pszName); }
     virtual bool GetConnectionName(HSteamNetConnection hPeer, char *pszName, int nMaxLen) { return native()->GetConnectionName(hPeer, pszName, nMaxLen); }
-    virtual EResult SendMessageToConnection(HSteamNetConnection hConn, const void *pData, uint32 cbData, int nSendFlags, int64 *pOutMessageNumber) { return native()->SendMessageToConnection(hConn, pData, cbData, nSendFlags, pOutMessageNumber); }
-    virtual void SendMessages(int nMessages, SteamNetworkingMessage_t **pMessages, int64 *pOutMessageNumberOrResult) { native()->SendMessages(nMessages, pMessages, pOutMessageNumberOrResult, true); }
+    virtual EResult SendMessageToConnection(HSteamNetConnection hConn, const void *pData, uint32 cbData, int nSendFlags, int64 *pOutMessageNumber) {
+        if(net_trace()) trace_message("send",hConn,pData,cbData);
+        return native()->SendMessageToConnection(hConn, pData, cbData, nSendFlags, pOutMessageNumber); }
+    virtual void SendMessages(int nMessages, SteamNetworkingMessage_t **pMessages, int64 *pOutMessageNumberOrResult) {
+        if(net_trace() && pMessages)
+            for(int i=0;i<nMessages;++i) if(pMessages[i]) trace_message("send",pMessages[i]->m_conn,pMessages[i]->m_pData,uint32(pMessages[i]->m_cbSize));
+        native()->SendMessages(nMessages, pMessages, pOutMessageNumberOrResult, true); }
     virtual EResult FlushMessagesOnConnection(HSteamNetConnection hConn) { return native()->FlushMessagesOnConnection(hConn); }
-    virtual int ReceiveMessagesOnConnection(HSteamNetConnection hConn, SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages) { return native()->ReceiveMessagesOnConnection(hConn, ppOutMessages, nMaxMessages); }
+    virtual int ReceiveMessagesOnConnection(HSteamNetConnection hConn, SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages) {
+        int count=native()->ReceiveMessagesOnConnection(hConn, ppOutMessages, nMaxMessages);
+        trace_received(ppOutMessages,count);
+        return count; }
     virtual bool GetConnectionInfo(HSteamNetConnection hConn, SteamNetConnectionInfo_t *pInfo) { return native()->GetConnectionInfo(hConn, pInfo); }
     virtual EResult GetConnectionRealTimeStatus(HSteamNetConnection hConn, SteamNetConnectionRealTimeStatus_t *pStatus, int nLanes, SteamNetConnectionRealTimeLaneStatus_t *pLanes) { return native()->GetConnectionRealTimeStatus(hConn, pStatus, nLanes, pLanes); }
     virtual int GetDetailedConnectionStatus(HSteamNetConnection hConn, char *pszBuf, int cbBuf) { return native()->GetDetailedConnectionStatus(hConn, pszBuf, cbBuf); }
@@ -116,7 +183,10 @@ public:
     virtual HSteamNetPollGroup CreatePollGroup() { return native()->CreatePollGroup(); }
     virtual bool DestroyPollGroup(HSteamNetPollGroup hPollGroup) { return native()->DestroyPollGroup(hPollGroup); }
     virtual bool SetConnectionPollGroup(HSteamNetConnection hConn, HSteamNetPollGroup hPollGroup) { return native()->SetConnectionPollGroup(hConn, hPollGroup); }
-    virtual int ReceiveMessagesOnPollGroup(HSteamNetPollGroup hPollGroup, SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages) { return native()->ReceiveMessagesOnPollGroup(hPollGroup, ppOutMessages, nMaxMessages); }
+    virtual int ReceiveMessagesOnPollGroup(HSteamNetPollGroup hPollGroup, SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages) {
+        int count=native()->ReceiveMessagesOnPollGroup(hPollGroup, ppOutMessages, nMaxMessages);
+        trace_received(ppOutMessages,count);
+        return count; }
     virtual bool ReceivedRelayAuthTicket(const void *pvTicket, int cbTicket, SteamDatagramRelayAuthTicket *pOutParsedTicket) { return steam_tui_relay::receive_ticket(pvTicket,cbTicket,app_id,local_id,pOutParsedTicket); }
     virtual int FindRelayAuthTicketForServer(const SteamNetworkingIdentity &identityGameServer, int nRemoteVirtualPort, SteamDatagramRelayAuthTicket *pOutParsedTicket) { char server[128]; identityGameServer.ToString(server,sizeof(server)); return steam_tui_relay::find_ticket(server,nRemoteVirtualPort,nullptr,pOutParsedTicket); }
     virtual HSteamNetConnection ConnectToHostedDedicatedServer(const SteamNetworkingIdentity &identityTarget, int nRemoteVirtualPort, int nOptions, const SteamNetworkingConfigValue_t *pOptions) { return steam_tui_relay::connect_hosted(identityTarget,nRemoteVirtualPort,nOptions,pOptions); }
@@ -147,7 +217,11 @@ void *steam_tui_transport_init(uint64 id,uint32 app,SendSignalFn send,StatusFn s
     local_id=id; app_id=app; send_signal=send; status_callback=status;
     static_cast<CSteamNetworkingUtils*>(SteamNetworkingUtils())->SetAppID(app);
     auto *utils=SteamNetworkingUtils();
-    utils->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Warning,debug);
+    utils->SetDebugOutputFunction(net_trace()?k_ESteamNetworkingSocketsDebugOutputType_Verbose
+                                             :k_ESteamNetworkingSocketsDebugOutputType_Warning,debug);
+    if(net_trace())
+        utils->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_LogLevel_P2PRendezvous,
+                                         k_ESteamNetworkingSocketsDebugOutputType_Verbose);
     utils->SetGlobalCallback_SteamNetConnectionStatusChanged(changed);
     utils->SetGlobalCallback_MessagesSessionRequest(messages_request);
     utils->SetGlobalCallback_MessagesSessionFailed(messages_failed);
@@ -185,7 +259,23 @@ bool steam_tui_transport_set_cert(const void *data,int size,char *error) {
 void steam_tui_transport_recv(uint64 peer,const void *data,int size) {
     Receive context(peer); native()->ReceivedP2PCustomSignal(data,size,&context);
 }
-void steam_tui_transport_callbacks() { steam_tui_relay::pump(); native()->RunCallbacks(); }
+void steam_tui_transport_callbacks() {
+    steam_tui_relay::pump();
+    native()->RunCallbacks();
+    if(!net_trace()) return;
+    // Every two seconds: selected transport, pings, queued and unacked data.
+    std::vector<HSteamNetConnection> due;
+    auto now=SteamNetworkingUtils()->GetLocalTimestamp();
+    {
+        std::lock_guard<std::mutex> lock(traced_mutex);
+        for(auto &[conn,next]:traced) if(now>=next) { due.push_back(conn); next=now+2'000'000; }
+    }
+    for(auto conn:due) {
+        static char status[8192];
+        if(native()->GetDetailedConnectionStatus(conn,status,sizeof(status))<0) continue;
+        fprintf(stderr,"[steam-tui-network] status conn=%u:\n%s\n",conn,status);
+    }
+}
 void steam_tui_sdr_configure(uint32 revision) { steam_tui_relay::configure(revision); }
 bool steam_tui_sdr_add_relay(uint32 pop,uint32 ip,uint16 port) { return steam_tui_relay::add_relay(pop,ip,port); }
 float steam_tui_sdr_ping_age() { steam_tui_relay::pump(); return steam_tui_relay::ping_age(); }
