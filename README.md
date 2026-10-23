@@ -169,10 +169,11 @@ See [the update audit](docs/steam-update-gap-audit.md) for evidence, supported f
 
 | Works | Partial | Not yet |
 | --- | --- | --- |
-| User, Utils, Apps, Friends (basics) | Matchmaking and lobbies | Publishing Workshop items |
-| Game Coordinator relay | Networking sockets, P2P and relay | Inventory |
-| Steam Cloud, encrypted app tickets | Auth tickets, controller presence | Steam Input actions/remapping, Screenshots |
-| Stats, achievements (with icons), leaderboards | Global stats | Friend avatars |
+| User, Utils, Apps, Friends (friend list, personas, rich presence) | Server browser | Publishing Workshop items |
+| Lobbies: lists, data, create, join | Networking sockets to hosted servers | Inventory |
+| Game Coordinator relay; P2P over Steam relays | Auth tickets, controller presence | Steam Input actions/remapping, Screenshots |
+| Steam Cloud, encrypted app tickets | Global stats | Friend avatars, game invites |
+| Stats, achievements (with icons), leaderboards | | |
 | Workshop: queries, subscriptions, downloads, votes, favorites | | |
 
 Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK headers: SteamClient 006-021 and 023 (not 022), and every version Valve's public headers ever shipped for User, Utils, Apps, Friends, Matchmaking, Servers, UserStats, Networking, RemoteStorage, Screenshots, HTTP, HTMLSurface, Controller, Inventory, UGC and Input. Where an old version's call has no matching implementation, the slot logs and returns zero. Stats, achievements and leaderboard scores are read from and written to your real Steam account, like the normal client. Workshop items you subscribe to are downloaded in the background into the game's library (`steamapps/workshop/content/<app>/<item>`, recorded in Valve's `appworkshop_<app>.acf`) while the game runs; subscribing, voting, favoriting and the other Workshop calls act on your real account. Publishing items (CreateItem, SubmitItemUpdate) is not supported and reports failure, and so are the voted-on user lists. Unsupported calls log and abort rather than pretend to work.
@@ -180,7 +181,7 @@ Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK h
 ## Limitations
 
 - VAC-secured games run through Valve's Steam client without its web helpers. It must be signed in to the same account, and costs about 200 MB extra. Enter picks this automatically.
-- Online matchmaking and relay networking are unfinished.
+- Lobby play over Steam's relays works with players on Valve's client (verified with Mycopunk). Server browsing and relayed connections to hosted dedicated servers are unfinished.
 - In-game DLC changes preserve the parent build; a parent update or ambiguous metadata requires closing/updating the game. Removal retains modified files and user configuration. Windows setup scripts run at the next launch. `SetDlcContext` usage reporting is unavailable.
 - Shader download/replay currently covers Vulkan FOZ v6. Legacy GPU-specific shader binary caches and shader capture/upload are not implemented. Real-driver replay performance has not been measured.
 - Controllers: Xbox-compatible pads, DualSense and DualShock 4 are mirrored onto one virtual Xbox 360 pad (needs write access to `/dev/uinput`; set `STEAM_TUI_NO_VIRTUAL_GAMEPAD=1` to disable), and Steam Input reports that pad as connected; see [the virtual gamepad notes](docs/virtual-gamepad.md). Remapping, action sets, gyro and touchpad are not implemented, and other pad families or a second pad are left to Wine.

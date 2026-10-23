@@ -1,9 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.4.3 - 2026-10-23
+
+### Added
+- Games on the built-in backend see your Steam friends: friend list, relationships, names, status, games played and their lobbies, so in-game "join friend" lists work. Games' rich presence is uploaded to Steam and friends' rich presence can be read; lobby members' names resolve too.
+- Network diagnostics in the game log: connection state changes and game-initiated closes. `STEAM_TUI_NET_TRACE=1` adds message, relay and route details; `STEAM_TUI_CRASH_TRACE=1` reports native crashes.
 
 ### Changed
 - Tab and Shift+Tab switch only between Library and Friends. Page Up/Down scroll Notifications from either main pane; `x` clears the feed from either pane. Overlays keep their own navigation.
+- Lobby lists, joining, creating and leaving lobbies no longer pause the game while Steam answers, and connection checks run in the background. Ownership checks answer from your license list.
+
+### Fixed
+- Joining a lobby hosted by a player on Valve's client no longer hangs on the loading screen: Steam relay status messages are handled and the host's route is kept.
+- Lobby lists show member counts and current data, and joins read the host's build correctly, so Mycopunk no longer reports a different game version.
+- Lobbies you host get their name, version and visibility.
+- First purchase dates and license changes are reported to games.
+- Changelogs: literal `<3`, arrows and stray brackets no longer hide following text; carousel and localized images display.
 
 ## 0.4.2 - 2026-10-22
 
