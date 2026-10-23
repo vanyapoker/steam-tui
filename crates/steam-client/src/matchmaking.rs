@@ -262,7 +262,11 @@ unsafe extern "C" fn create(_this: *mut c_void, kind: i32, max_members: i32) -> 
         // LobbyCreated_t { i32 result; u64 lobby } (pack 4 => 12 bytes).
         let mut payload = result.to_le_bytes().to_vec();
         payload.extend(lobby.to_le_bytes());
-        callresults::complete_for(call, LOBBY_CREATED, payload);
+        // Like Valve's client: the call result, then LobbyCreated_t broadcast
+        // whatever the result (games set up their lobby from it), then the
+        // backend's LobbyEnter_t on success.
+        callresults::complete_for(call, LOBBY_CREATED, payload.clone());
+        auth::push_callback(LOBBY_CREATED, payload);
         for (id, hex) in callbacks {
             if let Some(data) = steam_ipc::hex_decode(&hex) {
                 auth::push_callback(id, data);
