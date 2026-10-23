@@ -3369,6 +3369,80 @@ mod tests {
     }
 
     #[test]
+    fn sampled_news_feeds_render_and_expose_all_links_through_every_page() {
+        use super::super::news_content::{Block as Content, fixtures};
+        use std::collections::BTreeSet;
+
+        for (name, app_id, items) in fixtures::feeds() {
+            let mut model = model();
+            model.news = Some(super::super::model::NewsView {
+                request: 1,
+                app_id,
+                name: name.into(),
+                offset: 0,
+                document: None,
+                links: Vec::new(),
+                link_error: None,
+                result: Some(Ok(items)),
+            });
+            for (width, height) in [(110, 40), (80, 24), (60, 20)] {
+                model.news.as_mut().unwrap().offset = 0;
+                render(&mut model, width, height);
+                let expected: BTreeSet<_> = model
+                    .news
+                    .as_ref()
+                    .unwrap()
+                    .document
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|block| match block {
+                        Content::Text(line) => Some(line.targets.iter().flatten().cloned()),
+                        Content::Image(_) => None,
+                    })
+                    .flatten()
+                    .collect();
+                let area = modal_area(Rect::new(0, 0, width, height), 100, 36);
+                let inner = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2);
+                let mut seen = BTreeSet::new();
+                let mut requested = 0;
+                let mut pages = 0;
+                loop {
+                    model.news.as_mut().unwrap().offset = requested;
+                    let screen = render(&mut model, width, height);
+                    fixtures::assert_no_markup(
+                        &screen,
+                        &format!("{name} {width}x{height} at {requested}"),
+                    );
+                    let news = model.news.as_ref().unwrap();
+                    for (rect, target) in &news.links {
+                        assert_eq!(
+                            rect.intersection(inner),
+                            *rect,
+                            "{name}: link outside panel"
+                        );
+                        seen.insert(target.clone());
+                    }
+                    pages += 1;
+                    assert!(pages < 10_000, "{name}: scrolling did not reach the end");
+                    if news.offset < requested {
+                        break;
+                    }
+                    requested = news
+                        .offset
+                        .checked_add(inner.height)
+                        .expect("news fits scroll range");
+                }
+                assert!(!expected.is_empty(), "{name}: fixture has clickable links");
+                assert_eq!(
+                    seen, expected,
+                    "{name} {width}x{height}: links lost while scrolling"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn news_links_open_exact_visible_targets_after_wrapping_scrolling_and_resize() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut m = model();
@@ -4725,7 +4799,7 @@ mod tests {
         });
         model.status = "Library refreshed: 16 games".into();
 
-        // Optional: STEAM_TUI_SCREENSHOT_SIZE=WxH and STEAM_TUI_SCREENSHOT_VIEW=chat|conflict|filtered|downloads|news|news-lists
+        // Optional: STEAM_TUI_SCREENSHOT_SIZE=WxH and STEAM_TUI_SCREENSHOT_VIEW=chat|conflict|filtered|downloads|news|news-lists|news-fixture
         let (width, height) = std::env::var("STEAM_TUI_SCREENSHOT_SIZE")
             .ok()
             .and_then(|size| {
@@ -4736,6 +4810,28 @@ mod tests {
         let mut shared_image = None;
         match std::env::var("STEAM_TUI_SCREENSHOT_VIEW").as_deref() {
             Ok("downloads") => download_mock(&mut model),
+            Ok("news-fixture") => {
+                let app_id = std::env::var("STEAM_TUI_SCREENSHOT_NEWS_APP")
+                    .map(|id| id.parse::<u32>().unwrap())
+                    .unwrap_or(3247750);
+                let article = std::env::var("STEAM_TUI_SCREENSHOT_NEWS_ARTICLE")
+                    .map(|index| index.parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                let (name, _, mut items) = super::super::news_content::fixtures::feeds()
+                    .find(|(_, id, _)| *id == app_id)
+                    .expect("news fixture app");
+                model.install_active = false;
+                model.news = Some(super::super::model::NewsView {
+                    request: 1,
+                    app_id,
+                    name: name.into(),
+                    offset: 0,
+                    document: None,
+                    links: Vec::new(),
+                    link_error: None,
+                    result: Some(Ok(vec![items.remove(article)])),
+                });
+            }
             Ok("news") | Ok("news-lists") => {
                 model.install_active = false;
                 model.news = Some(super::super::model::NewsView {
@@ -4846,6 +4942,31 @@ mod tests {
         }
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| draw(frame, &mut model)).unwrap();
+        if let Ok(anchor) = std::env::var("STEAM_TUI_SCREENSHOT_NEWS_ANCHOR") {
+            use super::super::news_content::Block as Content;
+            let area = modal_area(Rect::new(0, 0, width, height), 100, 36);
+            let news = model.news.as_mut().expect("news screenshot");
+            let mut row = 0;
+            let mut found = false;
+            for block in news.document.as_ref().unwrap() {
+                match block {
+                    Content::Text(line) => {
+                        if line.to_string().contains(&anchor) {
+                            found = true;
+                            break;
+                        }
+                        row += Paragraph::new(line.clone())
+                            .wrap(Wrap { trim: false })
+                            .line_count(area.width - 2)
+                            .max(1);
+                    }
+                    Content::Image(_) => row += usize::from((area.height - 2).clamp(1, 12)),
+                }
+            }
+            assert!(found, "news anchor {anchor:?}");
+            news.offset = u16::try_from(row).unwrap();
+            terminal.draw(|frame| draw(frame, &mut model)).unwrap();
+        }
         // Local artwork by default; opt in to public CDN downloads. No account connection is opened.
         let download_icons = std::env::var_os("STEAM_TUI_SCREENSHOT_DOWNLOAD_ICONS").is_some();
         let mut icons = Vec::new();

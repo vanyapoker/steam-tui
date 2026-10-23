@@ -3040,6 +3040,7 @@ dependencies = [
  "ratatui",
  "ratatui-image",
  "reqwest",
+ "serde_json",
  "steam-core",
  "steam-vent",
  "tokio",

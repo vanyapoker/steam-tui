@@ -5,6 +5,9 @@ use ratatui::{
     text::{Line, Span},
 };
 
+#[cfg(test)]
+pub(super) mod fixtures;
+
 #[derive(Clone, Debug)]
 pub(super) enum Block {
     Text(RichLine),
@@ -160,10 +163,15 @@ impl RichLine {
 }
 
 pub(super) fn image_url(raw: &str) -> Option<String> {
-    let raw = entities(raw).replace(
-        "{STEAM_CLAN_IMAGE}",
-        "https://clan.fastly.steamstatic.com/images",
-    );
+    let raw = entities(raw)
+        .replace(
+            "{STEAM_CLAN_IMAGE}",
+            "https://clan.fastly.steamstatic.com/images",
+        )
+        .replace(
+            "{STEAM_CLAN_LOC_IMAGE}",
+            "https://clan.fastly.steamstatic.com/images",
+        );
     let mut url = reqwest::Url::parse(raw.trim()).ok()?;
     url.set_fragment(None);
     chat_images::allowed(&url).then(|| url.to_string())
@@ -426,6 +434,7 @@ impl Parser {
                 if let Some(url) = open.link
                     && open.label.trim().is_empty()
                 {
+                    self.begin_line();
                     self.span(Span::styled(
                         url,
                         theme::accent().add_modifier(Modifier::UNDERLINED),
@@ -544,7 +553,7 @@ impl Parser {
                 }
             }
             "table" | "tr" => self.finish(false),
-            "center" | "left" | "right" => self.finish(true),
+            "center" | "left" | "right" | "carousel" => self.finish(true),
             "color" | "size" | "font" | "spoiler" => {}
             "td" | "th" => {
                 if closing {
@@ -601,6 +610,42 @@ impl Parser {
     }
 }
 
+/// Find a tag boundary without letting literal brackets swallow later markup.
+fn tag_end(text: &str) -> Option<usize> {
+    let opener = *text.as_bytes().first()?;
+    let closer = match opener {
+        b'[' => b']',
+        b'<' => {
+            // Hearts, arrows and comparisons in announcements are plain text.
+            let body = text[1..].strip_prefix('/').unwrap_or(&text[1..]);
+            if !body.as_bytes().first()?.is_ascii_alphabetic() {
+                return None;
+            }
+            b'>'
+        }
+        _ => return None,
+    };
+    let mut quote = None;
+    let mut previous = opener;
+    for (index, byte) in text.bytes().enumerate().skip(1) {
+        if let Some(delimiter) = quote {
+            if byte == delimiter {
+                quote = None;
+            }
+        } else if matches!(byte, b'\'' | b'"') && previous == b'=' {
+            quote = Some(byte);
+        } else if byte == closer {
+            return Some(index);
+        } else if matches!(byte, b'[' | b'<') || (opener == b'[' && matches!(byte, b'\n' | b'\r')) {
+            return None;
+        }
+        if !byte.is_ascii_whitespace() {
+            previous = byte;
+        }
+    }
+    None
+}
+
 pub(super) fn parse(text: &str) -> Vec<Block> {
     let mut parser = Parser {
         blocks: Vec::new(),
@@ -617,9 +662,10 @@ pub(super) fn parse(text: &str) -> Vec<Block> {
     while let Some(at) = rest.find(['[', '<']) {
         parser.text(&rest[..at]);
         rest = &rest[at..];
-        let close = if rest.starts_with('[') { ']' } else { '>' };
-        let Some(end) = rest.find(close) else {
-            break;
+        let Some(end) = tag_end(rest) else {
+            parser.text(&rest[..1]);
+            rest = &rest[1..];
+            continue;
         };
         let tag = rest[1..end].trim();
         if parser.code > 0
@@ -672,6 +718,104 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn literal_brackets_do_not_consume_later_markup() {
+        for literal in [
+            "<3",
+            "<-",
+            "<",
+            "1 < 2",
+            "x <= 5",
+            "<unfinished",
+            "[unfinished",
+            "[",
+        ] {
+            let text = plain(&parse(&format!(
+                "[p]Thanks {literal}[/p][h2]Changes[/h2][list][*][p]Fixed [b]crashes[/b][/p][/*][/list]"
+            )));
+            assert_eq!(
+                text,
+                format!("Thanks {literal}\n\nChanges\n• Fixed crashes")
+            );
+        }
+        assert_eq!(plain(&parse("[p][[b]NEW[/b]] gear[/p]")), "[NEW] gear");
+        assert_eq!(
+            plain(&parse("[p]-> ROADMAP <-[/p][p]Next[/p]")),
+            "-> ROADMAP <-\n\nNext"
+        );
+        assert_eq!(
+            plain(&parse(
+                "<p><a\n href='https://example.com/?q=a>b'>Read</a></p><h2>Notes</h2>"
+            )),
+            "Read\n\nNotes"
+        );
+        let blocks = parse("[url=\"https://example.com/?q=[beta]\"]Read[/url]");
+        assert!(
+            matches!(&blocks[0], Block::Text(line) if line.to_string() == "Read" && line.targets == [Some("https://example.com/?q=[beta]".into())])
+        );
+    }
+
+    #[test]
+    fn empty_dynamic_links_respect_paragraph_boundaries() {
+        let blocks = parse(
+            "[p]Before[/p][p][dynamiclink href=\"https://example.com/pack\"][/dynamiclink][/p][p]After[/p]",
+        );
+        assert_eq!(
+            plain(&blocks),
+            "Before\n\nhttps://example.com/pack\n\nAfter"
+        );
+    }
+
+    #[test]
+    fn carousels_render_images_in_order_without_editor_markup() {
+        let blocks = parse(
+            "[p]Screenshots[/p][carousel autoadvance=\"true\"][img src=\"{STEAM_CLAN_IMAGE}/1/first.png\"][/img][img]{STEAM_CLAN_IMAGE}/1/second.png[/img][/carousel][p]Changes below[/p]",
+        );
+        assert_eq!(
+            plain(&blocks),
+            "Screenshots\n\nIMAGE https://clan.fastly.steamstatic.com/images/1/first.png\n\nIMAGE https://clan.fastly.steamstatic.com/images/1/second.png\n\nChanges below"
+        );
+    }
+
+    #[test]
+    fn sampled_game_feeds_parse_without_leaking_markup_or_losing_images() {
+        for (name, app_id, items) in fixtures::feeds() {
+            assert_eq!(items.len(), 10, "{name}");
+            for item in items {
+                let blocks = parse(&item.contents);
+                let text = plain(&blocks);
+                fixtures::assert_no_markup(&text, &format!("{name}: {}", item.title));
+                assert_eq!(
+                    blocks
+                        .iter()
+                        .filter(|block| matches!(block, Block::Image(_)))
+                        .count(),
+                    item.contents.matches("[img").count(),
+                    "{name}: {}: all announcement images need preview slots",
+                    item.title
+                );
+                assert!(!text.contains("\n\n\n"), "{name}: {}", item.title);
+                assert!(
+                    !text.lines().any(|line| line.trim() == "•"),
+                    "{name}: {}",
+                    item.title
+                );
+                if app_id == 3247750 && item.title == "1.0 IS HERE!!!" {
+                    assert!(text.contains("what we’re doing <3\n"));
+                    for heading in [
+                        "The Big Ones",
+                        "New Employee - The Mycologist",
+                        "Snowball Grenade",
+                        "Fulfillments",
+                    ] {
+                        assert!(blocks.iter().any(|block| matches!(block, Block::Text(line) if line.to_string() == heading && line.spans[0].style.fg == Some(Color::Yellow))), "{heading}");
+                    }
+                    assert!(blocks.iter().any(|block| matches!(block, Block::Text(line) if line.targets.iter().flatten().any(|url| url == "https://store.steampowered.com/app/5092090/Mycopunk__Supporter_Pack/"))));
+                }
+            }
+        }
     }
     #[test]
     fn steam_editor_paragraphs_images_and_dynamic_links() {
@@ -772,15 +916,16 @@ mod tests {
     #[test]
     fn normalizes_all_image_forms_and_rejects_external_or_unsafe_hosts() {
         let blocks = parse(
-            "[img]https://images.steamusercontent.com/a.png[/IMG]<img alt='picture' src='https://clan.akamai.steamstatic.com/images/a.jpg' />",
+            "[img]https://images.steamusercontent.com/a.png[/IMG]<img alt='picture' src='https://clan.akamai.steamstatic.com/images/a.jpg' />[img]{STEAM_CLAN_LOC_IMAGE}/554111/localized.png[/img]",
         );
         assert_eq!(
             blocks
                 .iter()
                 .filter(|block| matches!(block, Block::Image(_)))
                 .count(),
-            2
+            3
         );
+        assert!(blocks.iter().any(|block| matches!(block, Block::Image(url) if url == "https://clan.fastly.steamstatic.com/images/554111/localized.png")));
         for raw in [
             "http://clan.fastly.steamstatic.com/a",
             "https://clan.fastly.steamstatic.com.evil.test/a",

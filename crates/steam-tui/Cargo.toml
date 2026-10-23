@@ -22,3 +22,6 @@ ratatui-image = { version = "9", default-features = false }
 
 image = { workspace = true, features = ["gif", "webp", "bmp"] }
 reqwest.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
