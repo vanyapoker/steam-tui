@@ -3,6 +3,7 @@ use script::{Process, Recipe};
 
 struct Runner {
     command: Vec<String>,
+    initialize_command: Option<Vec<String>>,
     environment: BTreeMap<String, String>,
     directory: PathBuf,
     log: fs::File,
@@ -35,7 +36,8 @@ pub(super) fn execute(
     )
     .canonicalize()?;
     let _prefix_lock = safe::Lock::acquire(&prefix.join(".steam-tui-setup.lock"))?;
-    let command = proton_command(plan)?;
+    let command = proton_command(plan, "runinprefix")?;
+    let initialize_command = proton_command(plan, "run")?;
     let token = reaper::new_token();
     let log_path = directory.join(format!("{}-{token}.log", game.app_id));
     let log = OpenOptions::new()
@@ -47,6 +49,7 @@ pub(super) fn execute(
     environment.insert(reaper::TOKEN_VAR.into(), token.clone());
     let mut runner = Runner {
         command,
+        initialize_command: Some(initialize_command),
         environment,
         directory: directory.to_owned(),
         log,
@@ -65,7 +68,7 @@ pub(super) fn execute(
     })
 }
 
-fn proton_command(plan: &LaunchPlan) -> Result<Vec<String>> {
+fn proton_command(plan: &LaunchPlan, proton_verb: &str) -> Result<Vec<String>> {
     let paths: Vec<_> = std::env::split_paths(
         plan.environment
             .get("STEAM_COMPAT_TOOL_PATHS")
@@ -89,7 +92,8 @@ fn proton_command(plan: &LaunchPlan) -> Result<Vec<String>> {
         if manifest.text("compatmanager_layer_name") != Some(expected) {
             return Err(failure("Unexpected Proton setup tool layer"));
         }
-        let mut wrapper = tool_command(path, manifest, "run")?;
+        let mut wrapper =
+            tool_command(path, manifest, if index == 0 { proton_verb } else { "run" })?;
         wrapper.extend(command);
         command = wrapper;
     }
@@ -100,6 +104,23 @@ impl Runner {
     fn invoke(&mut self, arguments: &[String]) -> Result<(i32, String)> {
         if self.cancel.is_cancelled() {
             return Err(failure("First-run setup cancelled"));
+        }
+        if let Some(initialize) = self.initialize_command.take() {
+            let direct = std::mem::replace(&mut self.command, initialize);
+            let result = self.invoke(&[
+                "C:\\windows\\system32\\cmd.exe".into(),
+                "/d".into(),
+                "/c".into(),
+                "exit".into(),
+                "0".into(),
+            ]);
+            self.command = direct;
+            let (code, _) = result?;
+            if code != 0 {
+                return Err(failure(format!(
+                    "Proton prefix initialization exited with code {code}"
+                )));
+            }
         }
         self.sequence += 1;
         let capture = self

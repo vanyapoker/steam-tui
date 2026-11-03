@@ -12,7 +12,10 @@ use steam_vent::{Connection, ConnectionTrait};
 use steam_vent_proto_steam::steammessages_clientserver_2::{
     CMsgClientRichPresenceInfo, CMsgClientRichPresenceRequest, CMsgClientRichPresenceUpload,
 };
-use steam_vent_proto_steam::steammessages_player_steamclient::CPlayer_GetPlayerLinkDetails_Request;
+use steam_vent_proto_steam::steammessages_player_steamclient::{
+    CPlayer_GetPlayerLinkDetails_Request,
+    cplayer_get_player_link_details_response::PlayerLinkDetails,
+};
 use tokio::sync::Notify;
 
 use super::events::{Direction, EventSender, emit};
@@ -35,6 +38,8 @@ const CHANGE_RICH_PRESENCE: i32 = 0x4000;
 
 const MAX_QUEUED: usize = 4096;
 const MAX_USERS: usize = 4096;
+const PERSONA_BATCH: usize = 100;
+const PERSONA_CONCURRENCY: usize = 8;
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// Rich presence uploads are coalesced: at most one per interval, always
 /// ending with the latest state.
@@ -142,6 +147,49 @@ fn push(state: &mut State, id: i32, data: Vec<u8>) {
     }
 }
 
+fn cache_leaderboard_personas(state: &mut State, ids: &[u64], accounts: Vec<PlayerLinkDetails>) {
+    for account in accounts {
+        let Some(public) = account.public_data.as_ref() else {
+            continue;
+        };
+        let id = public.steamid();
+        let Some(name) = public
+            .persona_name
+            .as_ref()
+            .filter(|name| !name.is_empty() && name.len() <= 4096 && !name.contains('\0'))
+        else {
+            continue;
+        };
+        if !ids.contains(&id) {
+            continue;
+        }
+        if state.users.len() >= MAX_USERS
+            && !state.users.contains_key(&id)
+            && let Some(old) = state.users.keys().next().copied()
+        {
+            state.users.remove(&old);
+        }
+        state.users.insert(
+            id,
+            FriendInfo {
+                steam_id: id,
+                name: name.clone(),
+                state: account
+                    .private_data
+                    .as_ref()
+                    .and_then(|p| p.persona_state)
+                    .unwrap_or(0),
+                ..Default::default()
+            },
+        );
+        push(
+            state,
+            PERSONA_STATE_CHANGE,
+            persona_change(id, CHANGE_NAME | CHANGE_NAME_FIRST_SET),
+        );
+    }
+}
+
 pub struct Friends {
     state: Arc<Mutex<State>>,
     app_id: u32,
@@ -154,6 +202,55 @@ pub struct Friends {
 }
 
 impl Friends {
+    /// Load leaderboard personas before returning the entries to games that
+    /// read names immediately and do not call RequestUserInformation.
+    pub async fn load_leaderboard_users(&self, ids: impl IntoIterator<Item = u64>) {
+        let requested: Vec<u64> = {
+            let mut state = lock(&self.state);
+            ids.into_iter()
+                .filter(|id| {
+                    *id != self.own
+                        && (id >> 52) & 0xF == 1
+                        && *id as u32 != 0
+                        && !state
+                            .users
+                            .get(id)
+                            .is_some_and(|user| !user.name.is_empty())
+                        && state.users_requested.insert(*id)
+                })
+                .collect()
+        };
+        let batches: Vec<Vec<u64>> = requested
+            .chunks(PERSONA_BATCH)
+            .map(<[u64]>::to_vec)
+            .collect();
+        let work = futures_util::stream::iter(batches)
+            .map(|ids| async move {
+                let reply = tokio::time::timeout(
+                    Duration::from_secs(4),
+                    self.connection
+                        .service_method(CPlayer_GetPlayerLinkDetails_Request {
+                            steamids: ids.clone(),
+                            ..Default::default()
+                        }),
+                )
+                .await;
+                let mut state = lock(&self.state);
+                for id in &ids {
+                    state.users_requested.remove(id);
+                }
+                if let Ok(Ok(reply)) = reply {
+                    cache_leaderboard_personas(&mut state, &ids, reply.accounts);
+                }
+            })
+            .buffer_unordered(PERSONA_CONCURRENCY)
+            .collect::<Vec<_>>();
+        let _ = tokio::time::timeout(Duration::from_secs(4), work).await;
+        let mut state = lock(&self.state);
+        for id in requested {
+            state.users_requested.remove(&id);
+        }
+    }
     pub fn start(connection: &Connection, app_id: u32, events: Option<EventSender>) -> Self {
         let connection = connection.with_app_id(app_id);
         let state: Arc<Mutex<State>> = Arc::default();
@@ -500,6 +597,41 @@ impl Drop for Friends {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaderboard_personas_are_cached_and_announced() {
+        use steam_vent_proto_steam::steammessages_player_steamclient::cplayer_get_player_link_details_response::player_link_details::AccountPublicData;
+        let account = |id, name: &str| PlayerLinkDetails {
+            public_data: Some(AccountPublicData {
+                steamid: Some(id),
+                persona_name: Some(name.into()),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        let mut state = State::default();
+        cache_leaderboard_personas(
+            &mut state,
+            &[10, 20],
+            vec![
+                account(10, "Player"),
+                account(20, ""),
+                account(30, "Unrequested"),
+            ],
+        );
+        assert_eq!(state.users.get(&10).unwrap().name, "Player");
+        assert!(!state.users.contains_key(&20));
+        assert!(!state.users.contains_key(&30));
+        assert_eq!(state.callbacks.len(), 1);
+        assert_eq!(
+            state.callbacks[0],
+            (
+                PERSONA_STATE_CHANGE,
+                persona_change(10, CHANGE_NAME | CHANGE_NAME_FIRST_SET)
+            )
+        );
+    }
 
     #[test]
     fn rich_presence_follows_valve_limits_and_encoding() {

@@ -129,7 +129,13 @@ impl Fixture {
         fs::write(
             tool.join("fake-proton"),
             r#"#!/bin/sh
+verb="$1"
 shift
+if [ "$verb" = "run" ]; then
+    case "$1" in *cmd.exe) exit 0 ;; esac
+    exit 0
+fi
+[ "$verb" = "runinprefix" ] || exit 9
 printf '%s\n' "$*" >> "$SETUP_TEST_TRACE"
 case "$1" in
 *reg.exe)

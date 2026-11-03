@@ -637,7 +637,18 @@ impl Session<'_> {
                 }
             }
             Operation::Lobby(op) => self.lobbies.handle(self.connection, op).await,
-            Operation::Stats(op) => self.stats.lock().await.handle(self.connection, op).await,
+            Operation::Stats(op) => {
+                let response = self.stats.lock().await.handle(self.connection, op).await;
+                if let Response::BoardEntries {
+                    result: 1, entries, ..
+                } = &response
+                {
+                    self.friends
+                        .load_leaderboard_users(entries.iter().map(|entry| entry.steam_id))
+                        .await;
+                }
+                response
+            }
             Operation::Ugc(
                 op @ (UgcOp::Snapshot
                 | UgcOp::Download { .. }
