@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.5 - 2026-11-03
+
+### Fixed
+- Proton installs now give their tool files executable permissions, allowing games to launch after Proton is installed as a dependency.
+
 ## 0.4.4 - 2026-11-03
 
 ### Added
