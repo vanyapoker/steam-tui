@@ -789,6 +789,36 @@ fn executable_and_readonly_permissions_are_applied_after_verification() {
 }
 
 #[test]
+fn proton_tool_files_are_executable_after_verification() {
+    for (layer, expected) in [("proton", 0o755), ("other", 0o644)] {
+        let temp = Temp::new();
+        let s = session(temp.path());
+        let manifest = format!("\"manifest\" {{ \"compatmanager_layer_name\" \"{layer}\" }}");
+        let descriptors = vec![
+            file("toolmanifest.vdf", manifest.as_bytes()),
+            file("files/bin/wine", b"wine"),
+        ];
+        let layout = layout_of(descriptors);
+        staged(
+            &s,
+            &layout,
+            &[
+                ("toolmanifest.vdf", manifest.as_bytes()),
+                ("files/bin/wine", b"wine"),
+            ],
+        );
+        assert_eq!(
+            fs::metadata(s.stage.join("content/files/bin/wine"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            expected
+        );
+    }
+}
+
+#[test]
 fn user_config_and_unknown_manifest_keys_survive_manifest_rewrite() {
     let temp = Temp::new();
     let mut s = session(temp.path());

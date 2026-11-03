@@ -785,6 +785,14 @@ impl Session {
             .plan
             .install_dir_name
             .starts_with("SteamLinuxRuntime");
+        self.set_file_permissions(file, path, tool)
+    }
+
+    fn apply_tool_permissions(&self, file: &DepotFile, path: &Path) -> Result<()> {
+        self.set_file_permissions(file, path, true)
+    }
+
+    fn set_file_permissions(&self, file: &DepotFile, path: &Path, tool: bool) -> Result<()> {
         let mode = if file.flags & 32 != 0 || tool {
             0o755
         } else {
@@ -828,6 +836,33 @@ impl Session {
                 VerifyMode::Quick => self.check_file_quick(regular[index], progress),
             }
         })?;
+        let proton_manifest = layout.active_files().any(|planned| {
+            planned.file.path == Path::new("toolmanifest.vdf")
+                && planned.file.flags & (64 | 512) == 0
+        });
+        if proton_manifest {
+            let manifest_path = fsafe::checked(
+                &self.stage.join("content"),
+                Path::new("toolmanifest.vdf"),
+                true,
+            )?;
+            let proton = read_vdf(&manifest_path).ok().is_some_and(|doc| {
+                doc.child("manifest")
+                    .and_then(|m| m.text("compatmanager_layer_name"))
+                    == Some("proton")
+            });
+            if proton {
+                for planned in layout
+                    .active_files()
+                    .filter(|p| p.file.flags & (64 | 512) == 0)
+                {
+                    super::check_cancel(cancel)?;
+                    let path =
+                        fsafe::checked(&self.stage.join("content"), &planned.file.path, true)?;
+                    self.apply_tool_permissions(&planned.file, &path)?;
+                }
+            }
+        }
         for planned in layout.active_files() {
             super::check_cancel(cancel)?;
             let file = &planned.file;
