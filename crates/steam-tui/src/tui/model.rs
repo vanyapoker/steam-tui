@@ -250,6 +250,7 @@ pub(super) enum Action {
     PrecacheShaders(u32),
     CycleLaunchOption(u32),
     Queue,
+    ToggleShaderDownloads,
     QueueControl(u64, steam_core::updates::JobState),
     QueuePriority(u32, i16),
     QueuePolicy(u32),
@@ -1358,6 +1359,9 @@ impl Model {
         if keys::closes(&key, &[Key::Char('d')]) {
             self.queue_view = false;
             return Action::None;
+        }
+        if key.code == KeyCode::Char('s') {
+            return Action::ToggleShaderDownloads;
         }
         if key.code == KeyCode::Char('f') {
             use super::downloads::Kind;

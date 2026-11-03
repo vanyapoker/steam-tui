@@ -231,6 +231,15 @@ pub(super) mod tests {
         assert_eq!(m.download_name(99), "Cached name");
     }
     #[test]
+    fn shader_toggle_is_available_with_empty_queue() {
+        let mut model = Model::new(true, None);
+        model.queue_view = true;
+        assert_eq!(
+            press(&mut model, KeyCode::Char('s')),
+            Action::ToggleShaderDownloads
+        );
+    }
+    #[test]
     fn refresh_preserves_group_and_browsed_run_when_new_work_arrives() {
         let root =
             std::env::temp_dir().join(format!("steam-tui-download-test-{}", std::process::id()));

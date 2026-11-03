@@ -1469,6 +1469,13 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                 Action::Queue => {
                                     if queue.is_none() { model.queue_error = Some("Persistent queue unavailable for this account".into()); }
                                 }
+                                Action::ToggleShaderDownloads => {
+                                    if let Some(queue) = &queue {
+                                        let result = (|| { let mut settings = queue.settings()?; settings.shaders_enabled = !settings.shaders_enabled; queue.save_settings(settings) })();
+                                        model.queue_error = result.err().map(|e| e.to_string());
+                                        model.refresh_downloads(queue);
+                                    } else { model.queue_error = Some("Persistent queue unavailable for this account".into()); }
+                                }
                                 Action::QueueControl(id, state) => {
                                     if let Some(queue) = &queue {
                                         model.queue_error = queue.control(id, state).err().map(|e| e.to_string());

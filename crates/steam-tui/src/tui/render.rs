@@ -2739,7 +2739,7 @@ fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
     frame.render_widget(Clear, area);
     let count = |state| model.queue_jobs.iter().filter(|j| j.state == state).count();
     let title = format!(
-        "Downloads · {} running · {} queued · {} paused · {} failed · {}",
+        "{} running · {} queued · {} paused · {} failed · {}",
         count(JobState::Running),
         count(JobState::Pending),
         count(JobState::Paused),
@@ -2749,11 +2749,25 @@ fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
     let block = panel_block(
         theme::panel_border(Panel::Overlay, true),
         area.width,
-        vec![vec![seg(title, bold())]],
+        vec![
+            vec![seg(
+                format!(
+                    "Downloads · Shaders {}",
+                    if model.queue_settings.shaders_enabled {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+                bold(),
+            )],
+            vec![seg(title, bold())],
+        ],
         Vec::new(),
         vec![
             hint("↑↓", "select"),
             hint("f", "filter"),
+            hint("s", "shaders on/off"),
             hint("←→", "runs"),
             hint("Esc", "close"),
         ],
@@ -3261,6 +3275,9 @@ mod tests {
         ] {
             assert!(wide.contains(text), "missing {text}: {wide}");
         }
+        assert!(wide.contains("Shaders on"));
+        m.queue_settings.shaders_enabled = false;
+        assert!(render(&mut m, 60, 30).contains("Shaders off"));
         let narrow = render(&mut m, 60, 30);
         assert!(!narrow.contains("Progress"));
         assert!(narrow.contains("Details"));

@@ -214,7 +214,7 @@ pub(super) static BINDINGS: &[Binding] = &[
         &[Char('d')],
         Any,
         Library,
-        "Downloads: current jobs and history (f filter, Left/Right runs, {} details, p pause/resume, r retry, c cancel, [/] priority, a policy)",
+        "Downloads: current jobs and history (s toggle shaders, f filter, Left/Right runs, {} details, p pause/resume, r retry, c cancel, [/] priority, a policy)",
     ),
     bind(
         Cmd::LaunchOption,

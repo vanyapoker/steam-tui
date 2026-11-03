@@ -82,6 +82,12 @@ fn shader_jobs_are_separate_and_obey_preferences() {
     q.control(game, crate::updates::JobState::Cancelled)
         .unwrap();
     assert!(q.ready(0, false).unwrap().is_none());
+    assert!(q.suspended(shader_id, 0, false).unwrap());
+    let mut settings = q.settings().unwrap();
+    settings.shaders_enabled = true;
+    q.save_settings(settings).unwrap();
+    assert_eq!(q.ready(0, false).unwrap().unwrap().id, shader_id);
+    assert!(!q.suspended(shader_id, 0, false).unwrap());
 }
 #[tokio::test]
 async fn helper_skip_kills_and_reaps_without_marking_processed() {

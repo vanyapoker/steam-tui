@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.4 - 2026-11-03
+
+### Added
+- Toggle shader pre-caching for the current account from Downloads with `s`. Disabled shader jobs wait until re-enabled, and launch-time shader processing is skipped.
+- Achievement icons in the achievements modal.
+
 ## 0.4.3 - 2026-10-23
 
 ### Added
