@@ -194,7 +194,89 @@ pub async fn load(connection: &Connection) -> Result<Library> {
     }
 }
 
+struct Membership {
+    package_count: usize,
+    app_ids: Vec<u32>,
+    owned_depots: BTreeSet<u32>,
+    unresolved_packages: BTreeSet<u32>,
+    warnings: Vec<String>,
+}
+
+/// Resolve current licenses and package membership without fetching every app document.
+pub(crate) async fn load_ownership(
+    connection: &Connection,
+) -> Result<(BTreeSet<u32>, BTreeSet<u32>)> {
+    let membership = load_membership(connection).await?;
+    Ok((
+        membership.app_ids.into_iter().collect(),
+        membership.owned_depots,
+    ))
+}
+
 async fn load_inner(connection: &Connection) -> Result<Library> {
+    let Membership {
+        package_count,
+        app_ids,
+        owned_depots,
+        unresolved_packages,
+        mut warnings,
+    } = load_membership(connection).await?;
+    let (mut apps, unresolved_apps) = match fetch_apps(connection, &app_ids).await {
+        Ok(result) => result,
+        Err(error) => {
+            warnings.push(format!("App metadata unavailable: {error}"));
+            let apps = with_cache(connection, |cache| {
+                app_ids
+                    .iter()
+                    .map(|id| {
+                        cache.apps.get(id).cloned().unwrap_or(LibraryApp {
+                            app_id: *id,
+                            name: None,
+                            app_type: None,
+                            document: None,
+                        })
+                    })
+                    .collect()
+            });
+            (apps, app_ids.iter().copied().collect())
+        }
+    };
+    with_cache(connection, |cache| {
+        for app in &mut apps {
+            if unresolved_apps.contains(&app.app_id)
+                && let Some(old) = cache.apps.get(&app.app_id)
+            {
+                app.name = app.name.take().or_else(|| old.name.clone());
+                app.app_type = app.app_type.take().or_else(|| old.app_type.clone());
+            }
+        }
+    });
+    with_cache(connection, |cache| {
+        for app in &apps {
+            if app.document.is_some() {
+                cache.apps.insert(
+                    app.app_id,
+                    LibraryApp {
+                        app_id: app.app_id,
+                        name: app.name.clone(),
+                        app_type: app.app_type.clone(),
+                        document: None,
+                    },
+                );
+            }
+        }
+    });
+    Ok(Library {
+        package_count,
+        apps,
+        unresolved_packages: unresolved_packages.into_iter().collect(),
+        unresolved_apps: unresolved_apps.into_iter().collect(),
+        warnings,
+        owned_depots,
+    })
+}
+
+async fn load_membership(connection: &Connection) -> Result<Membership> {
     let licenses = license_list(connection).await?;
     let mut package_tokens: BTreeMap<u32, u64> = BTreeMap::new();
     for license in licenses.licenses {
@@ -261,51 +343,6 @@ async fn load_inner(connection: &Connection) -> Result<Library> {
             "No licensed package membership could be resolved; the library is unavailable, not empty",
         ));
     }
-    let (mut apps, unresolved_apps) = match fetch_apps(connection, &app_ids).await {
-        Ok(result) => result,
-        Err(error) => {
-            warnings.push(format!("App metadata unavailable: {error}"));
-            let apps = with_cache(connection, |cache| {
-                app_ids
-                    .iter()
-                    .map(|id| {
-                        cache.apps.get(id).cloned().unwrap_or(LibraryApp {
-                            app_id: *id,
-                            name: None,
-                            app_type: None,
-                            document: None,
-                        })
-                    })
-                    .collect()
-            });
-            (apps, app_ids.iter().copied().collect())
-        }
-    };
-    with_cache(connection, |cache| {
-        for app in &mut apps {
-            if unresolved_apps.contains(&app.app_id)
-                && let Some(old) = cache.apps.get(&app.app_id)
-            {
-                app.name = app.name.take().or_else(|| old.name.clone());
-                app.app_type = app.app_type.take().or_else(|| old.app_type.clone());
-            }
-        }
-    });
-    with_cache(connection, |cache| {
-        for app in &apps {
-            if app.document.is_some() {
-                cache.apps.insert(
-                    app.app_id,
-                    LibraryApp {
-                        app_id: app.app_id,
-                        name: app.name.clone(),
-                        app_type: app.app_type.clone(),
-                        document: None,
-                    },
-                );
-            }
-        }
-    });
     let owned_depots = with_cache(connection, |cache| {
         cache
             .depots
@@ -314,11 +351,10 @@ async fn load_inner(connection: &Connection) -> Result<Library> {
             .flat_map(|(_, depots)| depots.iter().copied())
             .collect()
     });
-    Ok(Library {
+    Ok(Membership {
         package_count,
-        apps,
-        unresolved_packages: unresolved_packages.into_iter().collect(),
-        unresolved_apps: unresolved_apps.into_iter().collect(),
+        app_ids,
+        unresolved_packages,
         warnings,
         owned_depots,
     })

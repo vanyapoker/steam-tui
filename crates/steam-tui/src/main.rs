@@ -10,10 +10,11 @@ use std::env;
 use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "Usage: steam-tui [--account NAME] [command]\n\nWith no command, open the TUI using the latest successful account.\nCommands:\n  tui [--offline]          Friends and installed games (default)\n  notifications            Show all recent account notifications\n  discover                 Query Steam's server directory (no account)\n  inspect-app <appid>       Fetch public app metadata (anonymous session)\n  login [--ephemeral]       Sign in; reuse/store a Secret Service refresh token\n  library [--ephemeral]     Sign in and resolve licensed packages to apps\n  backend <appid> [--ephemeral]  Experimental client backend (explicit --account required)\n  launch <appid> [--valve-host] [--installed]  Launch built-in, or explicitly use Valve host (explicit --account required)\n  content show|branch|language|dlc  Inspect or select game content\n  jobs list|add|run|pause|resume|cancel  Persistent update jobs\n  updates show|policy|priority|window|during-games  Update settings\n  shaders show|add|process|prune|clear|budget|enabled  Vulkan pre-caching\n  logout                   Delete this account's local refresh token\n\n--login is an alias for the login command.\n--account NAME works before or after tui/notifications/login/library/backend/logout. A successful\nlogin or TUI resume remembers the account name; credentials stay in Secret Service.\nIf no account has been remembered, prompt once before entering the TUI.\nPasswords and Guard codes are hidden. --ephemeral bypasses token persistence.\nlogout does not revoke tokens on Steam. Enter/double-click automatically selects Valve host for VAC games and built-in for others; Ctrl+Enter forces Valve host.";
+const USAGE: &str = "Usage: steam-tui [--account NAME] [command]\n\nWith no command, open the TUI using the latest successful account.\nCommands:\n  tui [--offline]          Friends and installed games (default)\n  notifications            Show all recent account notifications\n  discover                 Query Steam's server directory (no account)\n  inspect-app <appid>       Fetch public app metadata (anonymous session)\n  login [--ephemeral]       Sign in; reuse/store a Secret Service refresh token\n  library [FILTER] [--ephemeral]  List licensed games as APPID: name; filter names case insensitively\n  install <appid> [--library PATH]  Install or update a game without the TUI\n  backend <appid> [--ephemeral]  Experimental client backend (explicit --account required)\n  launch <appid> [--valve-host] [--installed]  Launch built-in, or explicitly use Valve host (explicit --account required)\n  content show|branch|language|dlc|launch-option|unlock  Inspect or select game content\n  jobs list|add|run|pause|resume|cancel  Persistent update jobs\n  updates show|policy|priority|window|during-games  Update settings\n  shaders show|add|process|prune|clear|budget|enabled  Vulkan pre-caching\n  logout                   Delete this account's local refresh token\n\n--login is an alias for the login command.\n--account NAME selects an account for account commands; login or TUI resume remembers it.\nCredentials stay in Secret Service. --ephemeral bypasses token persistence.\nlogout does not revoke tokens on Steam. Enter/double-click automatically selects Valve host for VAC games and built-in for others; Ctrl+Enter forces Valve host.";
 
 #[derive(Debug, PartialEq)]
 enum Command {
@@ -37,11 +38,16 @@ enum Command {
         valve_host: bool,
         installed: bool,
     },
+    Install {
+        app_id: u32,
+        library: Option<PathBuf>,
+    },
     Login {
         ephemeral: bool,
     },
     Library {
         ephemeral: bool,
+        filter: Option<String>,
     },
     Logout,
 }
@@ -59,6 +65,7 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
     let mut ephemeral = false;
     let mut valve_host = false;
     let mut installed = false;
+    let mut library_path = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -76,12 +83,25 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
             "--ephemeral" if !ephemeral => ephemeral = true,
             "--valve-host" if !valve_host => valve_host = true,
             "--installed" if !installed => installed = true,
+            "--library" if library_path.is_none() => {
+                index += 1;
+                let path = args.get(index).ok_or("--library requires a path")?;
+                if path.is_empty() {
+                    return Err("--library requires a nonempty path");
+                }
+                library_path = Some(PathBuf::from(path));
+            }
             "--help" | "-h" if command.is_none() => command = Some(Command::Help),
             "tui" if command.is_none() => command = Some(Command::Tui { offline: false }),
             "login" | "--login" if command.is_none() => {
                 command = Some(Command::Login { ephemeral: false });
             }
-            "library" if command.is_none() => command = Some(Command::Library { ephemeral: false }),
+            "library" if command.is_none() => {
+                command = Some(Command::Library {
+                    ephemeral: false,
+                    filter: None,
+                })
+            }
             "shaders" if command.is_none() => command = Some(Command::Shaders(Vec::new())),
             "content" if command.is_none() => command = Some(Command::Content(Vec::new())),
             "jobs" if command.is_none() => command = Some(Command::Jobs(Vec::new())),
@@ -89,16 +109,22 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
             "logout" if command.is_none() => command = Some(Command::Logout),
             "discover" if command.is_none() => command = Some(Command::Discover),
             "notifications" if command.is_none() => command = Some(Command::Notifications),
-            "inspect-app" | "backend" | "launch" if command.is_none() => {
+            "inspect-app" | "backend" | "launch" | "install" if command.is_none() => {
                 let backend = args[index] == "backend";
                 let launch = args[index] == "launch";
+                let install = args[index] == "install";
                 index += 1;
                 let id = args
                     .get(index)
                     .and_then(|value| value.parse::<u32>().ok())
                     .filter(|id| *id != 0)
                     .ok_or("appid must be a positive 32-bit integer")?;
-                command = Some(if launch {
+                command = Some(if install {
+                    Command::Install {
+                        app_id: id,
+                        library: None,
+                    }
+                } else if launch {
                     Command::Launch {
                         app_id: id,
                         valve_host: false,
@@ -112,6 +138,14 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
                 } else {
                     Command::InspectApp(id)
                 });
+            }
+            value if matches!(command, Some(Command::Library { filter: None, .. })) => {
+                if value.is_empty() {
+                    return Err("library filter cannot be empty");
+                }
+                if let Some(Command::Library { filter, .. }) = command.as_mut() {
+                    *filter = Some(value.to_owned());
+                }
             }
             value
                 if matches!(
@@ -150,6 +184,9 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
     if valve_host && !matches!(command, Command::Launch { .. }) {
         return Err("--valve-host is only supported by launch");
     }
+    if library_path.is_some() && !matches!(command, Command::Install { .. }) {
+        return Err("--library is only supported by install");
+    }
     if ephemeral
         && !matches!(
             command,
@@ -168,13 +205,17 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
         )
     {
         return Err(
-            "--account is only supported by tui, notifications, login, library, backend, launch, and logout",
+            "--account is only supported by tui, notifications, login, library, install, backend, launch, and logout",
         );
     }
     let command = match command {
         Command::Tui { .. } => Command::Tui { offline },
         Command::Login { .. } => Command::Login { ephemeral },
-        Command::Library { .. } => Command::Library { ephemeral },
+        Command::Library { filter, .. } => Command::Library { ephemeral, filter },
+        Command::Install { app_id, .. } => Command::Install {
+            app_id,
+            library: library_path,
+        },
         Command::Backend { app_id, .. } => Command::Backend { app_id, ephemeral },
         Command::Launch { app_id, .. } => Command::Launch {
             app_id,
@@ -244,6 +285,13 @@ fn print_app(app: &steam_core::library::LibraryApp) {
     );
 }
 
+fn library_matches(kind: Option<&str>, name: Option<&str>, filter: Option<&str>) -> bool {
+    kind.is_none_or(|kind| kind.eq_ignore_ascii_case("game"))
+        && name.is_some_and(|name| {
+            filter.is_none_or(|needle| name.to_lowercase().contains(&needle.to_lowercase()))
+        })
+}
+
 async fn run(options: Options) -> Result<(), Box<dyn Error>> {
     let Options { command, account } = options;
     match command {
@@ -309,6 +357,10 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
                 "WebSocket candidate: {}",
                 terminal_text(&endpoints.websocket)
             );
+        }
+        Command::Install { app_id, library } => {
+            let account = selected_account(account, true)?.ok_or("no account selected")?;
+            content_jobs::install(&account, app_id, library).await?;
         }
         Command::Backend { app_id, ephemeral } => {
             let account = account.ok_or("backend requires an explicit account")?;
@@ -449,26 +501,30 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
                 start.elapsed().as_secs_f64()
             );
         }
-        Command::Login { ephemeral } | Command::Library { ephemeral } => {
+        Command::Login { ephemeral } | Command::Library { ephemeral, .. } => {
             let account = selected_account(account, true)?.ok_or("no account selected")?;
             let start = Instant::now();
             let connection = steam_core::account::login(&account, ephemeral).await?;
             preferences::remember(&account)?;
-            println!("Signed in: {}", connection.steam_id().steam64());
             eprintln!(
                 "Authentication: {:.3}s (includes interactive confirmation)",
                 start.elapsed().as_secs_f64()
             );
-            if matches!(command, Command::Library { .. }) {
+            if let Command::Library { filter, .. } = command {
                 let start = Instant::now();
                 let library = steam_core::library::load(&connection).await?;
-                println!(
-                    "{} licensed packages; {} resolved apps",
-                    library.package_count,
-                    library.apps.len()
-                );
-                for app in &library.apps {
-                    print_app(app);
+                for app in library.apps.iter().filter(|app| {
+                    library_matches(
+                        app.app_type.as_deref(),
+                        app.name.as_deref(),
+                        filter.as_deref(),
+                    )
+                }) {
+                    println!(
+                        "{}: {}",
+                        app.app_id,
+                        terminal_text(app.name.as_deref().unwrap_or_default())
+                    );
                 }
                 if !library.unresolved_packages.is_empty() {
                     eprintln!("Unresolved package IDs: {:?}", library.unresolved_packages);
@@ -477,6 +533,8 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
                     eprintln!("Unresolved app IDs: {:?}", library.unresolved_apps);
                 }
                 eprintln!("Library resolution: {:.3}s", start.elapsed().as_secs_f64());
+            } else {
+                println!("Signed in: {}", connection.steam_id().steam64());
             }
         }
         Command::Logout => {
@@ -569,10 +627,71 @@ mod tests {
         assert_eq!(
             parse(&["library".into(), "--ephemeral".into()]),
             Ok(Options {
-                command: Command::Library { ephemeral: true },
+                command: Command::Library {
+                    ephemeral: true,
+                    filter: None
+                },
                 account: None
             })
         );
+    }
+
+    #[test]
+    fn library_filter_and_install_arguments() {
+        assert_eq!(
+            parse(&["library", "Rogue core", "--ephemeral"].map(str::to_owned)),
+            Ok(Options {
+                command: Command::Library {
+                    ephemeral: true,
+                    filter: Some("Rogue core".into())
+                },
+                account: None,
+            })
+        );
+        assert_eq!(
+            parse(
+                &[
+                    "install",
+                    "440",
+                    "--library",
+                    "/games",
+                    "--account",
+                    "alice"
+                ]
+                .map(str::to_owned)
+            ),
+            Ok(Options {
+                command: Command::Install {
+                    app_id: 440,
+                    library: Some(PathBuf::from("/games"))
+                },
+                account: Some("alice".into()),
+            })
+        );
+        for args in [
+            vec!["library", "rogue", "core"],
+            vec!["install", "0"],
+            vec!["install", "440", "--library"],
+            vec!["library", "rogue", "--library", "/games"],
+        ] {
+            assert!(parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
+        }
+        assert!(library_matches(
+            Some("Game"),
+            Some("Rogue Core"),
+            Some("rOgUe")
+        ));
+        assert!(library_matches(
+            Some("game"),
+            Some("Rogue Core"),
+            Some("ROGUE CORE")
+        ));
+        assert!(!library_matches(
+            Some("Game"),
+            Some("Rogue Core"),
+            Some("other")
+        ));
+        assert!(!library_matches(Some("Tool"), Some("Rogue Core"), None));
     }
 
     #[test]

@@ -459,13 +459,7 @@ pub async fn plan_selected(
     selection.validate()?;
     let (owned, depots) = match library::cached_ownership(connection) {
         Some(ownership) => ownership,
-        None => {
-            let library = library::load(connection).await?;
-            (
-                library.apps.iter().map(|a| a.app_id).collect(),
-                library.owned_depots,
-            )
-        }
+        None => library::load_ownership(connection).await?,
     };
     if !owned.contains(&app_id) {
         return Err(failure("No current license was resolved for this app"));

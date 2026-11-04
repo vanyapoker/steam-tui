@@ -25,6 +25,7 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(45);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(180);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+const SESSION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(40);
 const MAX_GUARD_ATTEMPTS: usize = 3;
 
 #[derive(Debug)]
@@ -61,7 +62,9 @@ pub async fn login(
     account: &str,
     ephemeral: bool,
 ) -> std::result::Result<Connection, Box<dyn Error>> {
-    Ok(login_inner(account, ephemeral).await?)
+    let mut connection = login_inner(account, ephemeral).await?;
+    connection.set_timeout(SESSION_RESPONSE_TIMEOUT);
+    Ok(connection)
 }
 
 /// Resume a saved session without terminal prompts or status output.
@@ -105,7 +108,9 @@ pub async fn resume(account: &str) -> std::result::Result<Connection, Box<dyn Er
             sanitize_connection_error(&error)
         }
     })?;
-    Ok(persist_connection(Some(&store), &account, connection, false).await?)
+    let mut connection = persist_connection(Some(&store), &account, connection, false).await?;
+    connection.set_timeout(SESSION_RESPONSE_TIMEOUT);
+    Ok(connection)
 }
 
 async fn login_inner(account: &str, ephemeral: bool) -> Result<Connection> {
