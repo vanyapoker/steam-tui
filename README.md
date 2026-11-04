@@ -63,7 +63,7 @@ Press `?` in the app for the full list.
 
 ## More
 
-[Full guide](usage/guide.md): chat, hotkeys, saves, controllers, updates, shader caches, CLI examples, Steamworks coverage and known issues. See also [docs/](docs/) for design notes.
+[Full guide](usage/guide.md): chat, hotkeys, saves, controllers, updates, shader caches, CLI examples, Steamworks coverage and known issues.
 
 ## License
 

@@ -126,8 +126,6 @@ Proton video/audio databases are downloaded or refreshed automatically at launch
 
 Vulkan FOZ v6 archives have their own freshness checks and verified staging. Compilation uses two threads, low CPU priority and a 2 GiB address-space limit per helper process. Failed or skipped processing never marks a context complete and never prevents launching the game. Shader archives have an 8 GiB account budget including staging, adjustable with `shaders budget MIB`; old generations and unused replay contexts are pruned. The budget excludes driver-created cache data and Proton media databases. Vulkan pre-cache state lives under `$XDG_STATE_HOME/steam-tui/updates-ACCOUNT` (`~/.local/state` by default).
 
-See [the update audit](../docs/steam-update-gap-audit.md) for evidence, supported formats and validation limits.
-
 ## Steamworks coverage
 
 | Works | Partial | Not yet |
@@ -147,7 +145,7 @@ Interface versions from SDK 0.99 to 1.65 are served, laid out from Valve's SDK h
 - Lobby play over Steam's relays works with players on Valve's client (verified with Mycopunk). Server browsing and relayed connections to hosted dedicated servers are unfinished.
 - In-game DLC changes preserve the parent build; a parent update or ambiguous metadata requires closing/updating the game. Removal retains modified files and user configuration. Windows setup scripts run at the next launch. `SetDlcContext` usage reporting is unavailable.
 - Shader download/replay currently covers Vulkan FOZ v6. Legacy GPU-specific shader binary caches and shader capture/upload are not implemented. Real-driver replay performance has not been measured.
-- Controllers: Xbox-compatible pads, DualSense and DualShock 4 are mirrored onto one virtual Xbox 360 pad (needs write access to `/dev/uinput`; set `STEAM_TUI_NO_VIRTUAL_GAMEPAD=1` to disable), and Steam Input reports that pad as connected; see [the virtual gamepad notes](../docs/virtual-gamepad.md). Remapping, action sets, gyro and touchpad are not implemented, and other pad families or a second pad are left to Wine.
+- Controllers: Xbox-compatible pads, DualSense and DualShock 4 are mirrored onto one virtual Xbox 360 pad (needs write access to `/dev/uinput`; set `STEAM_TUI_NO_VIRTUAL_GAMEPAD=1` to disable), and Steam Input reports that pad as connected. Remapping, action sets, gyro and touchpad are not implemented, and other pad families or a second pad are left to Wine.
 - Linux only.
 
 ## Known issues
