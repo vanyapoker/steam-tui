@@ -466,27 +466,50 @@ fn native_scripts_preserve_filename_case_and_apply_only_verified_file_operations
     );
 }
 #[test]
-fn installed_fourteen_series_runtime_is_recognised_from_registry_file() {
+fn runtime_skip_requires_the_scripts_version_or_newer() {
     let section = "Software\\\\Microsoft\\\\VisualStudio\\\\14.0\\\\VC\\\\Runtimes\\\\x64";
     let present = format!(
         "[Other] 1\n\"Installed\"=dword:00000001\n\n[{section}] 1791989089\n#time=1dd5\n\"Bld\"=dword:00008681\n\"Installed\"=dword:00000001\n\"Major\"=dword:0000000e\n\"Version\"=\"14.42.34433.0\"\n\n[Next] 2\n"
     );
-    assert!(runner::runtime_installed(&present, section));
+    assert!(runner::runtime_installed(
+        &present,
+        section,
+        [14, 42, 34433, 0]
+    ));
+    assert!(runner::runtime_installed(&present, section, [14, 40, 0, 0]));
+    assert!(!runner::runtime_installed(
+        &present,
+        section,
+        [14, 51, 36247, 0]
+    ));
+    assert!(runner::runtime_installed(
+        &present.replace("14.42.34433.0", "v14.51.36247.00"),
+        section,
+        [14, 51, 36247, 0]
+    ));
+    assert!(!runner::runtime_installed(
+        &present.replace("14.42.34433.0", "unknown"),
+        section,
+        [14, 42, 34433, 0]
+    ));
     assert!(!runner::runtime_installed(
         &present.replace("0000000e", "0000000c"),
-        section
+        section,
+        [14, 42, 34433, 0]
     ));
     assert!(!runner::runtime_installed(
         &present.replace(
             "\"Installed\"=dword:00000001\n\"Major",
             "\"Installed\"=dword:00000000\n\"Major"
         ),
-        section
+        section,
+        [14, 42, 34433, 0]
     ));
     // Values from a neighbouring section never count.
     assert!(!runner::runtime_installed(
         "[Other] 1\n\"Installed\"=dword:00000001\n\"Major\"=dword:0000000e\n",
-        section
+        section,
+        [14, 42, 34433, 0]
     ));
-    assert!(!runner::runtime_installed("", section));
+    assert!(!runner::runtime_installed("", section, [14, 42, 34433, 0]));
 }

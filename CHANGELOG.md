@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.6 - 2026-11-04
+
+### Added
+- Install or update games from the CLI with `steam-tui install APPID`. New installs offer a destination picker; `--library PATH` selects a destination without prompting.
+- List licensed games as `APPID: name` with `steam-tui library`, with an optional case-insensitive name filter.
+
+### Changed
+- CLI installs and `jobs run` show phase progress bars instead of printing every file name.
+- Install planning resolves license membership before fetching the selected game's metadata, avoiding a full-library refresh.
+
+### Fixed
+- Proton first-run setup invokes batch scripts with spaces in their paths correctly and installs a newer Visual C++ runtime when the prefix's version is below the script's requirement.
+- In-game leaderboard names resolve more reliably.
+
 ## 0.4.5 - 2026-11-03
 
 ### Fixed

@@ -253,11 +253,8 @@ impl Runner {
         Ok(value >= process.minimum)
     }
 
-    /// Microsoft's 2015-2022 Visual C++ redistributables share one binary-compatible
-    /// 14.x runtime. Proton prefixes already carry one, and the installer bundle is
-    /// unreliable under Wine, so an installed 14.x runtime of the same architecture
-    /// satisfies the Valve prerequisite. The prefix's registry file is read
-    /// directly; it needs no Wine process.
+    /// Proton may provide an older 14.x runtime than the install script requires.
+    /// Compare the installed version with the script's minimum before skipping it.
     fn runtime_satisfied(
         &mut self,
         prefix: &Path,
@@ -284,7 +281,10 @@ impl Runner {
             Some(a) if a.eq_ignore_ascii_case("x86") => "x86",
             _ => return Ok(false),
         };
-        if fields.next().and_then(|v| v.split('.').next()) != Some("14") {
+        let Some(required_version) = fields.next().and_then(parse_runtime_version) else {
+            return Ok(false);
+        };
+        if required_version[0] != 14 {
             return Ok(false);
         }
         let section = match (arch, win64) {
@@ -309,7 +309,7 @@ impl Runner {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        Ok(runtime_installed(&text, section))
+        Ok(runtime_installed(&text, section, required_version))
     }
 
     fn recipes(&mut self, prefix: &Path, recipes: &[Recipe]) -> Result<()> {
@@ -414,13 +414,27 @@ impl Runner {
 
 /// Reads one section of a Wine registry file. `section` uses the file's own
 /// doubled-backslash spelling, without brackets.
-pub(super) fn runtime_installed(registry: &str, section: &str) -> bool {
+fn parse_runtime_version(value: &str) -> Option<[u32; 4]> {
+    let mut parts = value
+        .strip_prefix('v')
+        .or_else(|| value.strip_prefix('V'))
+        .unwrap_or(value)
+        .split('.');
+    let mut version = [0; 4];
+    for part in &mut version {
+        *part = parts.next()?.parse().ok()?;
+    }
+    parts.next().is_none().then_some(version)
+}
+
+pub(super) fn runtime_installed(registry: &str, section: &str, required: [u32; 4]) -> bool {
     let header = format!("[{section}]");
     let Some(start) = registry.lines().position(|line| line.starts_with(&header)) else {
         return false;
     };
     let mut installed = false;
     let mut major = false;
+    let mut version = None;
     for line in registry.lines().skip(start + 1) {
         if line.starts_with('[') || line.is_empty() {
             break;
@@ -430,8 +444,14 @@ pub(super) fn runtime_installed(registry: &str, section: &str) -> bool {
             "\"major\"=dword:0000000e" => major = true,
             _ => {}
         }
+        if let Some(value) = line
+            .strip_prefix("\"Version\"=\"")
+            .and_then(|value| value.strip_suffix('"'))
+        {
+            version = parse_runtime_version(value);
+        }
     }
-    installed && major
+    installed && major && version.is_some_and(|version| version >= required)
 }
 
 fn applies(process: &Process, win64: bool, os: Option<&str>) -> bool {
@@ -494,21 +514,44 @@ fn process_command(host: &Path, windows: &str, args: &[String]) -> Result<Vec<St
                     "Unsupported command-shell characters in prerequisite batch invocation",
                 ));
             }
-            let line = values
-                .iter()
-                .map(|value| format!("\"{value}\""))
-                .collect::<Vec<_>>()
-                .join(" ");
-            Ok(vec![
+            Ok([
                 "C:\\windows\\system32\\cmd.exe".into(),
                 "/d".into(),
-                "/s".into(),
                 "/c".into(),
-                format!("\"{line}\""),
-            ])
+                "call".into(),
+                windows.into(),
+            ]
+            .into_iter()
+            .chain(args.iter().cloned())
+            .collect())
         }
         _ => Err(failure(
             "Unsupported prerequisite executable type; expected exe, msi, cmd or bat",
         )),
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn batch_file_with_spaces_is_passed_as_a_separate_argument() {
+        let path =
+            r"Z:\Steam Library\_CommonRedist\vcredist\2022\Microsoft Visual C++ 2022 x64.cmd";
+        let command =
+            process_command(Path::new("setup.cmd"), path, &["/quiet mode".into()]).unwrap();
+        assert_eq!(
+            command,
+            [
+                r"C:\windows\system32\cmd.exe",
+                "/d",
+                "/c",
+                "call",
+                path,
+                "/quiet mode"
+            ]
+        );
+        assert!(process_command(Path::new("setup.cmd"), r"Z:\bad&path.cmd", &[]).is_err());
     }
 }
