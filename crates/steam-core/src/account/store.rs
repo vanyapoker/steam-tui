@@ -9,6 +9,7 @@ use super::{AccountError, Result};
 
 const SERVICE: &str = "steam-tui";
 const STORE_TIMEOUT: Duration = Duration::from_secs(15);
+const UNLOCK_TIMEOUT: Duration = Duration::from_secs(120);
 const CONTENT_TYPE: &str = "application/x-steam-refresh-token";
 
 pub(crate) struct TokenStore {
@@ -23,6 +24,19 @@ impl TokenStore {
         // Refuse to silently treat a locked or absent keyring as empty. Only an
         // unavailable provider/default collection offers explicit ephemeral mode.
         let collection = operation(store.connection.get_default_collection()).await?;
+        if operation(collection.is_locked()).await? {
+            // Ask the Secret Service provider to show its unlock prompt, giving
+            // the user time to type a password before giving up.
+            tokio::time::timeout(UNLOCK_TIMEOUT, collection.unlock())
+                .await
+                .map_err(|_| AccountError::Locked)?
+                .map_err(|error| match error {
+                    secret_service::Error::Prompt => AccountError::Message(
+                        "Secret Service unlock was dismissed; no plaintext fallback was used",
+                    ),
+                    _ => AccountError::Locked,
+                })?;
+        }
         operation(collection.ensure_unlocked()).await?;
         drop(collection);
         Ok(store)
