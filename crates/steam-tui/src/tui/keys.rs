@@ -102,6 +102,7 @@ pub(super) enum Cmd {
     // Application.
     Refresh,
     Backend,
+    Settings,
     Help,
     Quit,
 }
@@ -391,6 +392,13 @@ pub(super) static BINDINGS: &[Binding] = &[
         Any,
         Application,
         "Backend traffic: exactly what the built-in Steam backend sends to / receives from Steam (message ids, names, sizes, hex head, protobuf fields); x clears",
+    ),
+    bind(
+        Cmd::Settings,
+        &[Char(',')],
+        Any,
+        Application,
+        "Settings: display, view, launch host and quit confirmation (Enter / Space change, Left / Right cycle choices)",
     ),
     bind(
         Cmd::Help,

@@ -15,7 +15,7 @@ use steam_core::notifications::{CountKind, Notification};
 use unicode_width::UnicodeWidthStr;
 
 use super::keys::{self, Cmd};
-use super::model::{CloudIcon, Focus, Model, Sort};
+use super::model::{CloudIcon, Focus, LaunchHost, Model, Sort};
 use super::theme::{
     self, PROTON_NOTE, Panel, PlatformMarker, Severity, accent, bold, dim, heading, highlight,
     key_cap, message_style, severity_style,
@@ -196,6 +196,8 @@ const MIN_HEIGHT: u16 = 10;
 const WIDE_WIDTH: u16 = 110;
 const INSTALL_HEIGHT: u16 = 6;
 const MIN_MAIN_HEIGHT: u16 = 8;
+/// Terminals at least this tall give the status message a second row when wrapping is on.
+const STATUS_WRAP_MIN_HEIGHT: u16 = 16;
 /// Least height for the Friends/Notifications panels; below it they are hidden.
 const MIN_PANEL_HEIGHT: u16 = 6;
 /// The Library takes this share of the width (wide layout).
@@ -225,9 +227,9 @@ fn lower_height(main_height: u16, lower_wanted: u16) -> u16 {
 /// Optional panels are dropped, never squeezed below usefulness; Notifications
 /// goes first. Narrow terminals give the library all the height that remains
 /// after a small fixed Friends/Notifications row.
-fn areas(area: Rect, install_shown: bool, lower_wanted: u16) -> Areas {
+fn areas(area: Rect, install_shown: bool, lower_wanted: u16, status_rows: u16) -> Areas {
     let install_height = if install_shown {
-        INSTALL_HEIGHT.min(area.height.saturating_sub(MIN_MAIN_HEIGHT + 1))
+        INSTALL_HEIGHT.min(area.height.saturating_sub(MIN_MAIN_HEIGHT + status_rows))
     } else {
         0
     };
@@ -239,7 +241,7 @@ fn areas(area: Rect, install_shown: bool, lower_wanted: u16) -> Areas {
     let rows = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(install_height),
-        Constraint::Length(1),
+        Constraint::Length(status_rows),
     ])
     .split(area);
     let main = rows[0];
@@ -573,10 +575,16 @@ pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
         // or the badge line, an optional status line and the feed.
         let feed = 1 + usize::from(!model.notif_status.is_empty()) + model.notifications.len();
         let wanted = ((model.friend_order.len() + 2).max(feed) + 2).min(u16::MAX as usize) as u16;
+        let status_rows: u16 = if model.status_wrap && area.height >= STATUS_WRAP_MIN_HEIGHT {
+            2
+        } else {
+            1
+        };
         let areas = areas(
             area,
             model.install_active || model.progress.is_some(),
             wanted,
+            status_rows,
         );
         model.library_rows = (areas.library.height.saturating_sub(4) as usize)
             .saturating_sub(divider)
@@ -613,6 +621,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
     if model.backend_view {
         backend_overlay(frame, model);
     }
+    if model.settings_view {
+        settings_overlay(frame, model);
+    }
     if model.help {
         help(frame, model);
     }
@@ -631,6 +642,55 @@ pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
     if model.chat.active.is_some() {
         chat_modal(frame, model);
     }
+    if model.quit_confirm {
+        quit_modal(frame, model);
+    }
+}
+
+/// Splits styled text into a first row of at most `width` cells and the remainder,
+/// breaking at the last space of the first row when there is one.
+fn split_segments(segments: Vec<Seg>, width: usize) -> (Vec<Seg>, Vec<Seg>) {
+    let chars: Vec<(char, Style)> = segments
+        .into_iter()
+        .flat_map(|(text, style)| {
+            safe(&text)
+                .chars()
+                .map(|ch| (ch, style))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut used = 0;
+    let mut end = chars.len();
+    for (index, (ch, _)) in chars.iter().enumerate() {
+        let next = unicode_width::UnicodeWidthChar::width(*ch).unwrap_or(0);
+        if used + next > width {
+            end = index;
+            break;
+        }
+        used += next;
+    }
+    let mut rest_start = end;
+    if end < chars.len() {
+        if chars[end].0 == ' ' {
+            rest_start = end + 1;
+        } else if let Some(space) = chars[..end].iter().rposition(|(ch, _)| *ch == ' ')
+            && space > end / 2
+        {
+            end = space;
+            rest_start = space + 1;
+        }
+    }
+    let group = |slice: &[(char, Style)]| -> Vec<Seg> {
+        let mut out: Vec<Seg> = Vec::new();
+        for (ch, style) in slice {
+            match out.last_mut() {
+                Some((text, last)) if last == style => text.push(*ch),
+                _ => out.push((ch.to_string(), *style)),
+            }
+        }
+        out
+    };
+    (group(&chars[..end]), group(&chars[rest_start..]))
 }
 
 fn draw_status(frame: &mut Frame<'_>, model: &Model, area: Rect, summary: bool, now: Instant) {
@@ -640,21 +700,31 @@ fn draw_status(frame: &mut Frame<'_>, model: &Model, area: Rect, summary: bool, 
     let enter = keys::label(Cmd::Activate);
     let mut pairs = vec![if model.focus == Focus::Friends {
         (enter, "chat".to_owned())
-    } else if host_game {
+    } else if host_game || model.launch_host == LaunchHost::ValveHost {
         (enter, "launch (Valve host)".to_owned())
+    } else if model
+        .selected_game()
+        .is_some_and(|game| game.installed.is_none())
+    {
+        (enter, "install".to_owned())
     } else {
         (enter, "launch".to_owned())
     }];
-    if !host_game && model.focus == Focus::Library {
+    if !host_game && model.launch_host == LaunchHost::BuiltIn && model.focus == Focus::Library {
         pairs.push((keys::label(Cmd::ValveHost), "Valve host".to_owned()));
     }
-    pairs.push((keys::label(Cmd::Backend), "backend".to_owned()));
+    pairs.push((keys::label(Cmd::Settings), "settings".to_owned()));
     pairs.push((keys::label(Cmd::Help), "help".to_owned()));
     pairs.push((keys::label(Cmd::Quit), "quit".to_owned()));
-    let right = hotkey_line(&pairs, 2, (area.width as usize).saturating_sub(34));
-    let right_width = right.width() as u16;
+    let show = model.show_hints;
+    let right = if show {
+        hotkey_line(&pairs, 2, (area.width as usize).saturating_sub(30))
+    } else {
+        Line::default()
+    };
+    let right_width = if show { right.width() as u16 + 1 } else { 0 };
     let columns =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width + 1)]).split(area);
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(right_width)]).split(area);
     let mut left = Vec::new();
     if summary && let Some(text) = progress_summary(model, now) {
         left.push(seg(text, severity_style(Severity::Progress)));
@@ -673,11 +743,28 @@ fn draw_status(frame: &mut Frame<'_>, model: &Model, area: Rect, summary: bool, 
             left.push(seg("⊞ Windows build via Proton", marker.style()));
         }
     }
-    frame.render_widget(
-        Paragraph::new(fit_line(left, columns[0].width as usize)),
-        columns[0],
-    );
-    frame.render_widget(Paragraph::new(right.right_aligned()), columns[1]);
+    let bottom_y = area.y + area.height.saturating_sub(1);
+    if area.height >= 2 {
+        // The first row has the full width; the second shares its row with the hotkeys.
+        let (first, rest) = split_segments(left, area.width as usize);
+        frame.render_widget(
+            Paragraph::new(fit_line(first, area.width as usize)),
+            Rect { height: 1, ..area },
+        );
+        frame.render_widget(
+            Paragraph::new(fit_line(rest, columns[0].width as usize)),
+            Rect { y: bottom_y, height: 1, ..columns[0] },
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(fit_line(left, columns[0].width as usize)),
+            columns[0],
+        );
+    }
+    if show {
+        let right_area = Rect { y: bottom_y, height: 1, ..columns[1] };
+        frame.render_widget(Paragraph::new(right.right_aligned()), right_area);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -870,14 +957,7 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
         .is_some_and(|game| game.installed.is_some());
     let selected = model.selected_game();
     let launching = selected.is_some_and(|game| model.launching.contains(&game.app_id));
-    let mut bottom = vec![hint(
-        &keys::label(Cmd::Activate),
-        if installed_selected {
-            "launch"
-        } else {
-            "install"
-        },
-    )];
+    let mut bottom: Vec<Vec<Seg>> = Vec::new();
     if installed_selected
         && !selected.is_some_and(|game| matches!(game.update, UpdateStatus::UpToDate))
     {
@@ -955,7 +1035,7 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
         return;
     }
     let (columns, name_width) = library_columns(body.width as usize);
-    let show_icons = name_width >= NAME_MIN + 3;
+    let show_icons = model.show_icons && name_width >= NAME_MIN + 3;
     let visible_ids = if show_icons {
         model
             .order
@@ -1107,6 +1187,8 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
         && model.modal.is_none()
         && !model.help
         && !model.backend_view
+        && !model.settings_view
+        && !model.quit_confirm
         && !model.queue_view
         && model.properties.is_none()
         && model.news.is_none()
@@ -1212,7 +1294,7 @@ fn draw_friends(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
             group
         },
     ];
-    let mut bottom = vec![hint("↑/↓", "select"), hint("Enter", "chat")];
+    let mut bottom = vec![hint("↑/↓", "select")];
     if !model.chat.available {
         bottom.insert(0, vec![seg("Chat offline", dim())]);
     } else if !model.chat.status.is_empty() {
@@ -2722,6 +2804,74 @@ fn help(frame: &mut Frame<'_>, model: &mut Model) {
     );
 }
 
+fn settings_overlay(frame: &mut Frame<'_>, model: &Model) {
+    let area = modal_area(frame.area(), 60, 9);
+    open_modal(frame, area);
+    let check = |on: bool| if on { "[x]" } else { "[ ]" }.to_owned();
+    let rows: [(&str, String); 7] = [
+        ("Wrap long status messages", check(model.status_wrap)),
+        ("Show hotkey hints", check(model.show_hints)),
+        ("Library icons", check(model.show_icons)),
+        ("Show offline friends", check(model.show_offline)),
+        ("Library view", model.filter.label().to_owned()),
+        ("Launch host (non-VAC)", model.launch_host.label().to_owned()),
+        ("Confirm quit when busy", check(model.confirm_quit)),
+    ];
+    let lines: Vec<Line<'static>> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (label, value))| {
+            let selected = index == model.settings_selected;
+            let line = Line::from(format!(
+                "{}{:<28}{}",
+                if selected { "› " } else { "  " },
+                label,
+                value
+            ));
+            if selected {
+                line.style(highlight())
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).block(panel_block(
+            theme::panel_border(Panel::Overlay, true),
+            area.width,
+            vec![vec![seg("Settings", bold())]],
+            vec![hint("↑↓", "select"), hint("Enter", "change"), hint("Esc", "close")],
+            Vec::new(),
+        )),
+        area,
+    );
+}
+
+fn quit_modal(frame: &mut Frame<'_>, model: &Model) {
+    let area = modal_area(frame.area(), 60, 7);
+    open_modal(frame, area);
+    let mut lines = vec![Line::from("Still busy:")];
+    if model.install_active || model.preparing_install {
+        lines.push(Line::from("  installing or updating"));
+    }
+    if !model.running_games.is_empty() {
+        lines.push(Line::from("  game running"));
+    }
+    if !model.launching.is_empty() {
+        lines.push(Line::from("  game launching"));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(panel_block(
+            theme::panel_border(Panel::Overlay, true),
+            area.width,
+            vec![vec![seg("Quit steam-tui?", bold())]],
+            vec![hint("Enter", "quit"), hint("Esc", "stay")],
+            Vec::new(),
+        )),
+        area,
+    );
+}
+
 fn job_state_word(state: steam_core::updates::JobState) -> &'static str {
     use steam_core::updates::JobState;
     match state {
@@ -3891,6 +4041,101 @@ mod tests {
     }
 
     #[test]
+    fn long_status_wraps_onto_a_second_row_when_enabled() {
+        let mut model = model();
+        model.account = Some("alice".into());
+        model.set_catalog(CatalogSnapshot {
+            items: vec![game(3124540, "Some Game", true)],
+            warnings: vec![],
+        });
+        model.status = "Steam Cloud: up to date · Launched [2155180] PID 813854: Started PID 813854; log /tmp/steam-tui/path.log".into();
+        let screen = render(&mut model, 105, 30);
+        let lines: Vec<&str> = screen.lines().collect();
+        let tail = &lines[lines.len() - 2..];
+        assert!(tail.concat().contains("path.log"), "{screen}");
+        assert!(tail[1].contains("Enter launch"), "{screen}");
+
+        model.status_wrap = false;
+        let screen = render(&mut model, 105, 30);
+        assert!(!screen.contains("path.log"), "{screen}");
+
+        model.status_wrap = true;
+        let screen = render(&mut model, 105, 14);
+        assert!(!screen.contains("path.log"), "{screen}");
+    }
+
+    #[test]
+    fn quit_modal_lists_what_is_busy() {
+        let mut model = model();
+        model.install_active = true;
+        model.quit_confirm = true;
+        let screen = render(&mut model, 105, 30);
+        assert!(screen.contains("Quit steam-tui?"), "{screen}");
+        assert!(screen.contains("installing or updating"), "{screen}");
+    }
+
+    #[test]
+    fn settings_hint_follows_the_show_hints_setting() {
+        let mut model = model();
+        model.account = Some("alice".into());
+        model.set_catalog(CatalogSnapshot {
+            items: vec![game(3124540, "Some Game", true)],
+            warnings: vec![],
+        });
+        model.status = "Ready".into();
+        let screen = render(&mut model, 105, 30);
+        assert!(screen.contains(", settings"), "{screen}");
+        model.show_hints = false;
+        let screen = render(&mut model, 105, 30);
+        let lines: Vec<&str> = screen.lines().collect();
+        let tail = lines[lines.len() - 2..].concat();
+        assert!(!tail.contains("settings"), "{screen}");
+        assert!(!tail.contains("Enter launch"), "{screen}");
+        assert!(tail.contains("Ready"), "{screen}");
+    }
+
+    #[test]
+    fn library_icons_can_be_switched_off() {
+        let mut model = model();
+        model.account = Some("alice".into());
+        model.set_catalog(CatalogSnapshot {
+            items: vec![game(3124540, "Some Game", true)],
+            warnings: vec![],
+        });
+        model.show_icons = false;
+        let screen = render(&mut model, 105, 30);
+        assert!(!screen.contains('▣'), "{screen}");
+    }
+
+    #[test]
+    fn enter_hint_lives_only_in_the_status_line() {
+        let mut model = model();
+        model.account = Some("alice".into());
+        model.set_catalog(CatalogSnapshot {
+            items: vec![game(3124540, "Some Game", true)],
+            warnings: vec![],
+        });
+        let screen = render(&mut model, 150, 30);
+        let lines: Vec<&str> = screen.lines().collect();
+        let panels = lines[..lines.len() - 2].join("\n");
+        for text in ["Enter launch", "Enter install", "Enter chat"] {
+            assert!(!panels.contains(text), "{text}\n{screen}");
+        }
+        assert!(lines[lines.len() - 1].contains("Enter launch"), "{screen}");
+    }
+
+    #[test]
+    fn settings_overlay_shows_the_wrap_toggle() {
+        let mut model = model();
+        model.settings_view = true;
+        let screen = render(&mut model, 105, 30);
+        assert!(screen.contains("Wrap long status messages   [x]"), "{screen}");
+        model.status_wrap = false;
+        let screen = render(&mut model, 105, 30);
+        assert!(screen.contains("Wrap long status messages   [ ]"), "{screen}");
+    }
+
+    #[test]
     fn repeated_identical_backend_messages_are_stacked() {
         use steam_core::backend::{Direction, Event};
         let mut model = model();
@@ -4235,7 +4480,7 @@ mod tests {
 
     #[test]
     fn wide_layout_never_makes_the_library_shorter_than_its_neighbours() {
-        let wide = areas(Rect::new(0, 0, 150, 40), false, 0);
+        let wide = areas(Rect::new(0, 0, 150, 40), false, 0, 1);
         assert!(wide.library.width <= 150 * 60 / 100, "{:?}", wide.library);
         let (friends, notifications) = (wide.friends.unwrap(), wide.notifications.unwrap());
         assert!(friends.x >= wide.library.right() && notifications.x == friends.x);
@@ -4253,7 +4498,7 @@ mod tests {
             (80, 45, true, 30, 8),
             (100, 40, false, 31, 8),
         ] {
-            let layout = areas(Rect::new(0, 0, width, height), install, 0);
+            let layout = areas(Rect::new(0, 0, width, height), install, 0, 1);
             let (friends, notifications) = (layout.friends.unwrap(), layout.notifications.unwrap());
             assert_eq!(layout.library.height, library, "{width}x{height} {install}");
             assert_eq!(friends.height, lower, "{width}x{height} {install}");
@@ -4270,14 +4515,14 @@ mod tests {
     #[test]
     fn notifications_are_hidden_before_friends_and_friends_before_the_library() {
         assert!(
-            areas(Rect::new(0, 0, 150, 12), false, 0)
+            areas(Rect::new(0, 0, 150, 12), false, 0, 1)
                 .notifications
                 .is_none()
         );
-        assert!(areas(Rect::new(0, 0, 150, 12), false, 0).friends.is_some());
-        let narrow = areas(Rect::new(0, 0, 50, 30), false, 0);
+        assert!(areas(Rect::new(0, 0, 150, 12), false, 0, 1).friends.is_some());
+        let narrow = areas(Rect::new(0, 0, 50, 30), false, 0, 1);
         assert!(narrow.notifications.is_none() && narrow.friends.is_some());
-        let tiny = areas(Rect::new(0, 0, 40, 12), false, 0);
+        let tiny = areas(Rect::new(0, 0, 40, 12), false, 0, 1);
         assert!(tiny.friends.is_none() && tiny.notifications.is_none());
         assert!(tiny.library.height >= MIN_MAIN_HEIGHT);
     }

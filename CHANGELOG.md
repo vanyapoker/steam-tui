@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.7 - 2026-11-10
+
+### Added
+- Settings (`,`) now covers hotkey hints, library icons, offline friends, library view, the default launch host for non-VAC games and quit confirmation.
+- The status line shows a `, settings` hint.
+- Quitting with `q` while an install, update or game is active asks for confirmation (Ctrl+C still quits immediately).
+
+### Changed
+- The `b backend` hint is gone from the status line; `b` still opens the backend view.
+
 ## 0.4.6 - 2026-11-04
 
 ### Added

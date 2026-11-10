@@ -92,6 +92,29 @@ impl LibraryFilter {
     }
 }
 
+/// Default launcher for games that do not require Valve's host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LaunchHost {
+    BuiltIn,
+    ValveHost,
+}
+
+impl LaunchHost {
+    fn next(self) -> Self {
+        match self {
+            Self::BuiltIn => Self::ValveHost,
+            Self::ValveHost => Self::BuiltIn,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "Built-in",
+            Self::ValveHost => "Valve host",
+        }
+    }
+}
+
 pub(super) struct InstallModal {
     pub plan: InstallPlan,
     pub existing: Option<InstalledGame>,
@@ -148,6 +171,8 @@ const SPEED_WINDOW: Duration = Duration::from_secs(5);
 const MIN_SPEED_SPAN: Duration = Duration::from_secs(1);
 /// ETAs beyond this are noise from a near-zero rate.
 const MAX_ETA: Duration = Duration::from_secs(100 * 24 * 3600);
+/// Rows in the settings overlay.
+const SETTINGS_ROWS: usize = 7;
 
 impl SpeedTracker {
     pub fn reset(&mut self) {
@@ -395,6 +420,14 @@ pub(super) struct Model {
     /// Traffic of the per-launch Steam backend, oldest first (capped).
     pub backend_log: std::collections::VecDeque<BackendEntry>,
     pub backend_view: bool,
+    pub settings_view: bool,
+    pub settings_selected: usize,
+    pub status_wrap: bool,
+    pub show_hints: bool,
+    pub show_icons: bool,
+    pub launch_host: LaunchHost,
+    pub confirm_quit: bool,
+    pub quit_confirm: bool,
     pub queue_view: bool,
     pub queue_filter: Option<super::downloads::Kind>,
     pub queue_run: Option<u64>,
@@ -495,6 +528,14 @@ impl Model {
             help_offset: 0,
             backend_log: std::collections::VecDeque::new(),
             backend_view: false,
+            settings_view: false,
+            settings_selected: 0,
+            status_wrap: true,
+            show_hints: true,
+            show_icons: true,
+            launch_host: LaunchHost::BuiltIn,
+            confirm_quit: true,
+            quit_confirm: false,
             queue_view: false,
             queue_filter: None,
             queue_run: None,
@@ -707,9 +748,14 @@ impl Model {
         };
         let pins: Vec<_> = self.pins.iter().map(u32::to_string).collect();
         format!(
-            "sort={sort}\nreverse={}\nfilter={filter}\nshow_offline={}\npins={}\nprofile_account={}\nprofile_name={}\n",
+            "sort={sort}\nreverse={}\nfilter={filter}\nshow_offline={}\nstatus_wrap={}\nshow_hints={}\nlibrary_icons={}\nlaunch_host={}\nconfirm_quit={}\npins={}\nprofile_account={}\nprofile_name={}\n",
             self.reverse,
             self.show_offline,
+            self.status_wrap,
+            self.show_hints,
+            self.show_icons,
+            if self.launch_host == LaunchHost::ValveHost { "valve" } else { "builtin" },
+            self.confirm_quit,
             pins.join(","),
             self.account.as_deref().unwrap_or_default(),
             self.profile_name.as_deref().unwrap_or_default()
@@ -738,6 +784,12 @@ impl Model {
                 ("filter", "installed") => self.filter = LibraryFilter::Installed,
                 ("filter", "not-installed") => self.filter = LibraryFilter::NotInstalled,
                 ("show_offline", v) => self.show_offline = v == "true",
+                ("status_wrap", v) => self.status_wrap = v == "true",
+                ("show_hints", v) => self.show_hints = v == "true",
+                ("library_icons", v) => self.show_icons = v == "true",
+                ("launch_host", "valve") => self.launch_host = LaunchHost::ValveHost,
+                ("launch_host", "builtin") => self.launch_host = LaunchHost::BuiltIn,
+                ("confirm_quit", v) => self.confirm_quit = v == "true",
                 ("profile_name", v) if restore_profile && !v.is_empty() => {
                     self.profile_name = Some(super::super::terminal_text(v).into_owned())
                 }
@@ -1185,6 +1237,8 @@ impl Model {
             || self.modal.is_some()
             || self.help
             || self.backend_view
+            || self.settings_view
+            || self.quit_confirm
             || self.queue_view
             || self.properties.is_some()
             || self.cloud_conflicts.is_some()
@@ -1327,6 +1381,9 @@ impl Model {
         {
             return Action::Quit;
         }
+        if self.quit_confirm {
+            return self.quit_key(key);
+        }
         if let Some(friend) = self.chat.active {
             if key.modifiers.contains(KeyModifiers::CONTROL)
                 && matches!(key.code, KeyCode::Char('v' | 'V'))
@@ -1362,6 +1419,9 @@ impl Model {
         }
         if self.backend_view {
             return self.backend_key(key);
+        }
+        if self.settings_view {
+            return self.settings_key(key);
         }
         if self.help {
             return self.help_key(key);
@@ -1631,6 +1691,69 @@ impl Model {
         Action::None
     }
 
+    fn settings_key(&mut self, key: KeyEvent) -> Action {
+        if keys::closes(&key, &[Key::Char(',')]) {
+            self.settings_view = false;
+            return Action::None;
+        }
+        match keys::nav(&key) {
+            Some(Nav::Up) => self.settings_selected = self.settings_selected.saturating_sub(1),
+            Some(Nav::Down) => {
+                self.settings_selected = (self.settings_selected + 1).min(SETTINGS_ROWS - 1)
+            }
+            _ => {}
+        }
+        match key.code {
+            KeyCode::Enter | KeyCode::Char(' ') => self.settings_change(true),
+            KeyCode::Left | KeyCode::Right => self.settings_change(false),
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Changes the selected settings row. `bools_too` is false for Left/Right,
+    /// which only cycle choice rows.
+    fn settings_change(&mut self, bools_too: bool) {
+        match self.settings_selected {
+            0 if bools_too => self.status_wrap = !self.status_wrap,
+            1 if bools_too => self.show_hints = !self.show_hints,
+            2 if bools_too => self.show_icons = !self.show_icons,
+            3 if bools_too => {
+                self.show_offline = !self.show_offline;
+                self.filter_friends();
+            }
+            4 => {
+                let preserve = self.selected_game().map(|game| game.app_id);
+                self.filter = self.filter.next();
+                self.reorder(preserve);
+            }
+            5 => self.launch_host = self.launch_host.next(),
+            6 if bools_too => self.confirm_quit = !self.confirm_quit,
+            _ => {}
+        }
+    }
+
+    fn quit_busy(&self) -> bool {
+        self.install_active
+            || self.preparing_install
+            || !self.running_games.is_empty()
+            || !self.launching.is_empty()
+    }
+
+    fn quit_key(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y' | 'Y') => {
+                self.quit_confirm = false;
+                Action::Quit
+            }
+            KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+                self.quit_confirm = false;
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
     fn backend_key(&mut self, key: KeyEvent) -> Action {
         if keys::closes(&key, &[Key::Char('b')]) {
             self.backend_view = false;
@@ -1723,7 +1846,13 @@ impl Model {
         };
         let preserve = self.selected_game().map(|game| game.app_id);
         match cmd {
-            Cmd::Quit => return Action::Quit,
+            Cmd::Quit => {
+                if self.confirm_quit && self.quit_busy() {
+                    self.quit_confirm = true;
+                    return Action::None;
+                }
+                return Action::Quit;
+            }
             Cmd::Refresh => return Action::Refresh,
             Cmd::News => return self.open_news(),
             Cmd::Achievements => return self.open_achievements(),
@@ -1810,6 +1939,7 @@ impl Model {
                 _ => self.status = "Install the game before pre-caching its shaders".into(),
             },
             Cmd::Backend => self.backend_view = true,
+            Cmd::Settings => self.settings_view = true,
             Cmd::SyncSaves => return self.request_cloud_sync(),
             Cmd::View => {
                 self.filter = self.filter.next();
@@ -1934,6 +2064,7 @@ impl Model {
             return None;
         }
         let backend = if force_host
+            || self.launch_host == LaunchHost::ValveHost
             || self
                 .selected_game()
                 .is_some_and(|game| steam_core::launch::requires_valve_host(game.app_id))
@@ -2230,6 +2361,29 @@ mod tests {
     }
 
     #[test]
+    fn settings_overlay_toggles_and_persists_status_wrap() {
+        let mut model = Model::new(true, None);
+        assert!(model.status_wrap);
+        model.key(key(','));
+        assert!(model.settings_view);
+        model.key(press(KeyCode::Enter));
+        assert!(!model.status_wrap);
+        let text = model.settings_text();
+        assert!(text.contains("status_wrap=false"));
+        let mut fresh = Model::new(true, None);
+        fresh.apply_settings(&text);
+        assert!(!fresh.status_wrap);
+        let mut legacy = Model::new(true, None);
+        legacy.apply_settings("sort=name\n");
+        assert!(legacy.status_wrap);
+        model.key(press(KeyCode::Esc));
+        assert!(!model.settings_view);
+        model.key(key(','));
+        model.key(key(','));
+        assert!(!model.settings_view);
+    }
+
+    #[test]
     fn enter_installs_what_is_missing_and_launches_what_is_installed() {
         let mut model = loaded();
         assert_eq!(
@@ -2436,6 +2590,79 @@ mod tests {
             model.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Action::Launch(LaunchBackend::BuiltIn)
         );
+    }
+
+    #[test]
+    fn settings_overlay_rows_change_and_persist() {
+        let mut model = Model::new(true, None);
+        model.key(key(','));
+        let down = || press(KeyCode::Down);
+        model.key(down());
+        model.key(press(KeyCode::Enter));
+        assert!(!model.show_hints);
+        model.key(down());
+        model.key(press(KeyCode::Enter));
+        assert!(!model.show_icons);
+        model.key(down());
+        model.key(press(KeyCode::Enter));
+        assert!(model.show_offline);
+        model.key(down());
+        model.key(press(KeyCode::Enter));
+        assert_eq!(model.filter, LibraryFilter::Installed);
+        model.key(press(KeyCode::Right));
+        assert_eq!(model.filter, LibraryFilter::NotInstalled);
+        model.key(down());
+        model.key(press(KeyCode::Enter));
+        assert_eq!(model.launch_host, LaunchHost::ValveHost);
+        model.key(down());
+        model.key(press(KeyCode::Enter));
+        assert!(!model.confirm_quit);
+        model.key(down());
+        assert_eq!(model.settings_selected, 6);
+        let text = model.settings_text();
+        for line in ["show_hints=false", "library_icons=false", "launch_host=valve", "confirm_quit=false"] {
+            assert!(text.contains(line), "{text}");
+        }
+        let mut fresh = Model::new(true, None);
+        fresh.apply_settings(&text);
+        assert!(!fresh.show_hints && !fresh.show_icons && !fresh.confirm_quit);
+        assert_eq!(fresh.launch_host, LaunchHost::ValveHost);
+        let mut legacy = Model::new(true, None);
+        legacy.apply_settings("sort=name\n");
+        assert!(legacy.show_hints && legacy.show_icons && legacy.confirm_quit);
+        assert_eq!(legacy.launch_host, LaunchHost::BuiltIn);
+    }
+
+    #[test]
+    fn valve_host_default_routes_non_vac_launches() {
+        let mut model = loaded();
+        model.launch_host = LaunchHost::ValveHost;
+        let action = model.key(press(KeyCode::Enter));
+        if action == Action::None {
+            assert!(!model.status.is_empty());
+        } else {
+            assert_eq!(action, Action::Launch(LaunchBackend::ValveHost));
+        }
+    }
+
+    #[test]
+    fn quit_asks_for_confirmation_only_when_busy() {
+        let mut model = Model::new(true, None);
+        assert_eq!(model.key(key('q')), Action::Quit);
+        model.install_active = true;
+        assert_eq!(model.key(key('q')), Action::None);
+        assert!(model.quit_confirm);
+        model.key(key('n'));
+        assert!(!model.quit_confirm);
+        model.key(key('q'));
+        assert!(model.quit_confirm);
+        assert_eq!(
+            model.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Action::Quit
+        );
+        assert_eq!(model.key(press(KeyCode::Enter)), Action::Quit);
+        model.confirm_quit = false;
+        assert_eq!(model.key(key('q')), Action::Quit);
     }
 
     #[test]
