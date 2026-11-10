@@ -557,6 +557,9 @@ fn too_small(frame: &mut Frame<'_>, model: &Model, now: Instant) {
 
 pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
     model.library_hits.clear();
+    model.friend_hits.clear();
+    model.notif_hits.clear();
+    model.notif_area = None;
     let area = frame.area();
     let now = Instant::now();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
@@ -827,7 +830,11 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
     let mut view = hint("v", "view");
     view.push(seg(": ", dim()));
     view.push(seg(
-        model.filter.label().to_lowercase(),
+        if model.search_widened {
+            "installed + not installed".to_owned()
+        } else {
+            model.filter.label().to_lowercase()
+        },
         Style::default()
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD),
@@ -1177,7 +1184,7 @@ fn profile_line(model: &Model, width: usize) -> Line<'static> {
     fit_line(line, width)
 }
 
-fn draw_friends(frame: &mut Frame<'_>, model: &Model, area: Rect) {
+fn draw_friends(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
     let focused = model.focus == Focus::Friends;
     let border = theme::panel_border(Panel::Friends, focused);
     let count = model.friend_order.len();
@@ -1298,6 +1305,18 @@ fn draw_friends(frame: &mut Frame<'_>, model: &Model, area: Rect) {
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+    let shown = model
+        .friend_order
+        .len()
+        .saturating_sub(model.friend_offset)
+        .min(model.friend_rows)
+        .min(inner.height as usize);
+    for row in 0..shown {
+        model.friend_hits.push((
+            Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
+            model.friend_offset + row,
+        ));
+    }
 }
 
 /// Badge glyph and color per count kind.
@@ -1395,7 +1414,7 @@ fn notification_line(
     fit_line(line, width)
 }
 
-fn draw_notifications(frame: &mut Frame<'_>, model: &Model, area: Rect) {
+fn draw_notifications(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
     let border = theme::panel_border(Panel::Notifications, false);
     let mut title = vec![seg("Notifications", bold())];
     if model.notif_unseen > 0 {
@@ -1437,7 +1456,26 @@ fn draw_notifications(frame: &mut Frame<'_>, model: &Model, area: Rect) {
                 }),
         );
     }
+    let first_row = lines_before_feed(model);
     frame.render_widget(Paragraph::new(lines), inner);
+    model.notif_area = Some(area);
+    let shown = model
+        .notifications
+        .len()
+        .saturating_sub(model.notif_offset)
+        .min(model.notif_rows)
+        .min((inner.height as usize).saturating_sub(first_row));
+    for row in 0..shown {
+        model.notif_hits.push((
+            Rect::new(inner.x, inner.y + (first_row + row) as u16, inner.width, 1),
+            model.notif_offset + row,
+        ));
+    }
+}
+
+/// Rows above the first feed item: the badge line and the optional status line.
+fn lines_before_feed(model: &Model) -> usize {
+    1 + usize::from(!model.notif_status.is_empty())
 }
 
 /// Text first, then a bar made only of fill/empty cells: the fill never covers text.

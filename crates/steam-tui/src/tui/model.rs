@@ -329,6 +329,16 @@ pub(super) struct Model {
     news_request: u64,
     achievements_request: u64,
     last_library_click: Option<(u32, Instant)>,
+    last_friend_click: Option<(u64, Instant)>,
+    /// Hit targets from the last frame: (row, position in `friend_order`).
+    pub friend_hits: Vec<(Rect, usize)>,
+    /// Hit targets from the last frame: (row, index in `notifications`).
+    pub notif_hits: Vec<(Rect, usize)>,
+    /// Whole feed panel from the last frame, for wheel scrolling.
+    pub notif_area: Option<Rect>,
+    /// The installed view found nothing for the search, so it also shows
+    /// not-installed games.
+    pub search_widened: bool,
     pub friends: Vec<Friend>,
     pub friend_order: Vec<usize>,
     pub friend_offset: usize,
@@ -446,6 +456,11 @@ impl Model {
             news_request: 0,
             achievements_request: 0,
             last_library_click: None,
+            last_friend_click: None,
+            friend_hits: Vec::new(),
+            notif_hits: Vec::new(),
+            notif_area: None,
+            search_widened: false,
             friends: Vec::new(),
             friend_order: Vec::new(),
             friend_offset: 0,
@@ -774,24 +789,31 @@ impl Model {
 
     fn reorder(&mut self, preserve: Option<u32>) {
         let query = self.search.to_lowercase();
-        self.order = self
-            .names
-            .iter()
-            .enumerate()
-            .filter_map(|(index, name)| {
-                let installed = self.games[index].installed.is_some();
-                // Blocked apps (no installable depots: tools, soundtracks, ...) are hidden.
-                let blocked = !installed && self.games[index].unavailable_reason.is_some();
-                (!blocked
-                    && name.contains(&query)
-                    && match self.filter {
-                        LibraryFilter::All => true,
-                        LibraryFilter::Installed => installed,
-                        LibraryFilter::NotInstalled => !installed,
-                    })
-                .then_some(index)
-            })
-            .collect();
+        let collect = |filter: LibraryFilter| -> Vec<usize> {
+            self.names
+                .iter()
+                .enumerate()
+                .filter_map(|(index, name)| {
+                    let installed = self.games[index].installed.is_some();
+                    // Blocked apps (no installable depots: tools, soundtracks, ...) are hidden.
+                    let blocked = !installed && self.games[index].unavailable_reason.is_some();
+                    (!blocked
+                        && name.contains(&query)
+                        && match filter {
+                            LibraryFilter::All => true,
+                            LibraryFilter::Installed => installed,
+                            LibraryFilter::NotInstalled => !installed,
+                        })
+                    .then_some(index)
+                })
+                .collect()
+        };
+        self.order = collect(self.filter);
+        self.search_widened = false;
+        if self.order.is_empty() && !query.is_empty() && self.filter == LibraryFilter::Installed {
+            self.order = collect(LibraryFilter::All);
+            self.search_widened = !self.order.is_empty();
+        }
         let sort = self.sort;
         let reverse = self.reverse;
         self.order.sort_by(|&a, &b| {
@@ -1151,6 +1173,14 @@ impl Model {
         } else {
             None
         };
+        let previous_friend = if matches!(
+            event.kind,
+            MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            self.last_friend_click.take()
+        } else {
+            None
+        };
         if self.chat.active.is_some()
             || self.modal.is_some()
             || self.help
@@ -1219,11 +1249,79 @@ impl Model {
                 _ => {}
             }
         }
+        if let Some(&(_, position)) = self
+            .friend_hits
+            .iter()
+            .find(|(rect, _)| rect.contains(position))
+        {
+            match event.kind {
+                MouseEventKind::Down(MouseButton::Left | MouseButton::Right) => {
+                    self.friend_selected = position;
+                    self.focus = Focus::Friends;
+                    self.searching = false;
+                    self.keep_visible();
+                    if let Some(id) = self.selected_friend().map(|friend| friend.steam_id) {
+                        let double = previous_friend.is_some_and(|(previous, at)| {
+                            previous == id
+                                && now.saturating_duration_since(at) <= Duration::from_millis(400)
+                        });
+                        if double || event.kind == MouseEventKind::Down(MouseButton::Right) {
+                            self.open_chat();
+                        } else {
+                            self.last_friend_click = Some((id, now));
+                        }
+                    }
+                }
+                MouseEventKind::ScrollDown => self.move_friend(true),
+                MouseEventKind::ScrollUp => self.move_friend(false),
+                _ => {}
+            }
+            return Action::None;
+        }
+        if self.notif_area.is_some_and(|rect| rect.contains(position)) {
+            match event.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(&(_, index)) = self
+                        .notif_hits
+                        .iter()
+                        .find(|(rect, _)| rect.contains(position))
+                        && let Some(notification) = self.notifications.get(index)
+                    {
+                        self.notif_fresh.remove(&notification.id);
+                        let mut text = notification.label.clone();
+                        if notification.title != notification.label {
+                            text.push(' ');
+                            text.push_str(&notification.title);
+                        }
+                        if !notification.body.is_empty() {
+                            text.push_str(" — ");
+                            text.push_str(&notification.body);
+                        }
+                        self.status = text;
+                    }
+                }
+                MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                    let down = event.kind == MouseEventKind::ScrollDown;
+                    self.notif_offset = if down {
+                        self.notif_offset.saturating_add(3)
+                    } else {
+                        self.notif_offset.saturating_sub(3)
+                    };
+                    self.notif_offset = bounded_offset(
+                        self.notif_offset,
+                        self.notifications.len(),
+                        self.notif_rows,
+                    );
+                }
+                _ => {}
+            }
+        }
         Action::None
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Action {
         self.last_library_click = None;
+        self.last_friend_click = None;
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c' | 'C'))
         {
@@ -1770,6 +1868,11 @@ impl Model {
     /// While a filter is typed every character is text; only the movement keys
     /// and F1 keep their meaning.
     fn filter_key(&mut self, key: KeyEvent, cmd: Option<Cmd>) -> Action {
+        if matches!(cmd, Some(Cmd::NextPane | Cmd::PrevPane)) {
+            self.searching = false;
+            self.focus = self.focus.next();
+            return Action::None;
+        }
         let movement = matches!(
             key.code,
             KeyCode::Up
