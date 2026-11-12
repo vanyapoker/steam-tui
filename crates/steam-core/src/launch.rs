@@ -173,6 +173,18 @@ fn acquire_steam_host(steam_root: &Path, account: &HostAccount) -> Result<host::
     host::acquire(steam_root, account)
 }
 
+// Releasing the last lease can wait for Steam to shut down. Keep that work off
+// the async executor, including on setup failure or cancellation.
+struct HostLease(Option<host::Lease>);
+
+impl Drop for HostLease {
+    fn drop(&mut self) {
+        if let Some(lease) = self.0.take() {
+            std::thread::spawn(move || drop(lease));
+        }
+    }
+}
+
 /// Picks the launch entry and whether it runs through Proton. `choice` is the
 /// user's pick among selectable entries (see `options`); it is ignored when it
 /// names no entry usable on this host.
@@ -1250,16 +1262,24 @@ pub async fn run_with_backend(
         });
     }
     let mut done_tx = Some(done_tx);
+    let host_lease = if let Some(account) = host_account {
+        let root = owned.steam_root.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                acquire_steam_host(&root, &account).map(|lease| HostLease(Some(lease)))
+            })
+            .await
+            .map_err(|e| failure(format!("Host acquisition worker failed: {e}")))??,
+        )
+    } else {
+        None
+    };
     // Setup executables may call Steam APIs too. Serve them with the same
     // account backend/private HOME, and close it on any setup failure.
     setup::prepare(&owned, &plan, connection, events.as_ref()).await?;
     let watched_token = token.clone();
     let (mut child, log, mut status_log, mut host_lease) =
         tokio::task::spawn_blocking(move || -> Result<_> {
-            let host_lease = host_account
-                .as_ref()
-                .map(|account| acquire_steam_host(&owned.steam_root, account))
-                .transpose()?;
             let state = std::env::var_os("XDG_STATE_HOME")
                 .map(PathBuf::from)
                 .or_else(|| {
@@ -1319,7 +1339,7 @@ pub async fn run_with_backend(
                     "[steam-tui] game workspace placement unavailable: {error}"
                 );
             }
-            if let Some(lease) = &host_lease {
+            if let Some(HostLease(Some(lease))) = &host_lease {
                 if child.try_wait()?.is_none() {
                     if let Err(error) = lease.watch(child.id(), &watched_token) {
                         reaper::terminate(&watched_token, Duration::from_secs(2));

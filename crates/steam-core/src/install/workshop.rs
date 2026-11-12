@@ -334,8 +334,20 @@ pub(crate) fn plan(manifest: &DepotManifest) -> Result<Plan> {
     Ok(plan)
 }
 
+/// Restores an item left in the backup slot by an interrupted swap.
+fn recover(dest: &Path, previous: &Path) -> Result<()> {
+    if fsafe::exists(previous)? && !fsafe::exists(dest)? {
+        fs::rename(previous, dest)?;
+        if let Some(parent) = dest.parent() {
+            fsafe::sync_dir(parent)?;
+        }
+    }
+    Ok(())
+}
+
 /// Replaces `dest` with the verified `staging` directory; on failure `dest` is restored.
 fn swap(staging: &Path, dest: &Path, previous: &Path) -> Result<()> {
+    recover(dest, previous)?;
     if fsafe::exists(previous)? {
         fs::remove_dir_all(previous)?;
     }
@@ -349,11 +361,11 @@ fn swap(staging: &Path, dest: &Path, previous: &Path) -> Result<()> {
         }
         return Err(error.into());
     }
-    if had_old {
-        let _ = fs::remove_dir_all(previous);
-    }
     if let Some(parent) = dest.parent() {
         fsafe::sync_dir(parent)?;
+    }
+    if had_old {
+        let _ = fs::remove_dir_all(previous);
     }
     Ok(())
 }
@@ -384,6 +396,7 @@ pub async fn install(
     pause: &PauseGate,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<InstalledItem> {
+    recover(&store.item_dir(id), &store.previous(id))?;
     check_cancel(cancel)?;
     let manifest = client.manifest(spec, cancel).await?;
     let plan = plan(&manifest)?;
@@ -404,9 +417,7 @@ pub async fn install(
     check_cancel(cancel).inspect_err(|_| {
         let _ = clear(&staging);
     })?;
-    swap(&staging, &store.item_dir(id), &store.previous(id)).inspect_err(|_| {
-        let _ = clear(&staging);
-    })?;
+    swap(&staging, &store.item_dir(id), &store.previous(id))?;
     let item = InstalledItem {
         id,
         manifest: spec.manifest_id,
@@ -466,6 +477,7 @@ pub async fn install_legacy(
 ) -> Result<InstalledItem> {
     use sha1::{Digest, Sha1};
     use std::io::Write;
+    recover(&store.item_dir(id), &store.previous(id))?;
     check_cancel(cancel)?;
     let url = legacy_url(url)?;
     let expected = legacy_hash(&url);
@@ -545,9 +557,7 @@ pub async fn install_legacy(
             return Err(error);
         }
     };
-    swap(&staging, &store.item_dir(id), &store.previous(id)).inspect_err(|_| {
-        let _ = clear(&staging);
-    })?;
+    swap(&staging, &store.item_dir(id), &store.previous(id))?;
     let item = InstalledItem {
         id,
         manifest: 0,
@@ -816,5 +826,89 @@ mod tests {
         // A missing staging directory restores the existing item.
         assert!(swap(&store.staging(5), &dest, &store.previous(5)).is_err());
         assert!(dest.join("new").exists());
+    }
+
+    #[test]
+    fn interrupted_swap_recovers_then_installs_verified_staging() {
+        let root = Temp::new();
+        let store = Store::new(&root.0, 1);
+        let previous = store.previous(5);
+        let staging = store.staging(5);
+        let dest = store.item_dir(5);
+        fs::create_dir_all(&previous).unwrap();
+        fs::write(previous.join("old"), "old data").unwrap();
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("new"), "new data").unwrap();
+
+        swap(&staging, &dest, &previous).unwrap();
+        assert_eq!(fs::read(dest.join("new")).unwrap(), b"new data");
+        assert!(!previous.exists());
+    }
+
+    #[test]
+    fn failed_backup_cleanup_preserves_all_copies() {
+        let root = Temp::new();
+        let store = Store::new(&root.0, 1);
+        let dest = store.item_dir(5);
+        let previous = store.previous(5);
+        let staging = store.staging(5);
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("old"), "old data").unwrap();
+        fs::write(&previous, "backup data").unwrap();
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("new"), "new data").unwrap();
+
+        assert!(swap(&staging, &dest, &previous).is_err());
+        assert_eq!(fs::read(dest.join("old")).unwrap(), b"old data");
+        assert_eq!(fs::read(&previous).unwrap(), b"backup data");
+        assert_eq!(fs::read(staging.join("new")).unwrap(), b"new data");
+    }
+
+    #[test]
+    fn interrupted_swap_recovers_old_item_before_a_failed_swap() {
+        let root = Temp::new();
+        let store = Store::new(&root.0, 1);
+        let previous = store.previous(5);
+        fs::create_dir_all(&previous).unwrap();
+        fs::write(previous.join("old"), "old data").unwrap();
+        let dest = store.item_dir(5);
+
+        assert!(swap(&store.staging(5), &dest, &previous).is_err());
+        assert_eq!(fs::read(dest.join("old")).unwrap(), b"old data");
+        assert!(!previous.exists());
+    }
+
+    #[tokio::test]
+    async fn failed_retry_recovers_item_before_download_setup() {
+        let root = Temp::new();
+        let store = Store::new(&root.0, 1);
+        let previous = store.previous(5);
+        fs::create_dir_all(&previous).unwrap();
+        fs::write(previous.join("old"), "old data").unwrap();
+        let item = InstalledItem {
+            id: 5,
+            manifest: 1,
+            size: 8,
+            time_updated: 0,
+            latest_manifest: 1,
+            remove_pending: false,
+        };
+        store.record(&item, 0).unwrap();
+
+        let result = install_legacy(
+            &store,
+            5,
+            "invalid URL",
+            0,
+            0,
+            0,
+            &CancellationToken::new(),
+            &mut |_, _| {},
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(fs::read(store.item_dir(5).join("old")).unwrap(), b"old data");
+        assert_eq!(store.installed().unwrap().get(&5), Some(&item));
+        assert!(!previous.exists());
     }
 }

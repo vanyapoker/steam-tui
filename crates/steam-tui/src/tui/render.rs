@@ -700,13 +700,13 @@ fn draw_status(frame: &mut Frame<'_>, model: &Model, area: Rect, summary: bool, 
     let enter = keys::label(Cmd::Activate);
     let mut pairs = vec![if model.focus == Focus::Friends {
         (enter, "chat".to_owned())
-    } else if host_game || model.launch_host == LaunchHost::ValveHost {
-        (enter, "launch (Valve host)".to_owned())
     } else if model
         .selected_game()
         .is_some_and(|game| game.installed.is_none())
     {
         (enter, "install".to_owned())
+    } else if host_game || model.launch_host == LaunchHost::ValveHost {
+        (enter, "launch (Valve host)".to_owned())
     } else {
         (enter, "launch".to_owned())
     }];
@@ -4037,6 +4037,23 @@ mod tests {
                 "{last}"
             );
             assert!(!last.contains("^H"));
+        }
+    }
+
+    #[test]
+    fn uninstalled_games_show_install_hint_even_with_valve_host() {
+        let mut model = model();
+        model.account = Some("alice".into());
+        for (id, host) in [(440, LaunchHost::BuiltIn), (3124540, LaunchHost::ValveHost)] {
+            model.launch_host = host;
+            model.set_catalog(CatalogSnapshot {
+                items: vec![game(id, "Uninstalled", false)],
+                warnings: vec![],
+            });
+            let screen = render(&mut model, 105, 30);
+            let last = screen.lines().last().unwrap();
+            assert!(last.contains("Enter install"), "{last}");
+            assert!(!last.contains("Enter launch"), "{last}");
         }
     }
 

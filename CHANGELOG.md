@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.8 - 2026-11-12
+
+### Fixed
+- Restore interrupted Workshop replacements before retrying an installation.
+- Start the Valve host before first-run setup for games using that host.
+- Confirm quitting when a game starts before the next presence refresh.
+- Show the install hint for uninstalled games even when Valve host is selected.
+
 ## 0.4.7 - 2026-11-10
 
 ### Added

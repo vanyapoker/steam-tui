@@ -1847,6 +1847,9 @@ impl Model {
         let preserve = self.selected_game().map(|game| game.app_id);
         match cmd {
             Cmd::Quit => {
+                if self.confirm_quit && !self.quit_busy() {
+                    self.running_games = steam_core::launch::running_app_ids();
+                }
                 if self.confirm_quit && self.quit_busy() {
                     self.quit_confirm = true;
                     return Action::None;
