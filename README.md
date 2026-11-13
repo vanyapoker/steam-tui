@@ -12,7 +12,7 @@ Starts in ~2 ms and uses ~30 MB of memory. Games run on our own Steam backend, s
 
 - **Library:** icons, filter, pins, sort, offline browsing, multiple saved accounts.
 - **Install and update:** native and Proton games, resumable verified downloads, a persistent queue with pause, priorities and download windows; branches, languages and DLC.
-- **Launch:** missing Proton and runtimes install automatically, updates are checked first, Vulkan shaders are pre-cached.
+- **Launch:** default and `none`-type launch entries are supported; missing Proton and runtimes install automatically, updates are checked first, and Vulkan shaders are pre-cached.
 - **Saves:** Steam Cloud download before launch, manual two-way sync, side-by-side conflict picker.
 - **Social:** friends list, direct-message chat with images, notifications, game changelogs.
 - **In-game features:** achievements, stats, leaderboards, Workshop, lobbies and P2P through the built-in backend.

@@ -211,7 +211,7 @@ fn launch_entries(app: &Node) -> Result<Vec<(u32, &Node)>> {
 
 fn is_default_entry(node: &Node) -> bool {
     node.text("type")
-        .is_none_or(|t| t.eq_ignore_ascii_case("default"))
+        .is_none_or(|t| t.eq_ignore_ascii_case("default") || t.eq_ignore_ascii_case("none"))
 }
 
 fn is_option_entry(node: &Node) -> bool {

@@ -118,6 +118,29 @@ fn linux_launch_entry_stays_native_when_app_supports_linux() {
     );
 }
 #[test]
+fn none_type_windows_entry_launches_with_proton() {
+    let fixture = Fixture::new();
+    fixture.executable("bin/game.exe");
+    let path = fixture.0.join("none.vdf");
+    fs::write(&path, r#""common" { "oslist" "windows,macos" } "config" { "launch" {
+        "0" { "executable" "bin/game.exe" "arguments" "--nopatch" "type" "none" "config" { "oslist" "windows" } }
+        "1" { "executable" "game.app" "type" "none" "config" { "oslist" "macos" } }
+    } }"#).unwrap();
+    let app = read_vdf(&path).unwrap();
+    let game = fixture.game();
+    let (entry, proton) = select_entry(&game, &app, None).unwrap();
+    assert!(proton);
+    assert_eq!(entry.text("executable"), Some("bin/game.exe"));
+    assert_eq!(entry.text("arguments"), Some("--nopatch"));
+    assert_eq!(
+        options::list(&app)
+            .iter()
+            .map(|o| o.index)
+            .collect::<Vec<_>>(),
+        [0]
+    );
+}
+#[test]
 fn option_only_apps_use_the_lowest_plain_option_but_never_conditional_ones() {
     let fixture = Fixture::new();
     fixture.executable("bin/game.exe");
