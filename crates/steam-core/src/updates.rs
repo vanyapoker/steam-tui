@@ -236,7 +236,7 @@ pub async fn run_selected(
                             JobState::Cancelled => { token.cancel(); gate.set(false); },
                             _ => {
                                 match queue.settings() {
-                                    Ok(settings) => gate.set(pause.is_paused() || store::suspended(&current, &settings, local_minute(), !crate::launch::running_app_ids().is_empty())),
+                                    Ok(settings) => gate.set(pause.is_paused() || store::suspended(&current, &settings, local_minute(), crate::launch::games_running())),
                                     Err(_) => { token.cancel(); gate.set(false); },
                                 }
                             },

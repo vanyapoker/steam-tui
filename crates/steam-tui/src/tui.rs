@@ -963,7 +963,7 @@ fn spawn_queued_install(
             token,
             gate,
             crate::content_jobs::minute(),
-            !steam_core::launch::running_app_ids().is_empty(),
+            steam_core::launch::games_running(),
         )
         .await;
         let event = match result {
@@ -1166,7 +1166,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                 && !reconnect.in_flight() && !model.cancel_requested && model.launching.is_empty()
                 && let (Some(queue), Some(connection)) = (&queue, connection.clone())
             {
-                match queue.ready(crate::content_jobs::minute(), !steam_core::launch::running_app_ids().is_empty()) {
+                match queue.ready(crate::content_jobs::minute(), steam_core::launch::games_running()) {
                     Ok(Some(job)) => {
                         model.active_shader = job.intent.shader;
                         model.active_install = Some((job.intent.app_id, job.intent.destination.clone()));
@@ -1180,7 +1180,7 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                 }
             }
             if let (Some(queue), Some(id)) = (&queue, active_queue)
-                && let Ok(paused) = queue.suspended(id, crate::content_jobs::minute(), !steam_core::launch::running_app_ids().is_empty())
+                && let Ok(paused) = queue.suspended(id, crate::content_jobs::minute(), steam_core::launch::games_running())
             { model.set_paused(paused, Instant::now()); }
             let activity = Activity {
                 connected: connection.is_some() && !reconnect.in_flight(),

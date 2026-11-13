@@ -232,6 +232,49 @@ pub(super) fn read_chunk(path: &Path, chunk: &DepotChunk, offset: u64) -> Result
     }
 }
 
+/// Filesystem block size assumed for reflink alignment. A larger real block
+/// size makes the kernel refuse the clone and the caller copies instead.
+const CLONE_BLOCK: u64 = 4096;
+
+/// Shares `len` bytes of `source` with `target` through the filesystem's
+/// reflink support (btrfs, XFS) instead of rewriting them. `false` means nothing
+/// was cloned (unaligned range, other filesystem, or no reflink support), and
+/// the caller must copy the bytes.
+pub(super) fn clone_range(
+    source: &File,
+    source_offset: u64,
+    target: &File,
+    target_offset: u64,
+    len: u64,
+) -> bool {
+    /// `struct file_clone_range` of `linux/fs.h`.
+    #[repr(C)]
+    struct FileCloneRange {
+        src_fd: i64,
+        src_offset: u64,
+        src_length: u64,
+        dest_offset: u64,
+    }
+    /// `FICLONERANGE`: `_IOW(0x94, 13, struct file_clone_range)`.
+    const FICLONERANGE: u64 = 0x4020_940d;
+    if len == 0
+        || source_offset % CLONE_BLOCK != 0
+        || target_offset % CLONE_BLOCK != 0
+        || len % CLONE_BLOCK != 0
+    {
+        return false;
+    }
+    let request = FileCloneRange {
+        src_fd: i64::from(source.as_raw_fd()),
+        src_offset: source_offset,
+        src_length: len,
+        dest_offset: target_offset,
+    };
+    // SAFETY: both descriptors are open for the duration of the call, and
+    // `request` is a live `file_clone_range` matching the ioctl's argument.
+    unsafe { libc::ioctl(target.as_raw_fd(), FICLONERANGE as _, &request) == 0 }
+}
+
 pub(super) fn hash_file(path: &Path, size: u64) -> Result<Option<[u8; 20]>> {
     let mut file = regular(path, false, false)?;
     if file.metadata()?.len() != size {

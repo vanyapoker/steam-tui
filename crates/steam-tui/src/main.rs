@@ -410,7 +410,7 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                 let (progress, mut reports) = tokio::sync::mpsc::channel(64);
                                 let cancel = tokio_util::sync::CancellationToken::new();
                                 let update = steam_core::updates::run_selected(queue, Some(id), connection.clone(), progress, cancel.clone(),
-                                    steam_core::install::PauseGate::default(), content_jobs::minute(), !steam_core::launch::running_app_ids().is_empty());
+                                    steam_core::install::PauseGate::default(), content_jobs::minute(), steam_core::launch::games_running());
                                 tokio::pin!(update);
                                 let result = loop {
                                     tokio::select! {
@@ -456,7 +456,7 @@ async fn run(options: Options) -> Result<(), Box<dyn Error>> {
                                     shader: false, dependency: Some(steam_core::updates::DependencyIntent { parent_app_id: game.app_id, requirement: missing }), revision: None };
                                 let id = queue.enqueue(intent, true)?;
                                 let install = steam_core::updates::run_selected(queue, Some(id), connection.clone(), progress, cancel.clone(),
-                                    steam_core::install::PauseGate::default(), content_jobs::minute(), !steam_core::launch::running_app_ids().is_empty());
+                                    steam_core::install::PauseGate::default(), content_jobs::minute(), steam_core::launch::games_running());
                                 tokio::pin!(install);
                                 loop {
                                     tokio::select! {

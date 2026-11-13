@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.9 - 2026-11-13
+
+### Fixed
+- Launch games whose only launch entries use `type "none"` (for example Path of Exile, which previously failed with "No supported default Linux or Windows launch entry").
+- Updates no longer stall the download thread: the "game running" check that pauses downloads scanned every process on every progress event, and is now cached for two seconds.
+- Unchanged data is shared with the old install by reflink (btrfs, XFS) instead of being rewritten, which makes large updates much faster on slow or QLC drives. Other filesystems copy as before.
+- The Install panel shows "Reusing unchanged data" during the reuse scan, and the download ETA follows overall progress (downloaded plus reused data) instead of the network rate alone.
+
 ## 0.4.8 - 2026-11-12
 
 ### Fixed

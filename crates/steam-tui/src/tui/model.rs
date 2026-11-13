@@ -454,6 +454,9 @@ pub(super) struct Model {
     pub speed: SpeedTracker,
     /// Rate of whole-file verification (hashed bytes per second).
     pub verify_speed: SpeedTracker,
+    /// Rate of completed content (downloaded plus reused bytes per second), the
+    /// basis of the download-phase ETA when much of an update is reused data.
+    pub progress_speed: SpeedTracker,
 }
 
 impl Model {
@@ -577,6 +580,7 @@ impl Model {
             progress: None,
             speed: SpeedTracker::default(),
             verify_speed: SpeedTracker::default(),
+            progress_speed: SpeedTracker::default(),
             paused: false,
         }
     }
@@ -590,6 +594,7 @@ impl Model {
         self.progress = None;
         self.paused = false;
         self.speed.start(now);
+        self.progress_speed.start(now);
         self.verify_speed.reset();
     }
 
@@ -623,8 +628,10 @@ impl Model {
         self.paused = paused;
         if paused {
             self.speed.pause(now);
+            self.progress_speed.pause(now);
         } else {
             self.speed.resume(now);
+            self.progress_speed.resume(now);
         }
     }
 
@@ -638,6 +645,7 @@ impl Model {
             InstallPhase::Finished | InstallPhase::Cancelled => {
                 self.set_paused(false, now);
                 self.speed.freeze(now);
+                self.progress_speed.freeze(now);
                 self.verify_speed.freeze(now);
             }
             // The download loop is over, so a pending pause no longer holds anything;
@@ -647,7 +655,10 @@ impl Model {
                 self.verify_speed.record(now, progress.verify_bytes_done);
             }
             InstallPhase::Committing => self.set_paused(false, now),
-            _ => self.speed.record(now, progress.downloaded_bytes),
+            _ => {
+                self.speed.record(now, progress.downloaded_bytes);
+                self.progress_speed.record(now, progress.completed_bytes);
+            }
         }
         self.progress = Some(progress);
     }
@@ -666,6 +677,7 @@ impl Model {
         }
         self.set_paused(false, now);
         self.speed.freeze(now);
+        self.progress_speed.freeze(now);
         self.verify_speed.freeze(now);
     }
 
@@ -674,6 +686,7 @@ impl Model {
         self.progress = None;
         self.paused = false;
         self.speed.reset();
+        self.progress_speed.reset();
         self.verify_speed.reset();
     }
 
@@ -754,7 +767,11 @@ impl Model {
             self.status_wrap,
             self.show_hints,
             self.show_icons,
-            if self.launch_host == LaunchHost::ValveHost { "valve" } else { "builtin" },
+            if self.launch_host == LaunchHost::ValveHost {
+                "valve"
+            } else {
+                "builtin"
+            },
             self.confirm_quit,
             pins.join(","),
             self.account.as_deref().unwrap_or_default(),
@@ -2623,7 +2640,12 @@ mod tests {
         model.key(down());
         assert_eq!(model.settings_selected, 6);
         let text = model.settings_text();
-        for line in ["show_hints=false", "library_icons=false", "launch_host=valve", "confirm_quit=false"] {
+        for line in [
+            "show_hints=false",
+            "library_icons=false",
+            "launch_host=valve",
+            "confirm_quit=false",
+        ] {
             assert!(text.contains(line), "{text}");
         }
         let mut fresh = Model::new(true, None);
@@ -3200,6 +3222,22 @@ mod speed_tests {
         let eta = tracker.eta(at(base, 4), 40 * MIB).unwrap();
         assert_eq!(eta.as_secs(), 10);
         assert_eq!(tracker.eta(at(base, 4), 0), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn reused_data_drives_the_eta_while_the_network_is_idle() {
+        let base = Instant::now();
+        let mut model = Model::new(true, None);
+        model.begin_install_at(base);
+        for second in 0..=4 {
+            let mut progress = sample(InstallPhase::Downloading, 0);
+            progress.completed_bytes = second * 4 * MIB;
+            model.apply_progress_at(progress, at(base, second));
+        }
+        let now = at(base, 4);
+        assert_eq!(model.speed.speed(now), None, "no bytes crossed the network");
+        let eta = model.progress_speed.eta(now, 84 * MIB).unwrap();
+        assert_eq!(eta.as_secs(), 21);
     }
 
     #[test]

@@ -523,12 +523,12 @@ fn progress_summary(model: &Model, now: Instant) -> Option<String> {
     );
     if progress.phase == InstallPhase::Downloading {
         let remaining = progress
-            .total_download_bytes
-            .saturating_sub(progress.downloaded_bytes);
+            .total_bytes
+            .saturating_sub(progress.completed_bytes);
         text.push_str(&format!(
             " · {} · ETA {}",
             rate_text(model.speed.speed(now)),
-            eta_text(model.speed.eta(now, remaining))
+            eta_text(model.progress_speed.eta(now, remaining))
         ));
     } else if progress.phase == InstallPhase::Verifying {
         let remaining = progress
@@ -753,7 +753,11 @@ fn draw_status(frame: &mut Frame<'_>, model: &Model, area: Rect, summary: bool, 
         );
         frame.render_widget(
             Paragraph::new(fit_line(rest, columns[0].width as usize)),
-            Rect { y: bottom_y, height: 1, ..columns[0] },
+            Rect {
+                y: bottom_y,
+                height: 1,
+                ..columns[0]
+            },
         );
     } else {
         frame.render_widget(
@@ -762,7 +766,11 @@ fn draw_status(frame: &mut Frame<'_>, model: &Model, area: Rect, summary: bool, 
         );
     }
     if show {
-        let right_area = Rect { y: bottom_y, height: 1, ..columns[1] };
+        let right_area = Rect {
+            y: bottom_y,
+            height: 1,
+            ..columns[1]
+        };
         frame.render_widget(Paragraph::new(right.right_aligned()), right_area);
     }
 }
@@ -1686,8 +1694,8 @@ fn draw_install(frame: &mut Frame<'_>, model: &Model, area: Rect, now: Instant) 
     let mut timing = Vec::new();
     if progress.phase == InstallPhase::Downloading {
         let remaining = progress
-            .total_download_bytes
-            .saturating_sub(progress.downloaded_bytes);
+            .total_bytes
+            .saturating_sub(progress.completed_bytes);
         let speed = model.speed.speed(now);
         timing.push(seg("↓ ", dim()));
         timing.push(if model.paused {
@@ -1707,7 +1715,7 @@ fn draw_install(frame: &mut Frame<'_>, model: &Model, area: Rect, now: Instant) 
         timing.extend([
             sep(),
             seg("ETA ", dim()),
-            seg(eta_text(model.speed.eta(now, remaining)), bold()),
+            seg(eta_text(model.progress_speed.eta(now, remaining)), bold()),
             sep(),
         ]);
     } else if progress.phase == InstallPhase::Verifying {
@@ -2573,7 +2581,10 @@ fn achievements_overlay(frame: &mut Frame<'_>, model: &mut Model) {
             let second = Line::from(vec![
                 Span::raw(" ".repeat(5 + ICON_COLUMNS as usize)),
                 Span::styled(
-                    fit(&description, width.saturating_sub(6 + ICON_COLUMNS as usize)),
+                    fit(
+                        &description,
+                        width.saturating_sub(6 + ICON_COLUMNS as usize),
+                    ),
                     dim(),
                 ),
             ]);
@@ -2597,7 +2608,8 @@ fn achievements_overlay(frame: &mut Frame<'_>, model: &mut Model) {
     frame.render_widget(List::new(items), list_area);
     // Icons sit left of the two-line rows. Graphics are only sent while this
     // modal is the topmost layer; otherwise text cells keep them from leaking.
-    let native = model.cloud_conflicts.is_none() && model.modal.is_none() && model.chat.active.is_none();
+    let native =
+        model.cloud_conflicts.is_none() && model.modal.is_none() && model.chat.active.is_none();
     for (row, url) in wanted {
         let rect = Rect::new(
             list_area.x + 4,
@@ -2610,9 +2622,13 @@ fn achievements_overlay(frame: &mut Frame<'_>, model: &mut Model) {
         }
         model.achievement_images.prepare(&url, (ICON_COLUMNS, 2));
         if native {
-            model.achievement_images.render(&url, rect, 0, 2, frame.buffer_mut());
+            model
+                .achievement_images
+                .render(&url, rect, 0, 2, frame.buffer_mut());
         } else {
-            model.achievement_images.render_fallback(&url, rect, frame.buffer_mut());
+            model
+                .achievement_images
+                .render_fallback(&url, rect, frame.buffer_mut());
         }
     }
 }
@@ -2814,7 +2830,10 @@ fn settings_overlay(frame: &mut Frame<'_>, model: &Model) {
         ("Library icons", check(model.show_icons)),
         ("Show offline friends", check(model.show_offline)),
         ("Library view", model.filter.label().to_owned()),
-        ("Launch host (non-VAC)", model.launch_host.label().to_owned()),
+        (
+            "Launch host (non-VAC)",
+            model.launch_host.label().to_owned(),
+        ),
         ("Confirm quit when busy", check(model.confirm_quit)),
     ];
     let lines: Vec<Line<'static>> = rows
@@ -2840,7 +2859,11 @@ fn settings_overlay(frame: &mut Frame<'_>, model: &Model) {
             theme::panel_border(Panel::Overlay, true),
             area.width,
             vec![vec![seg("Settings", bold())]],
-            vec![hint("↑↓", "select"), hint("Enter", "change"), hint("Esc", "close")],
+            vec![
+                hint("↑↓", "select"),
+                hint("Enter", "change"),
+                hint("Esc", "close"),
+            ],
             Vec::new(),
         )),
         area,
@@ -3181,19 +3204,21 @@ fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
         if model.queue_active == Some(job.id) && model.install_active {
             if let Some(progress) = &model.progress {
                 let now = Instant::now();
-                let (tracker, remaining) = if progress.phase == InstallPhase::Verifying {
+                let (rate, eta) = if progress.phase == InstallPhase::Verifying {
+                    let remaining = progress
+                        .verify_bytes_total
+                        .saturating_sub(progress.verify_bytes_done);
                     (
-                        &model.verify_speed,
-                        progress
-                            .verify_bytes_total
-                            .saturating_sub(progress.verify_bytes_done),
+                        model.verify_speed.speed(now),
+                        model.verify_speed.eta(now, remaining),
                     )
                 } else {
+                    let remaining = progress
+                        .total_bytes
+                        .saturating_sub(progress.completed_bytes);
                     (
-                        &model.speed,
-                        progress
-                            .total_download_bytes
-                            .saturating_sub(progress.downloaded_bytes),
+                        model.speed.speed(now),
+                        model.progress_speed.eta(now, remaining),
                     )
                 };
                 details.push(Line::from(format!(
@@ -3201,8 +3226,8 @@ fn queue_overlay(frame: &mut Frame<'_>, model: &Model) {
                     phase_text(model, progress.phase),
                     percent(progress),
                     size(Some(progress.downloaded_bytes)),
-                    rate_text(tracker.speed(now)),
-                    eta_text(tracker.eta(now, remaining))
+                    rate_text(rate),
+                    eta_text(eta)
                 )));
             } else {
                 details.push(Line::styled("Live metrics unavailable", dim()));
@@ -3865,8 +3890,16 @@ mod tests {
             .iter()
             .map(|request| request.url())
             .collect();
-        assert!(requested.iter().any(|url| url.ends_with(&format!("/apps/{app_id}/0123abcd.jpg"))));
-        assert!(requested.iter().any(|url| url.ends_with(&format!("/apps/{app_id}/4567abcd.jpg"))));
+        assert!(
+            requested
+                .iter()
+                .any(|url| url.ends_with(&format!("/apps/{app_id}/0123abcd.jpg")))
+        );
+        assert!(
+            requested
+                .iter()
+                .any(|url| url.ends_with(&format!("/apps/{app_id}/4567abcd.jpg")))
+        );
         // Status order lists the unlocked one first; sorting by name flips the first row's owner.
         assert_eq!(
             model.achievements.as_ref().unwrap().visible()[0].name,
@@ -4146,10 +4179,16 @@ mod tests {
         let mut model = model();
         model.settings_view = true;
         let screen = render(&mut model, 105, 30);
-        assert!(screen.contains("Wrap long status messages   [x]"), "{screen}");
+        assert!(
+            screen.contains("Wrap long status messages   [x]"),
+            "{screen}"
+        );
         model.status_wrap = false;
         let screen = render(&mut model, 105, 30);
-        assert!(screen.contains("Wrap long status messages   [ ]"), "{screen}");
+        assert!(
+            screen.contains("Wrap long status messages   [ ]"),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -4536,7 +4575,11 @@ mod tests {
                 .notifications
                 .is_none()
         );
-        assert!(areas(Rect::new(0, 0, 150, 12), false, 0, 1).friends.is_some());
+        assert!(
+            areas(Rect::new(0, 0, 150, 12), false, 0, 1)
+                .friends
+                .is_some()
+        );
         let narrow = areas(Rect::new(0, 0, 50, 30), false, 0, 1);
         assert!(narrow.notifications.is_none() && narrow.friends.is_some());
         let tiny = areas(Rect::new(0, 0, 40, 12), false, 0, 1);

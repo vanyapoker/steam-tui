@@ -648,11 +648,40 @@ impl Session {
                 && fs::symlink_metadata(&candidate)?.is_file()
                 && let Some(bytes) = fsafe::read_chunk(&candidate, chunk, old.offset)?
             {
-                self.write_chunk(path, chunk, &bytes)?;
+                // The old chunk is verified. Share its blocks when the
+                // filesystem can, which avoids rewriting unchanged game data.
+                if !self.clone_chunk(&candidate, old.offset, &staged, chunk) {
+                    self.write_chunk(path, chunk, &bytes)?;
+                }
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+
+    /// Reflinks a verified old chunk into the stage. The staged bytes are read
+    /// back and verified before they are trusted; any failure leaves the caller
+    /// to write the chunk normally.
+    fn clone_chunk(
+        &self,
+        source: &Path,
+        source_offset: u64,
+        staged: &Path,
+        chunk: &DepotChunk,
+    ) -> bool {
+        let (Ok(source), Ok(target)) = (
+            fsafe::regular(source, false, false),
+            fsafe::regular(staged, true, false),
+        ) else {
+            return false;
+        };
+        fsafe::clone_range(
+            &source,
+            source_offset,
+            &target,
+            chunk.offset,
+            u64::from(chunk.uncompressed_size),
+        ) && fsafe::read_chunk(staged, chunk, chunk.offset).is_ok_and(|read| read.is_some())
     }
 
     /// Writes one verified chunk. There is deliberately no fsync here: a staged

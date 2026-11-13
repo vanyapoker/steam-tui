@@ -312,7 +312,7 @@ pub async fn install(account: &str, app_id: u32, library: Option<PathBuf>) -> Re
                 cancel.clone(),
                 steam_core::install::PauseGate::default(),
                 minute(),
-                !steam_core::launch::running_app_ids().is_empty(),
+                steam_core::launch::games_running(),
             );
             tokio::pin!(run);
             let mut display = CliProgress::new();
@@ -430,7 +430,7 @@ pub async fn run(account: &str, settings_command: bool, args: &[String]) -> Resu
                 loop {
                     let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
                     let cancel = tokio_util::sync::CancellationToken::new();
-                    let run = steam_core::updates::run_next(queue.clone(), connection.clone(), sender, cancel.clone(), minute(), !steam_core::launch::running_app_ids().is_empty());
+                    let run = steam_core::updates::run_next(queue.clone(), connection.clone(), sender, cancel.clone(), minute(), steam_core::launch::games_running());
                     tokio::pin!(run);
                     let mut display = CliProgress::new();
                     let outcome = loop {

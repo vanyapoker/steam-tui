@@ -245,6 +245,8 @@ async fn download_group(
         group.items.clone(),
         group.prepare,
     );
+    status.message = "Reusing unchanged data".into();
+    report(progress, status);
     // One blocking call creates the files and decides, in parallel, which chunks
     // are already valid; only the missing ones are downloaded.
     let reused = blocking(move || {

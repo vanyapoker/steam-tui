@@ -316,6 +316,28 @@ pub fn running_app_ids() -> BTreeSet<u32> {
     running_app_ids_in(Path::new("/proc"))
 }
 
+/// How long a `games_running` answer stays valid.
+const GAMES_RUNNING_TTL: Duration = Duration::from_secs(2);
+
+/// Whether any game is running, for pause scheduling. A scan reads every
+/// process environment, and the scheduler asks on each UI event and on the
+/// thread that drives downloads, so the answer is cached briefly. Safety checks
+/// use `is_running`, which is always fresh.
+pub fn games_running() -> bool {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().expect("games-running cache lock poisoned");
+    if let Some((at, value)) = *cache
+        && at.elapsed() < GAMES_RUNNING_TTL
+    {
+        return value;
+    }
+    let value = !running_app_ids().is_empty();
+    *cache = Some((Instant::now(), value));
+    value
+}
+
 fn running_app_ids_in(proc_root: &Path) -> BTreeSet<u32> {
     running_app_ids_filtered(proc_root, None)
 }
