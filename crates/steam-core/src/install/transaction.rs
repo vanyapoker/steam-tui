@@ -156,7 +156,7 @@ fn make_dirs(base: &Path, relative: &Path, durable: bool) -> Result<()> {
     Ok(())
 }
 
-fn state_directory(library: &Path) -> Result<PathBuf> {
+pub(super) fn state_directory(library: &Path) -> Result<PathBuf> {
     create_dirs(library, Path::new("steamapps"))?;
     let state = library.join("steamapps/.steam-tui");
     fsafe::private_directory(&state)?;
@@ -177,7 +177,7 @@ pub(super) fn recover(destination: &Path) -> Result<()> {
     recover_locked(&library, &state)
 }
 
-fn recover_locked(library: &Path, state: &Path) -> Result<()> {
+pub(super) fn recover_locked(library: &Path, state: &Path) -> Result<()> {
     for entry in fs::read_dir(state)? {
         let entry = entry?;
         let Some(id) = entry
@@ -189,6 +189,10 @@ fn recover_locked(library: &Path, state: &Path) -> Result<()> {
         };
         let stage = entry.path();
         fsafe::private_directory(&stage)?;
+        if stage.join("uninstall.json").exists() {
+            super::uninstall::resume(library, &stage, id)?;
+            continue;
+        }
         if !stage.join("journal.json").exists() {
             continue;
         }
@@ -1425,7 +1429,7 @@ fn validate_dlc_plan(
     Ok(())
 }
 
-fn bounded_read(path: &Path, maximum: u64) -> Result<Vec<u8>> {
+pub(super) fn bounded_read(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     let file = fsafe::regular(path, false, false)?;
     if file.metadata()?.len() > maximum {
         return Err(failure(format!(
@@ -1613,7 +1617,7 @@ fn finalize(library: &Path, stage: &Path, journal: &Journal) -> Result<Option<Pa
     Ok(preserved)
 }
 
-fn put(node: &mut Node, key: &str, value: String) {
+pub(super) fn put(node: &mut Node, key: &str, value: String) {
     node.children.insert(
         key.into(),
         Node {

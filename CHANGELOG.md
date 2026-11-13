@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0 - 2026-11-14
+
+### Added
+- Uninstall games: press Delete in the TUI (with confirmation) or run `steam-tui uninstall APPID [--yes]`. Removal is local (no login, no Steam client), crash-safe, and refuses while Steam or the game runs. It deletes the game files, appmanifest, library entry, install staging and shader cache, and keeps the Proton prefix (saves), workshop items and preserved originals. Queued update jobs of the game are cancelled.
+
 ## 0.4.9 - 2026-11-13
 
 ### Fixed

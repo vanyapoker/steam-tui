@@ -645,6 +645,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, model: &mut Model) {
     if model.quit_confirm {
         quit_modal(frame, model);
     }
+    if model.uninstall_confirm.is_some() {
+        uninstall_modal(frame, model);
+    }
 }
 
 /// Splits styled text into a first row of at most `width` cells and the remainder,
@@ -984,6 +987,7 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
     }
     if installed_selected {
         bottom.push(hint(&keys::label(Cmd::Manage), "manage"));
+        bottom.push(hint(&keys::label(Cmd::Uninstall), "uninstall"));
     }
     bottom.push(hint(&keys::label(Cmd::Downloads), "downloads"));
     bottom.push(hint(&keys::label(Cmd::News), "news"));
@@ -1197,6 +1201,7 @@ fn draw_library(frame: &mut Frame<'_>, model: &mut Model, area: Rect) {
         && !model.backend_view
         && !model.settings_view
         && !model.quit_confirm
+        && model.uninstall_confirm.is_none()
         && !model.queue_view
         && model.properties.is_none()
         && model.news.is_none()
@@ -2889,6 +2894,30 @@ fn quit_modal(frame: &mut Frame<'_>, model: &Model) {
             area.width,
             vec![vec![seg("Quit steam-tui?", bold())]],
             vec![hint("Enter", "quit"), hint("Esc", "stay")],
+            Vec::new(),
+        )),
+        area,
+    );
+}
+
+fn uninstall_modal(frame: &mut Frame<'_>, model: &Model) {
+    let Some(game) = &model.uninstall_confirm else {
+        return;
+    };
+    let area = modal_area(frame.area(), 70, 9);
+    open_modal(frame, area);
+    let lines = vec![
+        Line::from(game.install_dir.display().to_string()),
+        Line::from(""),
+        Line::from("Deletes the game files and its library entry."),
+        Line::from("Kept: Proton prefix (saves), workshop items."),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(panel_block(
+            theme::panel_border(Panel::Overlay, true),
+            area.width,
+            vec![vec![seg(format!("Uninstall {}?", game.name), bold())]],
+            vec![hint("Enter", "uninstall"), hint("Esc", "cancel")],
             Vec::new(),
         )),
         area,

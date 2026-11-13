@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "Usage: steam-tui [--account NAME] [command]\n\nWith no command, open the TUI using the latest successful account.\nCommands:\n  tui [--offline]          Friends and installed games (default)\n  notifications            Show all recent account notifications\n  discover                 Query Steam's server directory (no account)\n  inspect-app <appid>       Fetch public app metadata (anonymous session)\n  login [--ephemeral]       Sign in; reuse/store a Secret Service refresh token\n  library [FILTER] [--ephemeral]  List licensed games as APPID: name; filter names case insensitively\n  install <appid> [--library PATH]  Install or update a game without the TUI\n  backend <appid> [--ephemeral]  Experimental client backend (explicit --account required)\n  launch <appid> [--valve-host] [--installed]  Launch built-in, or explicitly use Valve host (explicit --account required)\n  content show|branch|language|dlc|launch-option|unlock  Inspect or select game content\n  jobs list|add|run|pause|resume|cancel  Persistent update jobs\n  updates show|policy|priority|window|during-games  Update settings\n  shaders show|add|process|prune|clear|budget|enabled  Vulkan pre-caching\n  logout                   Delete this account's local refresh token\n\n--login is an alias for the login command.\n--account NAME selects an account for account commands; login or TUI resume remembers it.\nCredentials stay in Secret Service. --ephemeral bypasses token persistence.\nlogout does not revoke tokens on Steam. Enter/double-click automatically selects Valve host for VAC games and built-in for others; Ctrl+Enter forces Valve host.";
+const USAGE: &str = "Usage: steam-tui [--account NAME] [command]\n\nWith no command, open the TUI using the latest successful account.\nCommands:\n  tui [--offline]          Friends and installed games (default)\n  notifications            Show all recent account notifications\n  discover                 Query Steam's server directory (no account)\n  inspect-app <appid>       Fetch public app metadata (anonymous session)\n  login [--ephemeral]       Sign in; reuse/store a Secret Service refresh token\n  library [FILTER] [--ephemeral]  List licensed games as APPID: name; filter names case insensitively\n  install <appid> [--library PATH]  Install or update a game without the TUI\n  uninstall <appid> [--yes]  Remove an installed game (no login; keeps saves and workshop items)\n  backend <appid> [--ephemeral]  Experimental client backend (explicit --account required)\n  launch <appid> [--valve-host] [--installed]  Launch built-in, or explicitly use Valve host (explicit --account required)\n  content show|branch|language|dlc|launch-option|unlock  Inspect or select game content\n  jobs list|add|run|pause|resume|cancel  Persistent update jobs\n  updates show|policy|priority|window|during-games  Update settings\n  shaders show|add|process|prune|clear|budget|enabled  Vulkan pre-caching\n  logout                   Delete this account's local refresh token\n\n--login is an alias for the login command.\n--account NAME selects an account for account commands; login or TUI resume remembers it.\nCredentials stay in Secret Service. --ephemeral bypasses token persistence.\nlogout does not revoke tokens on Steam. Enter/double-click automatically selects Valve host for VAC games and built-in for others; Ctrl+Enter forces Valve host.";
 
 #[derive(Debug, PartialEq)]
 enum Command {
@@ -42,6 +42,10 @@ enum Command {
         app_id: u32,
         library: Option<PathBuf>,
     },
+    Uninstall {
+        app_id: u32,
+        yes: bool,
+    },
     Login {
         ephemeral: bool,
     },
@@ -65,6 +69,7 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
     let mut ephemeral = false;
     let mut valve_host = false;
     let mut installed = false;
+    let mut yes = false;
     let mut library_path = None;
     let mut index = 0;
     while index < args.len() {
@@ -83,6 +88,7 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
             "--ephemeral" if !ephemeral => ephemeral = true,
             "--valve-host" if !valve_host => valve_host = true,
             "--installed" if !installed => installed = true,
+            "--yes" if !yes => yes = true,
             "--library" if library_path.is_none() => {
                 index += 1;
                 let path = args.get(index).ok_or("--library requires a path")?;
@@ -109,17 +115,25 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
             "logout" if command.is_none() => command = Some(Command::Logout),
             "discover" if command.is_none() => command = Some(Command::Discover),
             "notifications" if command.is_none() => command = Some(Command::Notifications),
-            "inspect-app" | "backend" | "launch" | "install" if command.is_none() => {
+            "inspect-app" | "backend" | "launch" | "install" | "uninstall"
+                if command.is_none() =>
+            {
                 let backend = args[index] == "backend";
                 let launch = args[index] == "launch";
                 let install = args[index] == "install";
+                let uninstall = args[index] == "uninstall";
                 index += 1;
                 let id = args
                     .get(index)
                     .and_then(|value| value.parse::<u32>().ok())
                     .filter(|id| *id != 0)
                     .ok_or("appid must be a positive 32-bit integer")?;
-                command = Some(if install {
+                command = Some(if uninstall {
+                    Command::Uninstall {
+                        app_id: id,
+                        yes: false,
+                    }
+                } else if install {
                     Command::Install {
                         app_id: id,
                         library: None,
@@ -184,6 +198,9 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
     if valve_host && !matches!(command, Command::Launch { .. }) {
         return Err("--valve-host is only supported by launch");
     }
+    if yes && !matches!(command, Command::Uninstall { .. }) {
+        return Err("--yes is only supported by uninstall");
+    }
     if library_path.is_some() && !matches!(command, Command::Install { .. }) {
         return Err("--library is only supported by install");
     }
@@ -205,7 +222,7 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
         )
     {
         return Err(
-            "--account is only supported by tui, notifications, login, library, install, backend, launch, and logout",
+            "--account is only supported by tui, notifications, login, library, install, uninstall, backend, launch, and logout",
         );
     }
     let command = match command {
@@ -222,6 +239,7 @@ fn parse(args: &[String]) -> Result<Options, &'static str> {
             valve_host,
             installed,
         },
+        Command::Uninstall { app_id, .. } => Command::Uninstall { app_id, yes },
         other => other,
     };
     Ok(Options { command, account })
@@ -295,6 +313,10 @@ fn library_matches(kind: Option<&str>, name: Option<&str>, filter: Option<&str>)
 async fn run(options: Options) -> Result<(), Box<dyn Error>> {
     let Options { command, account } = options;
     match command {
+        Command::Uninstall { app_id, yes } => {
+            let account = selected_account(account, false)?;
+            content_jobs::uninstall(account.as_deref(), app_id, yes).await?;
+        }
         Command::Help => println!("{USAGE}"),
         Command::Notifications => {
             let account = selected_account(account, false)?
@@ -790,6 +812,27 @@ mod tests {
         ] {
             assert!(parse(&args.into_iter().map(str::to_owned).collect::<Vec<_>>()).is_err());
         }
+    }
+
+    #[test]
+    fn uninstall_parses_yes_and_rejects_misuse() {
+        let p = |args: &[&str]| parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            p(&["uninstall", "440"]).unwrap().command,
+            Command::Uninstall {
+                app_id: 440,
+                yes: false
+            }
+        );
+        assert_eq!(
+            p(&["uninstall", "440", "--yes"]).unwrap().command,
+            Command::Uninstall {
+                app_id: 440,
+                yes: true
+            }
+        );
+        assert!(p(&["install", "440", "--yes"]).is_err());
+        assert!(p(&["uninstall", "0"]).is_err());
     }
 
     #[test]

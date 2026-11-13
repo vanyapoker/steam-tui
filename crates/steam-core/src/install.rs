@@ -38,6 +38,7 @@ mod pipeline;
 #[cfg(test)]
 pub(crate) mod tests;
 mod transaction;
+mod uninstall;
 pub mod workshop;
 
 use crate::catalog::{DepotSpec, InstallPlan};
@@ -121,6 +122,12 @@ pub fn destination(path: &Path) -> Result<Destination> {
 /// A run also performs recovery automatically before opening its stage.
 pub fn recover(destination: &Path) -> Result<()> {
     transaction::recover(destination)
+}
+
+/// Blocking; refuses while Steam or the game runs. Keeps compatdata, workshop
+/// content and preserved originals.
+pub fn uninstall(game: &InstalledGame) -> Result<()> {
+    uninstall::run(game)
 }
 
 fn failure(message: impl Into<String>) -> Error {

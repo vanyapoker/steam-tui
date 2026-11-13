@@ -20,6 +20,18 @@ pub fn local_minute() -> u16 {
     (now.hour() * 60 + now.minute()) as u16
 }
 
+/// Cancels every non-terminal queued job of `app_id` (e.g. after uninstalling it); returns how many.
+pub fn cancel_app_jobs(queue: &Queue, app_id: u32) -> Result<usize> {
+    let mut cancelled = 0;
+    for job in queue.jobs()?.iter().filter(|j| {
+        j.intent.app_id == app_id && !matches!(j.state, JobState::Complete | JobState::Cancelled)
+    }) {
+        queue.control(job.id, JobState::Cancelled)?;
+        cancelled += 1;
+    }
+    Ok(cancelled)
+}
+
 /// Deliberately contains desired content and location, never a frozen install
 /// plan or manifest key. Existing staging and transaction journals supply resume.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -2971,7 +2971,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "steam-client"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "openssl-src",
  "protobuf-src",
@@ -2980,7 +2980,7 @@ dependencies = [
 
 [[package]]
 name = "steam-core"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -3013,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "steam-ipc"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "libc",
  "serde",
@@ -3033,7 +3033,7 @@ dependencies = [
 
 [[package]]
 name = "steam-tui"
-version = "0.4.9"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "crossterm",

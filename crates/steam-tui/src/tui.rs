@@ -110,6 +110,11 @@ impl Drop for Workers {
 // Events are sent a handful of times per session; boxing the snapshots buys nothing.
 #[allow(clippy::large_enum_variant)]
 enum JobEvent {
+    Uninstalled {
+        app_id: u32,
+        name: String,
+        result: Result<(), String>,
+    },
     DownloadNames(Vec<(u32, String)>),
     ChatImage(chat_images::Loaded),
     NewsImage(chat_images::Loaded),
@@ -1583,6 +1588,26 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                         model.status = "Steam Cloud sync needs an online account connection".into();
                                     }
                                 }
+                                Action::Uninstall => {
+                                    let Some(game) = model.pending_uninstall.take() else { model.uninstalling = None; continue };
+                                    if steam_core::launch::is_running(game.app_id) {
+                                        model.uninstalling = None;
+                                        model.status = format!("{} is running; close it before uninstalling", game.name);
+                                        continue;
+                                    }
+                                    let (app_id, name, queue) = (game.app_id, game.name.clone(), queue.clone());
+                                    let updates = job_tx.clone();
+                                    workers.push(tokio::task::spawn_local(async move {
+                                        let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+                                            steam_core::install::uninstall(&game).map_err(|e| e.to_string())?;
+                                            if let Some(queue) = &queue {
+                                                steam_core::updates::cancel_app_jobs(queue, game.app_id).map_err(|e| e.to_string())?;
+                                            }
+                                            Ok(())
+                                        }).await.unwrap_or_else(|e| Err(format!("Uninstall worker failed: {e}")));
+                                        let _ = updates.send(JobEvent::Uninstalled { app_id, name, result }).await;
+                                    }));
+                                }
                             }
                         }
                         Some(Ok(Event::Paste(text))) => model.chat_paste(&text),
@@ -1850,6 +1875,17 @@ async fn run_local(account: Option<String>, offline: bool) -> Result<(), Box<dyn
                                     Err(error) => modal.error = Some(error),
                                 }
                             }
+                        }
+                        JobEvent::Uninstalled { app_id, name, result } => {
+                            model.uninstalling = None;
+                            let message = match result {
+                                Ok(()) => format!("Uninstalled {name}"),
+                                Err(error) => format!("Uninstall [{app_id}] failed: {error}"),
+                            };
+                            model.status = message.clone();
+                            model.loading = true;
+                            catalog_generation += 1;
+                            scan(ScanJob { connection: connection.clone(), account: account.clone(), completion: Some(message), generation: catalog_generation, active_library: None, interim: false, awaiting_login: false }, job_tx.clone(), &mut workers);
                         }
                         JobEvent::Installed { app_id, shader, result } => {
                             let finished_queue = active_queue.take();

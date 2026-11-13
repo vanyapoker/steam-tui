@@ -250,6 +250,46 @@ fn pick_destination(destinations: &[Destination], required_bytes: u64) -> Result
     choose_destination(&mut input, &mut tty, destinations, required_bytes)
 }
 
+pub async fn uninstall(account: Option<&str>, app_id: u32, yes: bool) -> Result {
+    let inventory = steam_core::installed::scan(None, account).map_err(|e| e.to_string())?;
+    let game = inventory
+        .games
+        .into_iter()
+        .find(|game| game.app_id == app_id)
+        .ok_or("that app is not installed")?;
+    if !yes {
+        let mut tty = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .map_err(|_| "uninstall needs an interactive terminal or --yes")?;
+        write!(
+            tty,
+            "Uninstall {} ({app_id}) from {}? This deletes {}. Saves in the Proton prefix and workshop items are kept. Type the app id to confirm: ",
+            terminal_text(&game.name),
+            game.library_root.display(),
+            game.install_dir.display()
+        )?;
+        tty.flush()?;
+        let mut input = BufReader::new(tty);
+        if read_selection(&mut input)? != app_id.to_string() {
+            return Err("uninstall cancelled".into());
+        }
+    }
+    let name = game.name.clone();
+    tokio::task::spawn_blocking(move || steam_core::install::uninstall(&game))
+        .await
+        .map_err(|e| format!("Uninstall worker failed: {e}"))?
+        .map_err(|e| e.to_string())?;
+    if let Some(account) = account
+        && let Ok(queue) = Queue::open(account)
+    {
+        steam_core::updates::cancel_app_jobs(&queue, app_id).map_err(|e| e.to_string())?;
+    }
+    println!("Uninstalled {} ({app_id})", terminal_text(&name));
+    Ok(())
+}
+
 pub async fn install(account: &str, app_id: u32, library: Option<PathBuf>) -> Result {
     let connection = steam_core::account::login(account, false).await?;
     let inventory = steam_core::installed::scan(None, Some(account)).map_err(|e| e.to_string())?;

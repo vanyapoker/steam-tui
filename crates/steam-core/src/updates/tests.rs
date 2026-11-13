@@ -12,6 +12,23 @@ fn intent(id: u32) -> Intent {
     }
 }
 #[test]
+fn cancel_app_jobs_cancels_only_that_apps_open_jobs() {
+    let temp = Temp::new();
+    let q = Queue::in_directory(temp.path(), "account").unwrap();
+    let done = q.enqueue(intent(10), false).unwrap();
+    let lease = q.lease().unwrap();
+    q.claim(&lease, 1, false).unwrap();
+    q.finish(done, JobState::Complete, None).unwrap();
+    drop(lease);
+    let open = q.enqueue(intent(10), false).unwrap();
+    assert_ne!(open, done);
+    let other = q.enqueue(intent(20), false).unwrap();
+    assert_eq!(cancel_app_jobs(&q, 10).unwrap(), 1);
+    assert_eq!(q.job(open).unwrap().unwrap().state, JobState::Cancelled);
+    assert_eq!(q.job(done).unwrap().unwrap().state, JobState::Complete);
+    assert_eq!(q.job(other).unwrap().unwrap().state, JobState::Pending);
+}
+#[test]
 fn restart_dedup_priority_and_account_isolation() {
     let temp = Temp::new();
     let q = Queue::in_directory(temp.path(), "Account").unwrap();

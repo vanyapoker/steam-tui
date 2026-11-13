@@ -69,6 +69,7 @@ pub(super) enum Cmd {
     ValveHost,
     LaunchInstalled,
     Update,
+    Uninstall,
     Pause,
     Cancel,
     Manage,
@@ -188,6 +189,13 @@ pub(super) static BINDINGS: &[Binding] = &[
         Any,
         Library,
         "Update the selected installed game",
+    ),
+    bind(
+        Cmd::Uninstall,
+        &[Code(KeyCode::Delete)],
+        Any,
+        Library,
+        "Uninstall the selected game after confirmation; Proton prefix (saves) and workshop items are kept",
     ),
     bind(
         Cmd::Pause,
@@ -652,6 +660,7 @@ mod tests {
         assert_eq!(label(Cmd::Activate), "Enter");
         assert_eq!(label(Cmd::ValveHost), "Ctrl+Enter");
         assert_eq!(label(Cmd::Update), "u");
+        assert_eq!(label(Cmd::Uninstall), "Delete");
         assert_eq!(label(Cmd::Up), "↑");
         assert_eq!(label(Cmd::PageDown), "PgDn");
     }

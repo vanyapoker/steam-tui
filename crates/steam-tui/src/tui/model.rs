@@ -284,6 +284,7 @@ pub(super) enum Action {
     UnlockBranch,
     ToggleDlc(u32, bool),
     Install,
+    Uninstall,
     /// Manual Steam Cloud sync (download, then upload) of the selected game.
     CloudSync,
     ResolveCloud,
@@ -409,6 +410,12 @@ pub(super) struct Model {
     pub launching: std::collections::HashSet<u32>,
     /// Games with a manual Steam Cloud sync in flight.
     pub cloud_busy: std::collections::HashSet<u32>,
+    /// Game awaiting uninstall confirmation.
+    pub uninstall_confirm: Option<InstalledGame>,
+    /// Confirmed game handed to the event loop by `Action::Uninstall`.
+    pub pending_uninstall: Option<InstalledGame>,
+    /// App whose removal worker is running.
+    pub uninstalling: Option<u32>,
     /// Steam Cloud badge per installed game with cloud configured; computed off
     /// the UI thread at load and after each sync.
     pub cloud_badges: HashMap<u32, CloudBadge>,
@@ -566,6 +573,9 @@ impl Model {
             running_games: Default::default(),
             launching: std::collections::HashSet::new(),
             cloud_busy: std::collections::HashSet::new(),
+            uninstall_confirm: None,
+            pending_uninstall: None,
+            uninstalling: None,
             cloud_badges: HashMap::new(),
             cloud_last: HashMap::new(),
             pending_launch: None,
@@ -1256,6 +1266,7 @@ impl Model {
             || self.backend_view
             || self.settings_view
             || self.quit_confirm
+            || self.uninstall_confirm.is_some()
             || self.queue_view
             || self.properties.is_some()
             || self.cloud_conflicts.is_some()
@@ -1400,6 +1411,9 @@ impl Model {
         }
         if self.quit_confirm {
             return self.quit_key(key);
+        }
+        if self.uninstall_confirm.is_some() {
+            return self.uninstall_key(key);
         }
         if let Some(friend) = self.chat.active {
             if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1751,10 +1765,31 @@ impl Model {
     }
 
     fn quit_busy(&self) -> bool {
-        self.install_active
+        self.uninstalling.is_some()
+            || self.install_active
             || self.preparing_install
             || !self.running_games.is_empty()
             || !self.launching.is_empty()
+    }
+
+    fn uninstall_key(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y' | 'Y') => {
+                let Some(game) = self.uninstall_confirm.take() else {
+                    return Action::None;
+                };
+                self.uninstalling = Some(game.app_id);
+                self.status = format!("Uninstalling {}…", game.name);
+                self.pending_uninstall = Some(game);
+                Action::Uninstall
+            }
+            KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+                self.uninstall_confirm = None;
+                self.status = "Uninstall cancelled".into();
+                Action::None
+            }
+            _ => Action::None,
+        }
     }
 
     fn quit_key(&mut self, key: KeyEvent) -> Action {
@@ -1906,6 +1941,7 @@ impl Model {
                 self.status = "Install the game before launching it".into();
             }
             Cmd::Update => return self.request_install(true),
+            Cmd::Uninstall => return self.request_uninstall(),
             Cmd::Pause if self.install_active => {
                 return self.toggle_pause_at(Instant::now());
             }
@@ -2083,6 +2119,13 @@ impl Model {
             self.status = "A launch is waiting for its dependency installation to finish".into();
             return None;
         }
+        if let Some(game) = self
+            .selected_game()
+            .filter(|game| self.uninstalling == Some(game.app_id))
+        {
+            self.status = format!("{} is being uninstalled", game.name);
+            return None;
+        }
         let backend = if force_host
             || self.launch_host == LaunchHost::ValveHost
             || self
@@ -2136,6 +2179,8 @@ impl Model {
             Some("Steam Cloud sync needs an installed game".to_owned())
         } else if self.launching.contains(&id) {
             Some("Wait for the launch request to finish before syncing Steam Cloud".to_owned())
+        } else if self.uninstalling == Some(id) {
+            Some(format!("{name} is being uninstalled"))
         } else if self.cloud_busy.contains(&id) {
             Some(format!("Steam Cloud is already syncing {name}"))
         } else if self
@@ -2156,7 +2201,41 @@ impl Model {
         Action::CloudSync
     }
 
+    /// Delete: ask for confirmation before removing the selected installed game.
+    fn request_uninstall(&mut self) -> Action {
+        let Some(game) = self.selected_game() else {
+            self.status = "No game is selected".into();
+            return Action::None;
+        };
+        let Some(installed) = game.installed.clone() else {
+            self.status = "Select an installed game to uninstall".into();
+            return Action::None;
+        };
+        let (id, name) = (game.app_id, game.name.clone());
+        let refusal = if self.install_active || self.preparing_install {
+            Some("Wait for the installation job to finish before uninstalling".to_owned())
+        } else if self.uninstalling.is_some() {
+            Some("An uninstall is already in progress".to_owned())
+        } else if self.launching.contains(&id) || self.cloud_busy.contains(&id) {
+            Some(format!(
+                "Wait for the launch or Steam Cloud sync to finish before uninstalling {name}"
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = refusal {
+            self.status = message;
+            return Action::None;
+        }
+        self.uninstall_confirm = Some(installed);
+        Action::None
+    }
+
     fn request_install(&mut self, update: bool) -> Action {
+        if self.uninstalling.is_some() {
+            self.status = "Wait for the uninstall to finish".into();
+            return Action::None;
+        }
         if self.install_active || self.preparing_install {
             self.status = "An installation job is already in progress".into();
             return Action::None;
@@ -2378,6 +2457,35 @@ mod tests {
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn delete_confirms_then_uninstalls_and_blocks_conflicting_actions() {
+        let mut model = loaded();
+        let id = model.selected_game().unwrap().app_id;
+        assert_eq!(model.key(press(KeyCode::Delete)), Action::None);
+        assert_eq!(model.uninstall_confirm.as_ref().map(|g| g.app_id), Some(id));
+        assert_eq!(model.key(press(KeyCode::Esc)), Action::None);
+        assert!(model.uninstall_confirm.is_none());
+        assert_eq!(model.status, "Uninstall cancelled");
+
+        model.key(press(KeyCode::Delete));
+        assert_eq!(model.key(press(KeyCode::Enter)), Action::Uninstall);
+        assert_eq!(model.uninstalling, Some(id));
+        assert_eq!(model.pending_uninstall.as_ref().map(|g| g.app_id), Some(id));
+        assert_eq!(model.key(key('u')), Action::None);
+        assert_eq!(model.status, "Wait for the uninstall to finish");
+        model.key(press(KeyCode::Delete));
+        assert!(model.uninstall_confirm.is_none());
+    }
+
+    #[test]
+    fn delete_is_refused_while_an_installation_job_runs() {
+        let mut model = loaded();
+        model.install_active = true;
+        assert_eq!(model.key(press(KeyCode::Delete)), Action::None);
+        assert!(model.uninstall_confirm.is_none());
+        assert!(model.status.contains("Wait for the installation job"));
     }
 
     #[test]
