@@ -111,6 +111,18 @@ where
     first_error.into_inner().map_or(Ok(()), Err)
 }
 
+/// An existing install file whose content hash decides, once all hashes are
+/// known, whether a user modification is preserved or an obsolete file removed.
+struct PendingHash {
+    /// Position of the journal operation the answer applies to.
+    index: usize,
+    target: PathBuf,
+    size: u64,
+    sha1: Option<[u8; 20]>,
+    /// The operation removes the file only when its hash still matches.
+    removal: bool,
+}
+
 fn create_dirs(base: &Path, relative: &Path) -> Result<()> {
     make_dirs(base, relative, true)
 }
@@ -659,9 +671,11 @@ impl Session {
         Ok(false)
     }
 
-    /// Reflinks a verified old chunk into the stage. The staged bytes are read
-    /// back and verified before they are trusted; any failure leaves the caller
-    /// to write the chunk normally.
+    /// Reflinks an already verified old chunk into the stage. The clone shares
+    /// the verified blocks, and a resumed install re-reads every staged chunk
+    /// before trusting it, so nothing is read back here: reflinked files do not
+    /// share page cache, so a read-back would double the disk reads. `false`
+    /// leaves the caller to write the chunk normally.
     fn clone_chunk(
         &self,
         source: &Path,
@@ -681,7 +695,7 @@ impl Session {
             &target,
             chunk.offset,
             u64::from(chunk.uncompressed_size),
-        ) && fsafe::read_chunk(staged, chunk, chunk.offset).is_ok_and(|read| read.is_some())
+        )
     }
 
     /// Writes one verified chunk. There is deliberately no fsync here: a staged
@@ -1102,6 +1116,7 @@ impl Session {
                 std::process::id()
             ),
         };
+        let mut pending: Vec<PendingHash> = Vec::new();
         for planned in layout.active_files() {
             let file = &planned.file;
             let target = fsafe::checked(&self.steamapps, &prefix.join(&file.path), false)?;
@@ -1153,7 +1168,15 @@ impl Session {
                 } else if meta.is_file() {
                     match layout.old_files.get(&file.path) {
                         Some(old) if old.flags & (64 | 512) == 0 => {
-                            fsafe::hash_file(&target, old.size)? != old.sha1
+                            // Hashed in parallel after every operation is listed.
+                            pending.push(PendingHash {
+                                index: journal.operations.len(),
+                                target,
+                                size: old.size,
+                                sha1: old.sha1,
+                                removal: false,
+                            });
+                            false
                         }
                         _ => true,
                     }
@@ -1182,8 +1205,15 @@ impl Session {
                 old.link_target
                     .as_ref()
                     .is_some_and(|link| fs::read_link(&target).ok().as_ref() == Some(link))
-            } else if meta.is_file() && old.flags & 512 == 0 {
-                old.sha1.is_some() && fsafe::hash_file(&target, old.size)? == old.sha1
+            } else if meta.is_file() && old.flags & 512 == 0 && old.sha1.is_some() {
+                pending.push(PendingHash {
+                    index: journal.operations.len(),
+                    target,
+                    size: old.size,
+                    sha1: old.sha1,
+                    removal: true,
+                });
+                true
             } else {
                 false
             };
@@ -1198,6 +1228,35 @@ impl Session {
                 existed: true,
                 preserve: false,
                 remove: true,
+            });
+        }
+        // Whole-file hashes of the old install are independent reads, so they run
+        // on all cores instead of one file after another.
+        let hashes: Vec<std::sync::OnceLock<Option<[u8; 20]>>> =
+            pending.iter().map(|_| std::sync::OnceLock::new()).collect();
+        parallel(pending.len(), |index| {
+            let job = &pending[index];
+            let hash = fsafe::hash_file(&job.target, job.size)?;
+            let _ = hashes[index].set(hash);
+            Ok(())
+        })?;
+        let mut kept_files = std::collections::HashSet::new();
+        for (job, hash) in pending.iter().zip(&hashes) {
+            let hash = *hash.get().expect("every pending hash was computed");
+            if job.removal {
+                if hash != job.sha1 {
+                    kept_files.insert(job.index);
+                }
+            } else {
+                journal.operations[job.index].preserve = hash != job.sha1;
+            }
+        }
+        if !kept_files.is_empty() {
+            let mut position = 0;
+            journal.operations.retain(|_| {
+                let keep = !kept_files.contains(&position);
+                position += 1;
+                keep
             });
         }
         journal.operations.push(Operation {

@@ -13,11 +13,13 @@
 //! manifest IDs, normal CDN TLS, filename/payload checks and chunk/file hashes.
 
 pub(crate) mod delta;
+mod digest;
 mod formats;
 #[cfg(test)]
 mod tests;
 
 use crate::catalog::DepotSpec;
+pub use digest::{Sha1Stream, adler32, sha1};
 use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::io;
@@ -537,29 +539,15 @@ fn valid_host(host: &str) -> bool {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         })
 }
-/// Steam's checksum differs from RFC Adler32: its initial state is zero.
-pub fn adler32(bytes: &[u8]) -> u32 {
-    let (mut a, mut b) = (0u32, 0u32);
-    for block in bytes.chunks(5552) {
-        for byte in block {
-            a += u32::from(*byte);
-            b += a;
-        }
-        a %= 65521;
-        b %= 65521;
-    }
-    (b << 16) | a
-}
 /// Verify reused local bytes with the same checks as downloaded/decrypted bytes.
 pub fn verify_chunk(chunk: &DepotChunk, bytes: &[u8]) -> Result<()> {
-    use sha1::{Digest, Sha1};
     if bytes.len() != chunk.uncompressed_size as usize {
         return Err(failure("chunk uncompressed length mismatch"));
     }
     if adler32(bytes) != chunk.adler {
         return Err(failure("chunk Adler32 mismatch: content is corrupt"));
     }
-    if Sha1::digest(bytes).as_slice() != chunk.id {
+    if sha1(bytes) != chunk.id {
         return Err(failure("chunk SHA1 mismatch: content is corrupt"));
     }
     Ok(())

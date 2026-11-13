@@ -34,6 +34,7 @@
 //! Proton prefix; Steam-dependent DRM remains a launch limitation.
 mod download;
 pub(crate) mod filesystem;
+mod pipeline;
 #[cfg(test)]
 pub(crate) mod tests;
 mod transaction;
@@ -45,7 +46,6 @@ use crate::content;
 use crate::content::{ContentClient, DepotFile, DepotManifest};
 use crate::installed::InstalledGame;
 use parking_lot::Mutex;
-use sha1::{Digest, Sha1};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::error::Error as StdError;
 use std::path::{Component, Path, PathBuf};
@@ -216,177 +216,273 @@ struct Group {
     prepare: Vec<usize>,
     /// (file index, chunk range) windows to scan and download.
     items: Vec<(usize, std::ops::Range<usize>)>,
+    /// Files whose last window is in this group.
+    complete: Vec<usize>,
     chunks: usize,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn download_group(
-    group: &mut Group,
-    client: &ContentClient,
-    session: &Arc<transaction::Session>,
-    layout: &Arc<Layout>,
-    cancel: &CancellationToken,
-    pause: &PauseGate,
-    progress: &mpsc::Sender<InstallProgress>,
-    status: &mut InstallProgress,
-    last_report: &mut std::time::Instant,
-    ledger: &mut StagedLedger,
-) -> Result<()> {
-    let group = std::mem::take(group);
-    if group.items.is_empty() && group.prepare.is_empty() {
-        return Ok(());
-    }
-    wait_while_paused(pause, cancel).await?;
-    check_cancel(cancel)?;
-    let (s, l, token, items, prepare) = (
-        Arc::clone(session),
-        Arc::clone(layout),
-        cancel.clone(),
-        group.items.clone(),
-        group.prepare,
-    );
-    status.message = "Reusing unchanged data".into();
-    report(progress, status);
-    // One blocking call creates the files and decides, in parallel, which chunks
-    // are already valid; only the missing ones are downloaded.
-    let reused = blocking(move || {
-        for &file_index in &prepare {
-            s.prepare_file(&l.files[file_index].file)?;
+/// Whether the file's content is staged by this install.
+fn is_staged(layout: &Layout, file: &DepotFile) -> bool {
+    !layout
+        .active
+        .as_ref()
+        .is_some_and(|paths| !paths.contains(&file.path))
+        && file.flags & (64 | 512) == 0
+}
+
+/// Walks the layout's files and cuts them into groups. Files are grouped so
+/// many small files share one scan and one download pipeline instead of
+/// paying a blocking round trip and an idle pipeline each.
+struct GroupCursor {
+    layout: Arc<Layout>,
+    file: usize,
+    chunk: usize,
+}
+
+impl GroupCursor {
+    fn next_group(&mut self, cancel: &CancellationToken) -> Result<Option<Group>> {
+        let mut group = Group::default();
+        while let Some(planned) = self.layout.files.get(self.file) {
+            let file = &planned.file;
+            if self.chunk == 0 {
+                check_cancel(cancel)?;
+                if !is_staged(&self.layout, file) {
+                    self.file += 1;
+                    continue;
+                }
+                group.prepare.push(self.file);
+            }
+            let chunks = file.chunks.len();
+            if chunks == 0 {
+                group.complete.push(self.file);
+            }
+            while self.chunk < chunks {
+                let start = self.chunk;
+                let end = (start + SCAN_WINDOW).min(chunks);
+                group.items.push((self.file, start..end));
+                group.chunks += end - start;
+                if end == chunks {
+                    group.complete.push(self.file);
+                }
+                self.chunk = end;
+                if group.chunks >= GROUP_CHUNKS {
+                    if end == chunks {
+                        self.file += 1;
+                        self.chunk = 0;
+                    }
+                    return Ok(Some(group));
+                }
+            }
+            self.file += 1;
+            self.chunk = 0;
         }
-        let windows: Vec<_> = items
-            .iter()
-            .map(|(file_index, range)| (&l.files[*file_index].file, range.clone()))
-            .collect();
-        s.reuse_scan(&windows, &l.reuse, &token)
-    })
-    .await?;
-    let mut missing = Vec::new();
-    for ((file_index, range), flags) in group.items.iter().zip(&reused) {
-        let file = &layout.files[*file_index].file;
-        for (offset, chunk) in file.chunks[range.clone()].iter().enumerate() {
-            if flags[offset] {
-                ledger.mark(*file_index, range.start + offset);
-                status.total_download_bytes -= u64::from(chunk.compressed_size);
-                status.completed_bytes += u64::from(chunk.uncompressed_size);
-            } else {
-                let charge = 2 * chunk.compressed_size as usize + chunk.uncompressed_size as usize;
-                missing.push(((*file_index, range.start + offset), charge));
+        Ok((!group.items.is_empty() || !group.prepare.is_empty()).then_some(group))
+    }
+}
+
+struct ScannedGroup {
+    group: Group,
+    reused: Vec<Vec<bool>>,
+}
+
+struct Installer<'a> {
+    client: &'a ContentClient,
+    session: &'a Arc<transaction::Session>,
+    layout: &'a Arc<Layout>,
+    cancel: &'a CancellationToken,
+    pause: &'a PauseGate,
+    progress: &'a mpsc::Sender<InstallProgress>,
+    status: &'a mut InstallProgress,
+    last_report: &'a mut std::time::Instant,
+    ledger: &'a mut StagedLedger,
+    early: &'a mut Option<EarlyVerifier>,
+    cursor: GroupCursor,
+}
+
+impl pipeline::Stages for Installer<'_> {
+    type Group = Group;
+    type Scanned = ScannedGroup;
+
+    fn next(&mut self) -> Result<Option<Group>> {
+        self.cursor.next_group(self.cancel)
+    }
+
+    fn scan(&self, group: Group) -> tokio::task::JoinHandle<Result<ScannedGroup>> {
+        let (s, l, token) = (
+            Arc::clone(self.session),
+            Arc::clone(self.layout),
+            self.cancel.clone(),
+        );
+        // One blocking call creates the files and decides, in parallel, which
+        // chunks are already valid; only the missing ones are downloaded.
+        tokio::task::spawn_blocking(move || {
+            for &file_index in &group.prepare {
+                s.prepare_file(&l.files[file_index].file)?;
+            }
+            let windows: Vec<_> = group
+                .items
+                .iter()
+                .map(|(file_index, range)| (&l.files[*file_index].file, range.clone()))
+                .collect();
+            let reused = s.reuse_scan(&windows, &l.reuse, &token)?;
+            Ok(ScannedGroup { group, reused })
+        })
+    }
+
+    async fn finish(&mut self, scanned: ScannedGroup) -> Result<()> {
+        let (client, session, layout, cancel, pause, progress) = (
+            self.client,
+            self.session,
+            self.layout,
+            self.cancel,
+            self.pause,
+            self.progress,
+        );
+        if self.last_report.elapsed() >= REUSE_REPORT_INTERVAL {
+            self.status.message = "Reusing unchanged data".into();
+            report(progress, self.status);
+        }
+        let ScannedGroup { mut group, reused } = scanned;
+        let complete = std::mem::take(&mut group.complete);
+        let mut missing = Vec::new();
+        for ((file_index, range), flags) in group.items.iter().zip(&reused) {
+            let file = &layout.files[*file_index].file;
+            for (offset, chunk) in file.chunks[range.clone()].iter().enumerate() {
+                if flags[offset] {
+                    self.ledger.mark(*file_index, range.start + offset);
+                    self.status.total_download_bytes -= u64::from(chunk.compressed_size);
+                    self.status.completed_bytes += u64::from(chunk.uncompressed_size);
+                } else {
+                    let charge =
+                        2 * chunk.compressed_size as usize + chunk.uncompressed_size as usize;
+                    missing.push(((*file_index, range.start + offset), charge));
+                }
             }
         }
-    }
-    if last_report.elapsed() >= REUSE_REPORT_INTERVAL || missing.is_empty() {
-        status.message = "Checked staged data".into();
+        if self.last_report.elapsed() >= REUSE_REPORT_INTERVAL || missing.is_empty() {
+            self.status.message = "Checked staged data".into();
+            report(progress, self.status);
+            *self.last_report = std::time::Instant::now();
+        }
+        let mut candidates = BTreeMap::<u32, (DepotSpec, u64)>::new();
+        for ((file_index, chunk_index), _) in &missing {
+            let planned = &layout.files[*file_index];
+            candidates
+                .entry(planned.depot.depot_id)
+                .or_insert_with(|| (planned.depot.clone(), 0))
+                .1 += u64::from(planned.file.chunks[*chunk_index].compressed_size);
+        }
+        let mut patches = BTreeMap::new();
+        for (id, (depot, missing_bytes)) in candidates {
+            if let Some(source) = session.source_manifest(id) {
+                let (patch, downloaded) =
+                    client.patch(&depot, source, missing_bytes, cancel).await?;
+                self.status.downloaded_bytes += downloaded;
+                self.status.total_download_bytes += downloaded;
+                if let Some(patch) = patch {
+                    patches.insert(id, patch);
+                }
+            }
+        }
+        // Reserve source and dictionary copies as well as the ordinary chunk's
+        // buffers. Large reconstructions that do not fit use ordinary chunks.
+        for ((file_index, chunk_index), charge) in &mut missing {
+            let planned = &layout.files[*file_index];
+            let chunk = &planned.file.chunks[*chunk_index];
+            if let Some(source) = patches
+                .get(&planned.depot.depot_id)
+                .and_then(|p| p.entry(&chunk.id))
+                .and_then(|e| layout.reuse.get(&e.source))
+            {
+                let extra = 3 * source.size as usize;
+                if *charge + extra <= download::BUFFER_BUDGET {
+                    *charge += extra;
+                }
+            }
+        }
+        let ledger = &mut *self.ledger;
+        let status = &mut *self.status;
+        let last_report = &mut *self.last_report;
+        download::run(
+            missing,
+            cancel,
+            pause,
+            |(file_index, chunk_index)| {
+                let token = cancel.clone();
+                let (s, l) = (Arc::clone(session), Arc::clone(layout));
+                let patches = &patches;
+                async move {
+                    let planned = &l.files[file_index];
+                    let chunk = &planned.file.chunks[chunk_index];
+                    let patched = if let Some(patch) = patches.get(&planned.depot.depot_id)
+                        && let Some(entry) = patch.entry(&chunk.id)
+                        && let Some(source) = l.reuse.get(&entry.source)
+                        && 2 * chunk.compressed_size as usize
+                            + chunk.uncompressed_size as usize
+                            + 3 * source.size as usize
+                            <= download::BUFFER_BUDGET
+                    {
+                        let (patch, source, target, hash, session) = (
+                            Arc::clone(patch),
+                            source.clone(),
+                            chunk.clone(),
+                            entry.source,
+                            Arc::clone(&s),
+                        );
+                        blocking(move || {
+                            let Some(bytes) = session.patch_source(&source, &hash)? else {
+                                return Ok(None);
+                            };
+                            Ok(patch.reconstruct(&target, &bytes).ok())
+                        })
+                        .await
+                        .unwrap_or(None)
+                    } else {
+                        None
+                    };
+                    check_cancel(&token)?;
+                    let (bytes, downloaded) = match patched {
+                        Some(bytes) => (bytes, 0),
+                        None => (
+                            client.chunk(&planned.depot, chunk, &token).await?,
+                            u64::from(chunk.compressed_size),
+                        ),
+                    };
+                    blocking(move || {
+                        check_cancel(&token)?;
+                        let file = &l.files[file_index].file;
+                        s.write_downloaded_chunk(&file.path, &file.chunks[chunk_index], &bytes)
+                    })
+                    .await?;
+                    Ok((file_index, chunk_index, downloaded))
+                }
+            },
+            |(file_index, chunk_index, downloaded)| {
+                ledger.mark(file_index, chunk_index);
+                let file = &layout.files[file_index].file;
+                let chunk = &file.chunks[chunk_index];
+                status.downloaded_bytes += downloaded;
+                status.total_download_bytes -= u64::from(chunk.compressed_size) - downloaded;
+                status.completed_bytes += u64::from(chunk.uncompressed_size);
+                if last_report.elapsed() >= CHUNK_REPORT_INTERVAL {
+                    status.message = format!("Downloaded {}", file.path.display());
+                    report(progress, status);
+                    *last_report = std::time::Instant::now();
+                }
+            },
+        )
+        .await?;
+        status.message = "Downloaded".into();
         report(progress, status);
         *last_report = std::time::Instant::now();
-    }
-    let mut candidates = BTreeMap::<u32, (DepotSpec, u64)>::new();
-    for ((file_index, chunk_index), _) in &missing {
-        let planned = &layout.files[*file_index];
-        candidates
-            .entry(planned.depot.depot_id)
-            .or_insert_with(|| (planned.depot.clone(), 0))
-            .1 += u64::from(planned.file.chunks[*chunk_index].compressed_size);
-    }
-    let mut patches = BTreeMap::new();
-    for (id, (depot, missing_bytes)) in candidates {
-        if let Some(source) = session.source_manifest(id) {
-            let (patch, downloaded) = client.patch(&depot, source, missing_bytes, cancel).await?;
-            status.downloaded_bytes += downloaded;
-            status.total_download_bytes += downloaded;
-            if let Some(patch) = patch {
-                patches.insert(id, patch);
-            }
+        // The group is fully written: with full verification its finished
+        // files can be hashed now, while the next group downloads.
+        if let Some(early) = self.early.as_mut() {
+            complete.into_iter().for_each(|index| early.submit(index));
+            early.reap()?;
         }
+        Ok(())
     }
-    // Reserve source and dictionary copies as well as the ordinary chunk's
-    // buffers. Large reconstructions that do not fit use ordinary chunks.
-    for ((file_index, chunk_index), charge) in &mut missing {
-        let planned = &layout.files[*file_index];
-        let chunk = &planned.file.chunks[*chunk_index];
-        if let Some(source) = patches
-            .get(&planned.depot.depot_id)
-            .and_then(|p| p.entry(&chunk.id))
-            .and_then(|e| layout.reuse.get(&e.source))
-        {
-            let extra = 3 * source.size as usize;
-            if *charge + extra <= download::BUFFER_BUDGET {
-                *charge += extra;
-            }
-        }
-    }
-    download::run(
-        missing,
-        cancel,
-        pause,
-        |(file_index, chunk_index)| {
-            let token = cancel.clone();
-            let (s, l) = (Arc::clone(session), Arc::clone(layout));
-            let patches = &patches;
-            async move {
-                let planned = &l.files[file_index];
-                let chunk = &planned.file.chunks[chunk_index];
-                let patched = if let Some(patch) = patches.get(&planned.depot.depot_id)
-                    && let Some(entry) = patch.entry(&chunk.id)
-                    && let Some(source) = l.reuse.get(&entry.source)
-                    && 2 * chunk.compressed_size as usize
-                        + chunk.uncompressed_size as usize
-                        + 3 * source.size as usize
-                        <= download::BUFFER_BUDGET
-                {
-                    let (patch, source, target, hash, session) = (
-                        Arc::clone(patch),
-                        source.clone(),
-                        chunk.clone(),
-                        entry.source,
-                        Arc::clone(&s),
-                    );
-                    blocking(move || {
-                        let Some(bytes) = session.patch_source(&source, &hash)? else {
-                            return Ok(None);
-                        };
-                        Ok(patch.reconstruct(&target, &bytes).ok())
-                    })
-                    .await
-                    .unwrap_or(None)
-                } else {
-                    None
-                };
-                check_cancel(&token)?;
-                let (bytes, downloaded) = match patched {
-                    Some(bytes) => (bytes, 0),
-                    None => (
-                        client.chunk(&planned.depot, chunk, &token).await?,
-                        u64::from(chunk.compressed_size),
-                    ),
-                };
-                blocking(move || {
-                    check_cancel(&token)?;
-                    let file = &l.files[file_index].file;
-                    s.write_downloaded_chunk(&file.path, &file.chunks[chunk_index], &bytes)
-                })
-                .await?;
-                Ok((file_index, chunk_index, downloaded))
-            }
-        },
-        |(file_index, chunk_index, downloaded)| {
-            ledger.mark(file_index, chunk_index);
-            let file = &layout.files[file_index].file;
-            let chunk = &file.chunks[chunk_index];
-            status.downloaded_bytes += downloaded;
-            status.total_download_bytes -= u64::from(chunk.compressed_size) - downloaded;
-            status.completed_bytes += u64::from(chunk.uncompressed_size);
-            if last_report.elapsed() >= CHUNK_REPORT_INTERVAL {
-                status.message = format!("Downloaded {}", file.path.display());
-                report(progress, status);
-                *last_report = std::time::Instant::now();
-            }
-        },
-    )
-    .await?;
-    status.message = "Downloaded".into();
-    report(progress, status);
-    *last_report = std::time::Instant::now();
-    Ok(())
 }
 
 /// Live counters shared between the verification worker threads and the async
@@ -1081,81 +1177,37 @@ async fn run_inner(
     status.phase = InstallPhase::Downloading;
     // Files are grouped so many small files share one scan and one download
     // pipeline instead of paying a blocking round trip and an idle pipeline each.
-    let mut group = Group::default();
     let mut last_report = std::time::Instant::now();
     let verify = Arc::new(VerifyProgress::default());
     let mode = VerifyMode::from_environment();
     let mut early =
         (mode == VerifyMode::Full).then(|| EarlyVerifier::new(&session, &layout, cancel, &verify));
-    let mut complete: Vec<usize> = Vec::new();
     let mut ledger = StagedLedger::default();
     for (file_index, planned) in layout.files.iter().enumerate() {
-        check_cancel(cancel)?;
-        let file = &planned.file;
-        if layout
-            .active
-            .as_ref()
-            .is_some_and(|paths| !paths.contains(&file.path))
-        {
-            continue;
-        }
-        if file.flags & (64 | 512) != 0 {
-            continue;
-        }
-        group.prepare.push(file_index);
-        let chunks = file.chunks.len();
-        ledger.expect(file_index, chunks);
-        let mut start = 0;
-        while start < chunks {
-            let end = (start + SCAN_WINDOW).min(chunks);
-            group.items.push((file_index, start..end));
-            group.chunks += end - start;
-            if end == chunks {
-                complete.push(file_index);
-            }
-            start = end;
-            if group.chunks >= GROUP_CHUNKS {
-                download_group(
-                    &mut group,
-                    &client,
-                    &session,
-                    &layout,
-                    cancel,
-                    pause,
-                    progress,
-                    status,
-                    &mut last_report,
-                    &mut ledger,
-                )
-                .await?;
-                // The group is fully written: with full verification its
-                // finished files can be hashed now, while the next group
-                // downloads.
-                if let Some(early) = early.as_mut() {
-                    complete.drain(..).for_each(|index| early.submit(index));
-                    early.reap()?;
-                } else {
-                    complete.clear();
-                }
-            }
+        if is_staged(&layout, &planned.file) {
+            ledger.expect(file_index, planned.file.chunks.len());
         }
     }
-    download_group(
-        &mut group,
-        &client,
-        &session,
-        &layout,
+    // While one group downloads, the next is already being scanned.
+    let mut installer = Installer {
+        client: &client,
+        session: &session,
+        layout: &layout,
         cancel,
         pause,
         progress,
-        status,
-        &mut last_report,
-        &mut ledger,
-    )
-    .await?;
-    if let Some(early) = early.as_mut() {
-        complete.drain(..).for_each(|index| early.submit(index));
-    }
+        status: &mut *status,
+        last_report: &mut last_report,
+        ledger: &mut ledger,
+        early: &mut early,
+        cursor: GroupCursor {
+            layout: Arc::clone(&layout),
+            file: 0,
+            chunk: 0,
+        },
+    };
+    pipeline::run(&mut installer, pause, cancel).await?;
+    drop(installer);
     // Valve's commit asserts the same: every chunk must be accounted for.
     ledger.ensure_complete(&layout)?;
     status.phase = InstallPhase::Verifying;
@@ -1257,5 +1309,5 @@ async fn poll_verify<T>(
 }
 
 fn hash_bytes(bytes: &[u8]) -> [u8; 20] {
-    Sha1::digest(bytes).into()
+    crate::content::sha1(bytes)
 }

@@ -907,7 +907,10 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
-        assert_eq!(fs::read(store.item_dir(5).join("old")).unwrap(), b"old data");
+        assert_eq!(
+            fs::read(store.item_dir(5).join("old")).unwrap(),
+            b"old data"
+        );
         assert_eq!(store.installed().unwrap().get(&5), Some(&item));
         assert!(!previous.exists());
     }

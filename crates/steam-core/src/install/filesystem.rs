@@ -1,6 +1,5 @@
 use super::{Destination, Result, failure};
 use crate::content::{self, DepotChunk};
-use sha1::{Digest, Sha1};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -275,13 +274,24 @@ pub(super) fn clone_range(
     unsafe { libc::ioctl(target.as_raw_fd(), FICLONERANGE as _, &request) == 0 }
 }
 
+/// Read size for whole-file hashing: large enough to keep the disk streaming.
+const HASH_BUFFER: u64 = 1024 * 1024;
+
+/// Whole-file SHA1 with a large buffer and a sequential read-ahead hint.
 pub(super) fn hash_file(path: &Path, size: u64) -> Result<Option<[u8; 20]>> {
     let mut file = regular(path, false, false)?;
     if file.metadata()?.len() != size {
         return Ok(None);
     }
-    let mut hash = Sha1::new();
-    let mut buffer = [0u8; 64 * 1024];
+    if size > 0 {
+        // Advisory only; failure just means no read-ahead hint.
+        // SAFETY: `file` is an open descriptor; the hint reads no memory.
+        unsafe {
+            libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        }
+    }
+    let mut hash = content::Sha1Stream::new();
+    let mut buffer = vec![0u8; size.clamp(1, HASH_BUFFER) as usize];
     loop {
         let length = file.read(&mut buffer)?;
         if length == 0 {
@@ -289,7 +299,7 @@ pub(super) fn hash_file(path: &Path, size: u64) -> Result<Option<[u8; 20]>> {
         }
         hash.update(&buffer[..length]);
     }
-    Ok(Some(hash.finalize().into()))
+    Ok(Some(hash.finalize()))
 }
 
 /// Whole-file SHA1 for staged verification: a 1 MiB buffer sized to the file,
@@ -311,8 +321,8 @@ pub(super) fn hash_file_progress(
             libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
         }
     }
-    let mut hash = Sha1::new();
-    let mut buffer = vec![0u8; size.clamp(1, 1024 * 1024) as usize];
+    let mut hash = content::Sha1Stream::new();
+    let mut buffer = vec![0u8; size.clamp(1, HASH_BUFFER) as usize];
     loop {
         super::check_cancel(cancel)?;
         let length = file.read(&mut buffer)?;
@@ -322,7 +332,7 @@ pub(super) fn hash_file_progress(
         hash.update(&buffer[..length]);
         on_bytes(length as u64);
     }
-    Ok(Some(hash.finalize().into()))
+    Ok(Some(hash.finalize()))
 }
 
 pub(super) fn sync_dir(path: &Path) -> Result<()> {

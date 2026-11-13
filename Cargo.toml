@@ -26,6 +26,8 @@ tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
+aws-lc-rs = "1"
+simd-adler32 = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 bytes = "1"
 steam-vent-crypto = { path = "vendor/steam-vent/crypto" }
